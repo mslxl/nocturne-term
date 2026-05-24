@@ -26,6 +26,7 @@ export const commands = {
 	deleteHost: (id: string) => typedError<null, ConfigError>(__TAURI_INVOKE("delete_host", { id })),
 	setHostDirsCommand: (input: HostDirsInput) => typedError<ConfigRootInfo, ConfigError>(__TAURI_INVOKE("set_host_dirs_command", { input })),
 	removeConfigKey: (input: ConfigKeyPathInput) => typedError<null, ConfigError>(__TAURI_INVOKE("remove_config_key", { input })),
+	showTabBarContextMenu: (input: TabBarContextMenuInput) => typedError<null, ConfigError>(__TAURI_INVOKE("show_tab_bar_context_menu", { input })),
 	refreshAppMenu: () => typedError<null, ConfigError>(__TAURI_INVOKE("refresh_app_menu")),
 	watchConfigCommand: () => typedError<null, ConfigError>(__TAURI_INVOKE("watch_config_command")),
 };
@@ -121,7 +122,12 @@ export type ProfileEntry = {
 	path: string,
 };
 
-export type TabBarOrientation = "horizontal" | "vertical";
+export type TabBarContextMenuInput = {
+	x: number | null,
+	y: number | null,
+};
+
+export type TabBarOrientation = "horizontal" | "vertical_left" | "vertical_right";
 
 export type TerminalCursorStyle = "block" | "underline" | "bar";
 

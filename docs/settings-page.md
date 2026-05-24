@@ -21,7 +21,7 @@ The settings page uses a native-feeling split layout:
 - wide windows show categories on the left and setting rows on the right
 - narrow windows show only categories first, then navigate into a category detail view
 - categories are compact list rows, not web-style cards
-- rows use native-feeling controls: segmented buttons, checkboxes/switches, inputs, textareas, and selects
+- rows use native-feeling controls: segmented buttons, checkboxes/switches, inputs, textareas, selects, and list controls for repeated values
 
 Avoid page transitions and decorative effects. Native settings windows should cut between views and keep interaction immediate.
 
@@ -74,6 +74,29 @@ The main terminal window refreshes:
 - tab bar orientation
 
 Some settings, such as terminal command, args, cwd, and environment-related values, only affect new terminal sessions because existing PTY processes cannot be safely mutated.
+
+## Reusable Controls
+
+Settings rows use small reusable Svelte components under `src/lib/settings/components/`:
+
+- `SettingRow.svelte` owns the label/help/inheritance layout for a single row.
+- `SegmentedControl.svelte` is for compact mutually exclusive choices such as theme, language, renderer, and tab bar placement.
+- `SwitchControl.svelte` is for boolean settings.
+- `HostDirsControl.svelte` is for the host directory list, with `+` opening the native directory picker and `-` removing the selected row.
+
+Keep these controls visually restrained. They should feel like compact desktop settings controls, not web cards. Add focus-visible states for keyboard users and keep pressed/selected states distinct.
+
+## Terminal Tab Bar
+
+The terminal tab bar supports:
+
+- `horizontal`
+- `vertical_left`
+- `vertical_right`
+
+The legacy value `vertical` is accepted by Rust and treated as `vertical_right`.
+
+Right-clicking the tab bar opens a native Tauri popup menu, not a WebView-drawn menu. This preserves native context-menu behavior and avoids browser-style chrome. Menu selections update the active settings target: profile config when the active profile already overrides `terminal.tab_bar_orientation`, otherwise main config.
 
 ## Implementation Notes
 

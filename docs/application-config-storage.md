@@ -285,6 +285,17 @@ vertical = 8
 left = 12
 ```
 
+### Terminal tab bar placement
+
+Terminal tab placement is configured under `terminal.tab_bar_orientation`:
+
+```toml
+[terminal]
+tab_bar_orientation = "horizontal" # horizontal | vertical_left | vertical_right
+```
+
+Older configs that use `"vertical"` remain valid. Rust treats that value as `"vertical_right"` when producing typed settings.
+
 ### Effective config
 
 ```toml
@@ -323,6 +334,7 @@ The host file name is derived from the content hash, not the host name.
 - Native menu and settings/dialog windows: `src-tauri/src/app_shell.rs`
 - Tauri command bindings: `src/lib/bindings.ts`
 - Query-driven UI: `src/routes/+page.svelte`
+- Reusable settings controls: `src/lib/settings/components/`
 - Settings UI: `src/routes/settings/+page.svelte`
 
 This document should be updated whenever the storage contract changes.

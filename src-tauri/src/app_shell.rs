@@ -1,11 +1,14 @@
 use tauri::{
     menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu},
-    AppHandle, Emitter, Manager, Runtime, WebviewUrl, WebviewWindow, WebviewWindowBuilder,
+    AppHandle, Emitter, LogicalPosition, Manager, Runtime, WebviewUrl, WebviewWindow,
+    WebviewWindowBuilder,
 };
 
 use crate::{
     config,
     error::{invalid_error, Result},
+    terminal,
+    types::{TabBarContextMenuInput, TabBarOrientation},
 };
 
 const SETTINGS_WINDOW_LABEL: &str = "settings";
@@ -16,6 +19,10 @@ const MENU_PROFILE_NEW: &str = "file.profile.new";
 const MENU_PROFILE_EDIT: &str = "file.profile.edit";
 const MENU_PROFILE_DELETE: &str = "file.profile.delete";
 const PROFILE_SWITCH_PREFIX: &str = "file.profile.switch.";
+const TAB_BAR_ORIENTATION_PREFIX: &str = "terminal.tab_bar_orientation.";
+const TAB_BAR_ORIENTATION_HORIZONTAL: &str = "terminal.tab_bar_orientation.horizontal";
+const TAB_BAR_ORIENTATION_VERTICAL_LEFT: &str = "terminal.tab_bar_orientation.vertical_left";
+const TAB_BAR_ORIENTATION_VERTICAL_RIGHT: &str = "terminal.tab_bar_orientation.vertical_right";
 const SETTINGS_NAVIGATE_EVENT: &str = "settings://navigate";
 
 pub(crate) fn build_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
@@ -64,6 +71,9 @@ pub(crate) fn handle_menu_event<R: Runtime>(app: &AppHandle<R>, id: &str) {
         open_dialog(app, DialogKind::ProfileDelete)
     } else if let Some(profile) = id.strip_prefix(PROFILE_SWITCH_PREFIX) {
         config::set_active_profile_impl(app, profile.to_string()).and_then(|_| refresh_menu(app))
+    } else if let Some(placement) = id.strip_prefix(TAB_BAR_ORIENTATION_PREFIX) {
+        let orientation = tab_bar_orientation_from_menu_id(placement);
+        orientation.and_then(|value| config::set_effective_tab_bar_orientation(app, value))
     } else {
         Ok(())
     };
@@ -85,11 +95,68 @@ pub(crate) fn refresh_menu<R: Runtime>(app: &AppHandle<R>) -> Result<()> {
     Ok(())
 }
 
+#[tauri::command]
+#[specta::specta]
+pub(crate) fn show_tab_bar_context_menu(
+    app: AppHandle,
+    input: TabBarContextMenuInput,
+) -> Result<()> {
+    let settings = terminal::get_terminal_settings(app.clone())?;
+    let horizontal = CheckMenuItem::with_id(
+        &app,
+        TAB_BAR_ORIENTATION_HORIZONTAL,
+        "Horizontal Tabs",
+        true,
+        settings.tab_bar_orientation == TabBarOrientation::Horizontal,
+        None::<&str>,
+    )
+    .map_err(to_config_error)?;
+    let vertical_left = CheckMenuItem::with_id(
+        &app,
+        TAB_BAR_ORIENTATION_VERTICAL_LEFT,
+        "Vertical Tabs on Left",
+        true,
+        settings.tab_bar_orientation == TabBarOrientation::VerticalLeft,
+        None::<&str>,
+    )
+    .map_err(to_config_error)?;
+    let vertical_right = CheckMenuItem::with_id(
+        &app,
+        TAB_BAR_ORIENTATION_VERTICAL_RIGHT,
+        "Vertical Tabs on Right",
+        true,
+        settings.tab_bar_orientation == TabBarOrientation::VerticalRight,
+        None::<&str>,
+    )
+    .map_err(to_config_error)?;
+    let menu = Menu::with_items(&app, &[&horizontal, &vertical_left, &vertical_right])
+        .map_err(to_config_error)?;
+    let window = app
+        .get_webview_window("main")
+        .ok_or_else(|| invalid_error("main window not found"))?;
+    window
+        .popup_menu_at(&menu, LogicalPosition::new(input.x, input.y))
+        .map_err(to_config_error)
+}
+
+fn tab_bar_orientation_from_menu_id(id: &str) -> Result<TabBarOrientation> {
+    match id {
+        "horizontal" => Ok(TabBarOrientation::Horizontal),
+        "vertical_left" => Ok(TabBarOrientation::VerticalLeft),
+        "vertical_right" => Ok(TabBarOrientation::VerticalRight),
+        _ => Err(invalid_error(format!(
+            "unsupported tab bar placement: {id}"
+        ))),
+    }
+}
+
 fn open_settings<R: Runtime>(app: &AppHandle<R>, mode: &str) -> Result<()> {
     let route = format!("/settings?mode={mode}");
     if let Some(window) = app.get_webview_window(SETTINGS_WINDOW_LABEL) {
         focus_window(&window)?;
-        window.emit(SETTINGS_NAVIGATE_EVENT, route).map_err(to_config_error)?;
+        window
+            .emit(SETTINGS_NAVIGATE_EVENT, route)
+            .map_err(to_config_error)?;
         return Ok(());
     }
 
@@ -141,13 +208,14 @@ fn open_dialog<R: Runtime>(app: &AppHandle<R>, kind: DialogKind) -> Result<()> {
         return focus_window(&window);
     }
 
-    let mut builder = WebviewWindowBuilder::new(app, kind.label(), WebviewUrl::App(kind.route().into()))
-        .title(kind.title())
-        .inner_size(420.0, 210.0)
-        .resizable(false)
-        .maximizable(false)
-        .minimizable(false)
-        .center();
+    let mut builder =
+        WebviewWindowBuilder::new(app, kind.label(), WebviewUrl::App(kind.route().into()))
+            .title(kind.title())
+            .inner_size(420.0, 210.0)
+            .resizable(false)
+            .maximizable(false)
+            .minimizable(false)
+            .center();
 
     if let Some(parent) = app.get_webview_window(SETTINGS_WINDOW_LABEL) {
         builder = builder.parent(&parent).map_err(to_config_error)?;

@@ -280,9 +280,10 @@ fn parse_cursor_style(value: &str) -> Result<TerminalCursorStyle> {
 fn parse_tab_bar_orientation(value: &str) -> Result<TabBarOrientation> {
     match value {
         "horizontal" => Ok(TabBarOrientation::Horizontal),
-        "vertical" => Ok(TabBarOrientation::Vertical),
+        "vertical" | "vertical_right" => Ok(TabBarOrientation::VerticalRight),
+        "vertical_left" => Ok(TabBarOrientation::VerticalLeft),
         _ => Err(invalid_error(
-            "terminal.tab_bar_orientation must be horizontal or vertical",
+            "terminal.tab_bar_orientation must be horizontal, vertical_left, or vertical_right",
         )),
     }
 }
@@ -630,5 +631,18 @@ mod tests {
         assert_eq!(settings.padding.right, 14.0);
         assert_eq!(settings.padding.bottom, 11.0);
         assert_eq!(settings.padding.left, 3.0);
+    }
+
+    #[test]
+    fn parses_tab_bar_orientation_placements() {
+        let horizontal = parse_tab_bar_orientation("horizontal").expect("valid placement");
+        let left = parse_tab_bar_orientation("vertical_left").expect("valid placement");
+        let right = parse_tab_bar_orientation("vertical_right").expect("valid placement");
+        let legacy_vertical = parse_tab_bar_orientation("vertical").expect("legacy placement");
+
+        assert_eq!(horizontal, TabBarOrientation::Horizontal);
+        assert_eq!(left, TabBarOrientation::VerticalLeft);
+        assert_eq!(right, TabBarOrientation::VerticalRight);
+        assert_eq!(legacy_vertical, TabBarOrientation::VerticalRight);
     }
 }

@@ -5,6 +5,7 @@
   "windows": ["main", "settings", "dialog-*"],
   "permissions": [
     "core:default",
+    "dialog:allow-open",
     "opener:default"
   ]
 }

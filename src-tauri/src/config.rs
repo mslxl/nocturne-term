@@ -18,6 +18,7 @@ use crate::{
         AppConfigSnapshot, ConfigDocumentTarget, ConfigKeyPathInput, ConfigRootInfo, ConfigTable,
         ConfigValue, EffectiveConfigDocument, HostConfigDocument, HostDirsInput, HostDocumentInput,
         HostEntry, MainConfigDocument, ProfileConfigDocument, ProfileDocumentInput, ProfileEntry,
+        TabBarOrientation,
     },
 };
 
@@ -365,6 +366,55 @@ fn remove_config_path(table: &mut ConfigTable, path: &[String]) -> Result<bool> 
     remove_config_path_from_values(&mut table.values, path)
 }
 
+fn has_config_path(table: &ConfigTable, path: &[&str]) -> bool {
+    if path.is_empty() {
+        return false;
+    }
+    let mut values = &table.values;
+    for (index, key) in path.iter().enumerate() {
+        let Some(value) = values.get(*key) else {
+            return false;
+        };
+        if index == path.len() - 1 {
+            return true;
+        }
+        let ConfigValue::Table(child) = value else {
+            return false;
+        };
+        values = child;
+    }
+    false
+}
+
+fn write_config_path(table: &mut ConfigTable, path: &[&str], value: ConfigValue) -> Result<()> {
+    if path.is_empty() {
+        return Err(invalid_error("config key path cannot be empty"));
+    }
+    let mut values = &mut table.values;
+    for (index, key) in path.iter().take(path.len() - 1).enumerate() {
+        let current = values
+            .entry((*key).to_string())
+            .or_insert_with(|| ConfigValue::Table(BTreeMap::new()));
+        let ConfigValue::Table(child) = current else {
+            return Err(invalid_error(format!(
+                "config path {} is not a table",
+                path[..=index].join(".")
+            )));
+        };
+        values = child;
+    }
+    values.insert(path[path.len() - 1].to_string(), value);
+    Ok(())
+}
+
+fn tab_bar_orientation_value(orientation: TabBarOrientation) -> &'static str {
+    match orientation {
+        TabBarOrientation::Horizontal => "horizontal",
+        TabBarOrientation::VerticalLeft => "vertical_left",
+        TabBarOrientation::VerticalRight => "vertical_right",
+    }
+}
+
 fn remove_config_path_from_values(
     values: &mut BTreeMap<String, ConfigValue>,
     path: &[String],
@@ -386,6 +436,31 @@ fn remove_config_path_from_values(
         values.remove(key);
     }
     Ok(removed)
+}
+
+pub(crate) fn set_effective_tab_bar_orientation(
+    app: &AppHandle<impl Runtime>,
+    orientation: TabBarOrientation,
+) -> Result<()> {
+    let root = ensure_layout(app)?;
+    let root_path = PathBuf::from(&root.root_dir);
+    let setting_path = ["terminal", "tab_bar_orientation"];
+    let value = ConfigValue::String(tab_bar_orientation_value(orientation).to_string());
+
+    let profile_path = profile_path(&root_path, &root.active_profile);
+    let mut profile = read_profile_document_from_path(&profile_path)?;
+    if has_config_path(&profile.root, &setting_path) {
+        write_config_path(&mut profile.root, &setting_path, value)?;
+        write_document(&profile_path, &profile.root)?;
+    } else {
+        let path = Path::new(&root.main_config_path);
+        let mut main = read_main_config_from_path(path)?;
+        write_config_path(&mut main.root, &setting_path, value)?;
+        write_document(path, &main.root)?;
+    }
+
+    emit_change(app);
+    Ok(())
 }
 
 fn load_application_host_dirs(root: &Path, active_profile: &str) -> Result<Vec<PathBuf>> {
@@ -854,6 +929,7 @@ pub(crate) fn set_host_dirs_command(
     );
     write_document(path, &document.root)?;
     emit_change(&app);
+    watch_config_command(app.clone())?;
     root_paths(&app)
 }
 
