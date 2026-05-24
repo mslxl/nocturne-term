@@ -6,6 +6,7 @@ import {
   configInteger,
   configString,
   configStringArray,
+  defaultLanguage,
   integerValue,
   numberValue,
   readValue,
@@ -17,7 +18,7 @@ import {
 import type { MessageKey } from "$lib/i18n/messages";
 
 export type SettingCategoryId = "appearance" | "terminal" | "profiles" | "hosts";
-export type SettingValueKind = "text" | "number" | "integer" | "boolean" | "select" | "textarea" | "color";
+export type SettingValueKind = "text" | "number" | "integer" | "boolean" | "select" | "textarea" | "host-dirs" | "color";
 
 export type SettingDefinition<T = unknown> = {
   key: string;
@@ -36,6 +37,14 @@ export type SettingDefinition<T = unknown> = {
 
 function valueAt(root: { values: Record<string, ConfigValue> }, path: string[]) {
   return readValue(root, path);
+}
+
+function tabBarOrientationValue(value: ConfigValue | undefined): TabBarOrientation {
+  const raw = stringValue(value);
+  if (!raw) return "horizontal";
+  if (raw === "vertical") return "vertical_right";
+  if (raw === "horizontal" || raw === "vertical_left" || raw === "vertical_right") return raw;
+  throw new Error(`unsupported terminal.tab_bar_orientation value: ${raw}`);
 }
 
 export const settingCategories: { id: SettingCategoryId; label: MessageKey }[] = [
@@ -72,7 +81,7 @@ export const settingsSchema: SettingDefinition[] = [
       { value: "en", label: "english" },
       { value: "zh", label: "chinese" },
     ],
-    get: (root) => stringValue(valueAt(root, ["ui", "language"])) ?? "",
+    get: (root) => stringValue(valueAt(root, ["ui", "language"])) ?? defaultLanguage(),
     toConfigValue: (value) => (String(value) ? configString(String(value)) : undefined),
   },
   {
@@ -196,9 +205,10 @@ export const settingsSchema: SettingDefinition[] = [
     defaultValue: "horizontal" satisfies TabBarOrientation,
     options: [
       { value: "horizontal", label: "horizontal" },
-      { value: "vertical", label: "vertical" },
+      { value: "vertical_left", label: "verticalLeft" },
+      { value: "vertical_right", label: "verticalRight" },
     ],
-    get: (root) => stringValue(valueAt(root, ["terminal", "tab_bar_orientation"])) ?? "horizontal",
+    get: (root) => tabBarOrientationValue(valueAt(root, ["terminal", "tab_bar_orientation"])),
     toConfigValue: (value) => configString(String(value)),
   },
   ...(["top", "right", "bottom", "left"] as const).map((edge) => ({
@@ -219,13 +229,14 @@ export const settingsSchema: SettingDefinition[] = [
     category: "hosts",
     label: "hostDirs",
     path: ["host_dirs"],
-    kind: "textarea",
-    defaultValue: "hosts",
-    help: "onePerLine",
-    get: (root) => (stringArrayValue(valueAt(root, ["host_dirs"])) ?? ["hosts"]).join("\n"),
+    kind: "host-dirs",
+    defaultValue: ["hosts"],
+    get: (root) => stringArrayValue(valueAt(root, ["host_dirs"])) ?? ["hosts"],
     toConfigValue: (value) => {
-      const items = String(value)
-        .split("\n")
+      if (!Array.isArray(value)) {
+        throw new Error("host directories must be a string array");
+      }
+      const items = value
         .map((item) => item.trim())
         .filter(Boolean);
       return configStringArray(items.length ? items : ["hosts"]);

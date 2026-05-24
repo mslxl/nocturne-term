@@ -12,6 +12,10 @@
     type ConfigDocument,
   } from "$lib/config/document";
   import { setLanguage, t } from "$lib/i18n";
+  import HostDirsControl from "$lib/settings/components/HostDirsControl.svelte";
+  import SegmentedControl from "$lib/settings/components/SegmentedControl.svelte";
+  import SettingRow from "$lib/settings/components/SettingRow.svelte";
+  import SwitchControl from "$lib/settings/components/SwitchControl.svelte";
   import { saveConfigValue } from "$lib/settings/save";
   import { settingCategories, settingsSchema, type SettingCategoryId, type SettingDefinition } from "$lib/settings/schema";
   import { hasTauriRuntime } from "$lib/tauri/runtime";
@@ -72,6 +76,12 @@
       return setting.get(effectiveRoot);
     }
     return setting.get(editableDocument.root);
+  }
+
+  function settingMeta(setting: SettingDefinition, isInherited: boolean) {
+    if (isInherited) return t("inherited");
+    if (mode === "profile") return t("overridden");
+    return "";
   }
 
   async function updateSetting(setting: SettingDefinition, value: unknown) {
@@ -181,64 +191,49 @@
     {:else}
       <div class="settings-list">
         {#if activeCategory === "profiles" && snapshot}
-          <section class="setting-row">
-            <div>
-              <h3>{t("activeProfile")}</h3>
-            </div>
+          <SettingRow title={t("activeProfile")}>
             <select value={snapshot.root.active_profile} onchange={(event) => switchProfile(event.currentTarget.value)}>
               {#each snapshot.profiles as profile}
                 <option value={profile.name}>{profile.name}</option>
               {/each}
             </select>
-          </section>
+          </SettingRow>
         {/if}
 
         {#each activeSettings as setting}
           {@const value = settingValue(setting)}
           {@const isInherited = inherited(setting)}
-          <section class:inherited={isInherited} class="setting-row">
-            <div>
-              <h3>{t(setting.label)}</h3>
-              {#if setting.help}
-                <p>{t(setting.help)}</p>
-              {/if}
-              {#if isInherited}
-                <small>{t("inherited")}</small>
-              {:else if mode === "profile"}
-                <small>{t("overridden")}</small>
-              {/if}
-            </div>
-
-            <div class="control">
-              {#if setting.kind === "select"}
-                <div class="segmented">
-                  {#each setting.options ?? [] as option}
-                    <button class:active={String(value) === option.value} type="button" onclick={() => updateSetting(setting, option.value)}>
-                      {t(option.label)}
-                    </button>
-                  {/each}
-                </div>
-              {:else if setting.kind === "boolean"}
-                <label class="switch">
-                  <input checked={Boolean(value)} type="checkbox" onchange={(event) => updateSetting(setting, event.currentTarget.checked)} />
-                  <span></span>
-                </label>
-              {:else if setting.kind === "textarea"}
-                <textarea value={String(value)} rows="4" onblur={(event) => updateSetting(setting, event.currentTarget.value)}></textarea>
-              {:else}
-                <input
-                  min={setting.min}
-                  step={setting.step}
-                  type={setting.kind === "text" ? "text" : "number"}
-                  value={String(value)}
-                  onblur={(event) => updateSetting(setting, setting.kind === "text" ? event.currentTarget.value : Number(event.currentTarget.value))}
-                />
-              {/if}
-              {#if mode === "profile" && !isInherited}
-                <button class="default-button" type="button" onclick={() => useDefault(setting)}>{t("useDefault")}</button>
-              {/if}
-            </div>
-          </section>
+          <SettingRow
+            title={t(setting.label)}
+            help={setting.help ? t(setting.help) : ""}
+            meta={settingMeta(setting, isInherited)}
+            inherited={isInherited}
+          >
+            {#if setting.kind === "select"}
+              <SegmentedControl
+                value={String(value)}
+                options={(setting.options ?? []).map((option) => ({ value: option.value, label: t(option.label) }))}
+                update={(next) => updateSetting(setting, next)}
+              />
+            {:else if setting.kind === "boolean"}
+              <SwitchControl checked={Boolean(value)} update={(next) => updateSetting(setting, next)} />
+            {:else if setting.kind === "host-dirs"}
+              <HostDirsControl dirs={value as string[]} update={(next) => updateSetting(setting, next)} />
+            {:else if setting.kind === "textarea"}
+              <textarea value={String(value)} rows="4" onblur={(event) => updateSetting(setting, event.currentTarget.value)}></textarea>
+            {:else}
+              <input
+                min={setting.min}
+                step={setting.step}
+                type={setting.kind === "text" ? "text" : "number"}
+                value={String(value)}
+                onblur={(event) => updateSetting(setting, setting.kind === "text" ? event.currentTarget.value : Number(event.currentTarget.value))}
+              />
+            {/if}
+            {#if mode === "profile" && !isInherited}
+              <button class="default-button" type="button" onclick={() => useDefault(setting)}>{t("useDefault")}</button>
+            {/if}
+          </SettingRow>
         {/each}
       </div>
     {/if}
@@ -254,6 +249,7 @@
     --settings-border: #d7d7d7;
     --settings-control: #ffffff;
     --settings-active: #dce8fb;
+    --settings-accent: #3d7dd8;
     --settings-danger: #a92727;
   }
 
@@ -264,6 +260,7 @@
     --settings-border: #3d3f43;
     --settings-control: #2b2d31;
     --settings-active: #34445f;
+    --settings-accent: #74a7f2;
     --settings-danger: #ffb5b5;
   }
 
@@ -300,7 +297,6 @@
 
   h1,
   h2,
-  h3,
   p {
     margin: 0;
   }
@@ -312,9 +308,7 @@
   }
 
   .sidebar p,
-  .detail-header p,
-  .setting-row p,
-  small {
+  .detail-header p {
     margin-top: 4px;
     color: var(--settings-muted);
     font-size: 12px;
@@ -328,8 +322,7 @@
 
   nav button,
   .back,
-  .default-button,
-  .segmented button {
+  .default-button {
     appearance: none;
     border: 0;
     color: inherit;
@@ -373,31 +366,6 @@
     max-width: 860px;
   }
 
-  .setting-row {
-    display: grid;
-    grid-template-columns: minmax(180px, 1fr) minmax(260px, 1.25fr);
-    gap: 20px;
-    align-items: center;
-    padding: 16px 28px;
-    border-bottom: 1px solid var(--settings-border);
-  }
-
-  .setting-row.inherited {
-    color: color-mix(in srgb, var(--settings-fg) 72%, transparent);
-  }
-
-  h3 {
-    font-size: 13px;
-    line-height: 1.25;
-    font-weight: 520;
-  }
-
-  .control {
-    display: grid;
-    justify-items: end;
-    gap: 8px;
-  }
-
   input,
   textarea,
   select {
@@ -413,58 +381,6 @@
   textarea {
     resize: vertical;
     min-height: 80px;
-  }
-
-  .segmented {
-    display: inline-flex;
-    max-width: 100%;
-    padding: 2px;
-    border: 1px solid var(--settings-border);
-    border-radius: 7px;
-    background: color-mix(in srgb, var(--settings-control) 86%, var(--settings-bg));
-  }
-
-  .segmented button {
-    min-height: 26px;
-    padding: 3px 10px;
-    border-radius: 5px;
-    white-space: nowrap;
-  }
-
-  .segmented button.active {
-    background: var(--settings-control);
-  }
-
-  .switch input {
-    position: absolute;
-    opacity: 0;
-  }
-
-  .switch span {
-    width: 38px;
-    height: 22px;
-    display: block;
-    border-radius: 999px;
-    background: var(--settings-border);
-  }
-
-  .switch span::after {
-    content: "";
-    width: 18px;
-    height: 18px;
-    display: block;
-    margin: 2px;
-    border-radius: 50%;
-    background: var(--settings-control);
-    transition: transform 120ms ease;
-  }
-
-  .switch input:checked + span {
-    background: #3d7dd8;
-  }
-
-  .switch input:checked + span::after {
-    transform: translateX(16px);
   }
 
   .default-button,
@@ -519,16 +435,6 @@
 
     .back {
       display: inline-block;
-    }
-
-    .setting-row {
-      grid-template-columns: 1fr;
-      gap: 10px;
-      padding: 14px 16px;
-    }
-
-    .control {
-      justify-items: stretch;
     }
 
     input,

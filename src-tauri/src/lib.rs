@@ -36,6 +36,7 @@ pub fn run() {
         config::delete_host,
         config::set_host_dirs_command,
         config::remove_config_key,
+        app_shell::show_tab_bar_context_menu,
         app_shell::refresh_app_menu,
         config::watch_config_command
     ]);
@@ -47,6 +48,7 @@ pub fn run() {
 
     tauri::Builder::default()
         .on_menu_event(|app, event| app_shell::handle_menu_event(app, event.id().as_ref()))
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(builder.invoke_handler())
         .setup(|app| {

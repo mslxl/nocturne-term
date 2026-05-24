@@ -119,11 +119,18 @@ pub enum TerminalCursorStyle {
     Bar,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "snake_case")]
 pub enum TabBarOrientation {
     Horizontal,
-    Vertical,
+    VerticalLeft,
+    VerticalRight,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct TabBarContextMenuInput {
+    pub x: f64,
+    pub y: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]

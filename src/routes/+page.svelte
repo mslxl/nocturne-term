@@ -5,6 +5,7 @@
   import { commands, type TabBarOrientation, type TerminalSettings } from "$lib/bindings";
   import { applyAppPreferences } from "$lib/config/document";
   import { hasTauriRuntime } from "$lib/tauri/runtime";
+  import TerminalTabBar from "$lib/terminal/components/TerminalTabBar.svelte";
   import { unwrapCommand } from "$lib/terminal/commands";
   import { syncSettingsVariables, xtermOptions } from "$lib/terminal/settings";
   import {
@@ -29,7 +30,8 @@
   let configUnlisten: undefined | (() => void);
 
   let activeTab = $derived(tabs.find((tab) => tab.id === activeId));
-  let isVertical = $derived(tabBarOrientation === "vertical");
+  let isVertical = $derived(tabBarOrientation !== "horizontal");
+  let tabsOnLeft = $derived(tabBarOrientation === "vertical_left");
   const terminalTabs = createTerminalTabController({
     settings: () => settings,
     tabs: () => tabs,
@@ -95,16 +97,17 @@
     }
   }
 
-  function toggleTabBarOrientation() {
-    tabBarOrientation = tabBarOrientation === "horizontal" ? "vertical" : "horizontal";
-    requestAnimationFrame(() => {
-      if (activeId) terminalTabs.scheduleFit(activeId);
-    });
-  }
-
-  function tabContextMenu(event: MouseEvent) {
+  async function tabContextMenu(event: MouseEvent) {
     event.preventDefault();
-    toggleTabBarOrientation();
+    if (!hasTauriRuntime()) return;
+    await unwrapCommand(
+      commands.showTabBarContextMenu({
+        x: event.clientX,
+        y: event.clientY,
+      }),
+    ).catch((error) => {
+      settingsError = error instanceof Error ? error.message : String(error);
+    });
   }
 
   function handleKeyboard(event: KeyboardEvent) {
@@ -164,19 +167,17 @@
   });
 </script>
 
-<main class:vertical={isVertical} class="workspace">
-  {#if !isVertical}
-    <nav class="tabbar horizontal" aria-label="Terminal sessions" oncontextmenu={tabContextMenu}>
-      <div class="tabs">
-        {#each tabs as tab}
-          <button class:active={tab.id === activeId} class:error={tab.status === "error"} class:exited={tab.status === "exited"} type="button" onclick={() => activateTab(tab.id)}>
-            <span>{tab.title}</span>
-            <small>{tab.command}</small>
-          </button>
-        {/each}
-      </div>
-      <button class="new-session" type="button" aria-label="New session" title="New session" onclick={newSession}>+</button>
-    </nav>
+<main class:left-tabs={tabsOnLeft} class:vertical={isVertical} class="workspace">
+  {#if !isVertical || tabsOnLeft}
+    <TerminalTabBar
+      {tabs}
+      {activeId}
+      placement={tabBarOrientation}
+      {activateTab}
+      {closeTab}
+      {newSession}
+      openContextMenu={tabContextMenu}
+    />
   {/if}
 
   <section class="content" aria-label="Terminal content">
@@ -203,18 +204,16 @@
     {/if}
   </section>
 
-  {#if isVertical}
-    <nav class="tabbar vertical-tabs" aria-label="Terminal sessions" oncontextmenu={tabContextMenu}>
-      <div class="tabs">
-        {#each tabs as tab}
-          <button class:active={tab.id === activeId} class:error={tab.status === "error"} class:exited={tab.status === "exited"} type="button" onclick={() => activateTab(tab.id)}>
-            <span>{tab.title}</span>
-            <small>{tab.command}</small>
-          </button>
-        {/each}
-      </div>
-      <button class="new-session" type="button" aria-label="New session" title="New session" onclick={newSession}>+</button>
-    </nav>
+  {#if isVertical && !tabsOnLeft}
+    <TerminalTabBar
+      {tabs}
+      {activeId}
+      placement={tabBarOrientation}
+      {activateTab}
+      {closeTab}
+      {newSession}
+      openContextMenu={tabContextMenu}
+    />
   {/if}
 </main>
 
@@ -254,116 +253,8 @@
     grid-template-rows: minmax(0, 1fr);
   }
 
-  .tabbar {
-    user-select: none;
-    -webkit-user-select: none;
-    border-color: color-mix(in srgb, var(--terminal-fg) 16%, transparent);
-    background: color-mix(in srgb, var(--terminal-bg) 88%, var(--terminal-fg));
-  }
-
-  .tabbar.horizontal {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) 36px;
-    align-items: stretch;
-    border-bottom: 1px solid color-mix(in srgb, var(--terminal-fg) 16%, transparent);
-  }
-
-  .vertical-tabs {
-    display: grid;
-    grid-template-rows: minmax(0, 1fr) 40px;
-    border-left: 1px solid color-mix(in srgb, var(--terminal-fg) 16%, transparent);
-  }
-
-  .tabs {
-    min-width: 0;
-    min-height: 0;
-    display: flex;
-    overflow: auto;
-  }
-
-  .vertical-tabs .tabs {
-    flex-direction: column;
-  }
-
-  .tabs button,
-  .new-session {
-    appearance: none;
-    border: 0;
-    color: inherit;
-    font: inherit;
-    background: transparent;
-  }
-
-  .tabs button {
-    min-width: 148px;
-    max-width: 220px;
-    height: 39px;
-    display: grid;
-    align-content: center;
-    gap: 1px;
-    padding: 4px 12px;
-    border-right: 1px solid color-mix(in srgb, var(--terminal-fg) 12%, transparent);
-    text-align: left;
-  }
-
-  .vertical-tabs .tabs button {
-    width: 100%;
-    max-width: none;
-    border-right: 0;
-    border-bottom: 1px solid color-mix(in srgb, var(--terminal-fg) 12%, transparent);
-  }
-
-  .tabs button.active {
-    background: var(--terminal-bg);
-  }
-
-  .tabs button.exited {
-    color: color-mix(in srgb, var(--terminal-fg) 62%, transparent);
-  }
-
-  .tabs button.error {
-    color: #ffb4b4;
-  }
-
-  .tabs span,
-  .tabs small {
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .tabs span {
-    font-size: 12px;
-    line-height: 1.1;
-  }
-
-  .tabs small {
-    font-size: 10px;
-    line-height: 1.1;
-    color: color-mix(in srgb, var(--terminal-fg) 64%, transparent);
-  }
-
-  .new-session {
-    width: 36px;
-    min-width: 36px;
-    height: 39px;
-    display: grid;
-    place-items: center;
-    font-size: 21px;
-    line-height: 1;
-    border-left: 1px solid color-mix(in srgb, var(--terminal-fg) 12%, transparent);
-  }
-
-  .vertical-tabs .new-session {
-    width: 100%;
-    border-left: 0;
-    border-top: 1px solid color-mix(in srgb, var(--terminal-fg) 12%, transparent);
-  }
-
-  .new-session:active,
-  .tabs button:active {
-    background: color-mix(in srgb, var(--terminal-selection) 38%, transparent);
+  .workspace.vertical.left-tabs {
+    grid-template-columns: 208px minmax(0, 1fr);
   }
 
   .content {
@@ -451,9 +342,8 @@
       grid-template-columns: minmax(0, 1fr) 160px;
     }
 
-    .tabs button {
-      min-width: 124px;
-      padding-inline: 10px;
+    .workspace.vertical.left-tabs {
+      grid-template-columns: 160px minmax(0, 1fr);
     }
   }
 </style>
