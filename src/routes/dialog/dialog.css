@@ -1,0 +1,116 @@
+.dialog-root {
+  width: 100vw;
+  height: 100vh;
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) auto;
+  background: var(--dialog-bg);
+  color: var(--dialog-fg);
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+.dialog-body {
+  min-width: 0;
+  padding: 22px 24px 12px;
+}
+
+.dialog-body h1 {
+  margin: 0;
+  font-size: 17px;
+  line-height: 1.25;
+  font-weight: 650;
+}
+
+.dialog-body p {
+  margin: 6px 0 0;
+  color: var(--dialog-muted);
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.dialog-body label {
+  display: grid;
+  gap: 6px;
+  margin-top: 18px;
+  font-size: 13px;
+}
+
+.dialog-body input,
+.dialog-body select {
+  width: 100%;
+  min-height: 30px;
+  border: 1px solid var(--dialog-border);
+  border-radius: 6px;
+  padding: 5px 8px;
+  background: var(--dialog-control);
+  color: var(--dialog-fg);
+  font: inherit;
+}
+
+.dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 12px 16px 16px;
+  border-top: 1px solid var(--dialog-border);
+}
+
+.dialog-actions button {
+  min-width: 76px;
+  min-height: 28px;
+  border: 1px solid var(--dialog-border);
+  border-radius: 6px;
+  padding: 4px 12px;
+  background: var(--dialog-control);
+  color: var(--dialog-fg);
+  font: inherit;
+}
+
+.dialog-actions button.primary {
+  border-color: #2f6fca;
+  background: #2f6fca;
+  color: white;
+}
+
+.dialog-actions button.danger {
+  border-color: #b93a3a;
+  background: #b93a3a;
+  color: white;
+}
+
+.dialog-actions button:disabled {
+  opacity: 0.55;
+}
+
+.error {
+  margin-top: 8px;
+  color: var(--dialog-danger);
+  overflow-wrap: anywhere;
+}
+
+:global(:root) {
+  color-scheme: light dark;
+  --dialog-bg: #f6f6f6;
+  --dialog-fg: #1f1f1f;
+  --dialog-muted: #696969;
+  --dialog-border: #d3d3d3;
+  --dialog-control: #ffffff;
+  --dialog-danger: #a92727;
+}
+
+:global(:root[data-theme="dark"]) {
+  --dialog-bg: #242529;
+  --dialog-fg: #efefef;
+  --dialog-muted: #a7a7a7;
+  --dialog-border: #414348;
+  --dialog-control: #2d2f34;
+  --dialog-danger: #ffb5b5;
+}
+
+:global(body) {
+  margin: 0;
+  overflow: hidden;
+}
+
+:global(*) {
+  box-sizing: border-box;
+}
