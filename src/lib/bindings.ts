@@ -25,6 +25,8 @@ export const commands = {
 	updateHost: (input: HostDocumentInput) => typedError<HostEntry, ConfigError>(__TAURI_INVOKE("update_host", { input })),
 	deleteHost: (id: string) => typedError<null, ConfigError>(__TAURI_INVOKE("delete_host", { id })),
 	setHostDirsCommand: (input: HostDirsInput) => typedError<ConfigRootInfo, ConfigError>(__TAURI_INVOKE("set_host_dirs_command", { input })),
+	removeConfigKey: (input: ConfigKeyPathInput) => typedError<null, ConfigError>(__TAURI_INVOKE("remove_config_key", { input })),
+	refreshAppMenu: () => typedError<null, ConfigError>(__TAURI_INVOKE("refresh_app_menu")),
 	watchConfigCommand: () => typedError<null, ConfigError>(__TAURI_INVOKE("watch_config_command")),
 };
 
@@ -38,6 +40,8 @@ export type AppConfigSnapshot = {
 	hosts: HostEntry[],
 };
 
+export type ConfigDocumentTarget = "main" | "profile";
+
 export type ConfigError = { kind: "Io"; message: {
 	message: string,
 } } | { kind: "Parse"; message: {
@@ -49,6 +53,12 @@ export type ConfigError = { kind: "Io"; message: {
 } } | { kind: "Terminal"; message: {
 	message: string,
 } };
+
+export type ConfigKeyPathInput = {
+	target: ConfigDocumentTarget,
+	profile: string | null,
+	path: string[],
+};
 
 export type ConfigRootInfo = {
 	root_dir: string,
@@ -120,6 +130,13 @@ export type TerminalInput = {
 	data: string,
 };
 
+export type TerminalPadding = {
+	top: number | null,
+	right: number | null,
+	bottom: number | null,
+	left: number | null,
+};
+
 export type TerminalRenderer = "canvas" | "webgl";
 
 export type TerminalSessionInfo = {
@@ -142,6 +159,7 @@ export type TerminalSettings = {
 	cursor_blink: boolean,
 	cursor_style: TerminalCursorStyle,
 	theme: TerminalTheme,
+	padding: TerminalPadding,
 	tab_bar_orientation: TabBarOrientation,
 };
 

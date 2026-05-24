@@ -1,51 +1,23 @@
 <script lang="ts">
   import { onMount, tick } from "svelte";
   import { listen } from "@tauri-apps/api/event";
-  import { FitAddon } from "@xterm/addon-fit";
-  import { Terminal } from "@xterm/xterm";
   import "@xterm/xterm/css/xterm.css";
+  import { commands, type TabBarOrientation, type TerminalSettings } from "$lib/bindings";
+  import { applyAppPreferences } from "$lib/config/document";
+  import { hasTauriRuntime } from "$lib/tauri/runtime";
+  import { unwrapCommand } from "$lib/terminal/commands";
+  import { syncSettingsVariables, xtermOptions } from "$lib/terminal/settings";
   import {
-    commands,
-    type TabBarOrientation,
-    type TerminalSettings,
-    type TerminalSessionInfo,
-  } from "$lib/bindings";
-
-  type CommandResult<T, E> = { status: "ok"; data: T } | { status: "error"; error: E };
-  type TerminalOutputEvent = {
-    session_id: string;
-    data: string;
-  };
-  type TerminalExitEvent = {
-    session_id: string;
-    exit_code: number | null;
-    signal: string | null;
-  };
-  type TerminalStatus = "starting" | "running" | "exited" | "error";
-  type TerminalTab = {
-    id: string;
-    title: string;
-    command: string;
-    status: TerminalStatus;
-    exitText: string;
-    error: string;
-    term?: Terminal;
-    fit?: FitAddon;
-    webgl?: { dispose: () => void };
-    container?: HTMLDivElement;
-    resizeObserver?: ResizeObserver;
-    dataDisposables: Array<{ dispose: () => void }>;
-    decoder: TextDecoder;
-    outputQueue: string[];
-    outputFrame: number | null;
-    resizeTimer: number | null;
-    lastCols: number;
-    lastRows: number;
-  };
+    createTerminalTab,
+    createTerminalTabController,
+    disposeTerminalTab,
+    type TerminalExitEvent,
+    type TerminalOutputEvent,
+    type TerminalTab,
+  } from "$lib/terminal/tabs";
 
   const initialCols = 80;
   const initialRows = 24;
-  const resizeDelayMs = 24;
 
   let settings = $state<TerminalSettings | null>(null);
   let settingsError = $state("");
@@ -54,90 +26,30 @@
   let tabBarOrientation = $state<TabBarOrientation>("horizontal");
   let outputUnlisten: undefined | (() => void);
   let exitUnlisten: undefined | (() => void);
+  let configUnlisten: undefined | (() => void);
 
   let activeTab = $derived(tabs.find((tab) => tab.id === activeId));
   let isVertical = $derived(tabBarOrientation === "vertical");
-
-  async function unwrapCommand<T, E>(result: Promise<CommandResult<T, E>>): Promise<T> {
-    const resolved = await result;
-    if (resolved.status === "ok") return resolved.data;
-    throw new Error(formatCommandError(resolved.error));
-  }
-
-  function formatCommandError(error: unknown): string {
-    if (isRecord(error) && typeof error.kind === "string") {
-      const message = isRecord(error.message) && typeof error.message.message === "string" ? error.message.message : "";
-      return message ? `${error.kind}: ${message}` : error.kind;
-    }
-    return String(error);
-  }
-
-  function isRecord(value: unknown): value is Record<string, unknown> {
-    return !!value && typeof value === "object" && !Array.isArray(value);
-  }
-
-  function xtermTheme(config: TerminalSettings["theme"]) {
-    return {
-      background: config.background,
-      foreground: config.foreground,
-      cursor: config.cursor,
-      selectionBackground: config.selection_background,
-      black: config.black,
-      red: config.red,
-      green: config.green,
-      yellow: config.yellow,
-      blue: config.blue,
-      magenta: config.magenta,
-      cyan: config.cyan,
-      white: config.white,
-      brightBlack: config.bright_black,
-      brightRed: config.bright_red,
-      brightGreen: config.bright_green,
-      brightYellow: config.bright_yellow,
-      brightBlue: config.bright_blue,
-      brightMagenta: config.bright_magenta,
-      brightCyan: config.bright_cyan,
-      brightWhite: config.bright_white,
-    };
-  }
-
-  function syncThemeVariables(config: TerminalSettings) {
-    document.documentElement.style.setProperty("--terminal-bg", config.theme.background);
-    document.documentElement.style.setProperty("--terminal-fg", config.theme.foreground);
-    document.documentElement.style.setProperty("--terminal-selection", config.theme.selection_background);
-  }
-
-  function finiteNumber(name: string, value: number | null): number {
-    if (value === null || !Number.isFinite(value)) {
-      throw new Error(`${name} must be a finite number`);
-    }
-    return value;
-  }
+  const terminalTabs = createTerminalTabController({
+    settings: () => settings,
+    tabs: () => tabs,
+    setGlobalError: (message) => {
+      settingsError = message;
+    },
+  });
 
   async function loadSettings() {
     settingsError = "";
+    const snapshot = await unwrapCommand(commands.getConfigSnapshot());
+    applyAppPreferences(snapshot.effective_config.root);
     const next = await unwrapCommand(commands.getTerminalSettings());
     settings = next;
     tabBarOrientation = next.tab_bar_orientation;
-    syncThemeVariables(next);
-  }
-
-  function createTab(info: TerminalSessionInfo): TerminalTab {
-    return {
-      id: info.id,
-      title: info.title,
-      command: info.command,
-      status: "running",
-      exitText: "",
-      error: "",
-      dataDisposables: [],
-      decoder: new TextDecoder(),
-      outputQueue: [],
-      outputFrame: null,
-      resizeTimer: null,
-      lastCols: info.cols,
-      lastRows: info.rows,
-    };
+    syncSettingsVariables(next);
+    for (const tab of tabs) {
+      if (tab.term) tab.term.options = { ...tab.term.options, ...xtermOptions(next) };
+      terminalTabs.scheduleFit(tab.id);
+    }
   }
 
   async function newSession() {
@@ -149,149 +61,27 @@
           rows: initialRows,
         }),
       );
-      tabs = [...tabs, createTab(info)];
+      tabs = [...tabs, createTerminalTab(info)];
       activeId = info.id;
       await tick();
-      await mountTerminal(info.id);
+      await terminalTabs.mountTerminal(info.id);
     } catch (error) {
       settingsError = error instanceof Error ? error.message : String(error);
     }
   }
 
-  async function mountTerminal(id: string) {
-    const config = settings;
-    if (!config) throw new Error("Terminal settings are not loaded");
-    const tab = tabs.find((item) => item.id === id);
-    const container = tab?.container;
-    if (!tab || !container || tab.term) return;
-
-    const term = new Terminal({
-      allowProposedApi: config.renderer === "webgl",
-      cursorBlink: config.cursor_blink,
-      cursorStyle: config.cursor_style,
-      fontFamily: config.font_family,
-      fontSize: finiteNumber("terminal.font_size", config.font_size),
-      scrollback: config.scrollback,
-      theme: xtermTheme(config.theme),
-    });
-    const fit = new FitAddon();
-    term.loadAddon(fit);
-
-    try {
-      if (config.renderer === "webgl") {
-        const { WebglAddon } = await import("@xterm/addon-webgl");
-        const webgl = new WebglAddon();
-        term.loadAddon(webgl);
-        tab.webgl = webgl;
-      }
-
-      term.open(container);
-      fit.fit();
-      tab.term = term;
-      tab.fit = fit;
-      tab.dataDisposables = [
-        term.onData((data) => {
-          void unwrapCommand(commands.writeTerminal({ session_id: id, data })).catch((error) => {
-            markTabError(id, error instanceof Error ? error.message : String(error));
-          });
-        }),
-        term.onResize(({ cols, rows }) => scheduleResize(id, cols, rows)),
-      ];
-      tab.resizeObserver = new ResizeObserver(() => scheduleFit(id));
-      tab.resizeObserver.observe(container);
-      scheduleFit(id);
-      term.focus();
-    } catch (error) {
-      term.dispose();
-      markTabError(id, error instanceof Error ? error.message : String(error));
-    }
-  }
-
-  function scheduleFit(id: string) {
-    const tab = tabs.find((item) => item.id === id);
-    if (!tab?.fit || !tab.term) return;
-    requestAnimationFrame(() => {
-      tab.fit?.fit();
-      const cols = tab.term?.cols;
-      const rows = tab.term?.rows;
-      if (cols && rows) scheduleResize(id, cols, rows);
-    });
-  }
-
-  function scheduleResize(id: string, cols: number, rows: number) {
-    const tab = tabs.find((item) => item.id === id);
-    if (!tab || tab.status !== "running") return;
-    if (tab.lastCols === cols && tab.lastRows === rows) return;
-    tab.lastCols = cols;
-    tab.lastRows = rows;
-    if (tab.resizeTimer !== null) window.clearTimeout(tab.resizeTimer);
-    tab.resizeTimer = window.setTimeout(() => {
-      tab.resizeTimer = null;
-      void unwrapCommand(
-        commands.resizeTerminal({
-          session_id: id,
-          cols,
-          rows,
-        }),
-      ).catch((error) => markTabError(id, error instanceof Error ? error.message : String(error)));
-    }, resizeDelayMs);
-  }
-
-  function decodeOutput(tab: TerminalTab, data: string): string {
-    const binary = atob(data);
-    const bytes = new Uint8Array(binary.length);
-    for (let index = 0; index < binary.length; index += 1) {
-      bytes[index] = binary.charCodeAt(index);
-    }
-    return tab.decoder.decode(bytes, { stream: true });
-  }
-
-  function enqueueOutput(event: TerminalOutputEvent) {
-    const tab = tabs.find((item) => item.id === event.session_id);
-    if (!tab) return;
-    const chunk = decodeOutput(tab, event.data);
-    if (!chunk) return;
-    tab.outputQueue.push(chunk);
-    if (tab.outputFrame !== null) return;
-    tab.outputFrame = requestAnimationFrame(() => {
-      tab.outputFrame = null;
-      const text = tab.outputQueue.join("");
-      tab.outputQueue = [];
-      tab.term?.write(text);
-    });
-  }
-
-  function markExited(event: TerminalExitEvent) {
-    const tab = tabs.find((item) => item.id === event.session_id);
-    if (!tab) return;
-    tab.status = "exited";
-    tab.exitText = event.signal ? `Signal: ${event.signal}` : `Exit ${event.exit_code ?? "unknown"}`;
-    tab.term?.write(`\r\n[Process completed: ${tab.exitText}]\r\n`);
-  }
-
-  function markTabError(id: string, message: string) {
-    const tab = tabs.find((item) => item.id === id);
-    if (!tab) {
-      settingsError = message;
-      return;
-    }
-    tab.status = "error";
-    tab.error = message;
-    tab.term?.write(`\r\n[Terminal error: ${message}]\r\n`);
-  }
-
   async function activateTab(id: string) {
     activeId = id;
     await tick();
-    await mountTerminal(id);
-    scheduleFit(id);
+    await terminalTabs.mountTerminal(id);
+    terminalTabs.scheduleFit(id);
     tabs.find((tab) => tab.id === id)?.term?.focus();
   }
 
   async function closeTab(id: string) {
     const tab = tabs.find((item) => item.id === id);
     if (!tab) return;
-    disposeTab(tab);
+    disposeTerminalTab(tab);
     if (tab.status === "running") {
       await unwrapCommand(commands.closeTerminalSession(id)).catch((error) => {
         settingsError = error instanceof Error ? error.message : String(error);
@@ -305,19 +95,10 @@
     }
   }
 
-  function disposeTab(tab: TerminalTab) {
-    if (tab.outputFrame !== null) cancelAnimationFrame(tab.outputFrame);
-    if (tab.resizeTimer !== null) window.clearTimeout(tab.resizeTimer);
-    tab.resizeObserver?.disconnect();
-    tab.dataDisposables.forEach((disposable) => disposable.dispose());
-    tab.webgl?.dispose();
-    tab.term?.dispose();
-  }
-
   function toggleTabBarOrientation() {
     tabBarOrientation = tabBarOrientation === "horizontal" ? "vertical" : "horizontal";
     requestAnimationFrame(() => {
-      if (activeId) scheduleFit(activeId);
+      if (activeId) terminalTabs.scheduleFit(activeId);
     });
   }
 
@@ -345,19 +126,29 @@
     void loadSettings().catch((error) => {
       settingsError = error instanceof Error ? error.message : String(error);
     });
-    void listen<TerminalOutputEvent>("terminal://output", (event) => enqueueOutput(event.payload)).then((dispose) => {
-      outputUnlisten = dispose;
-    });
-    void listen<TerminalExitEvent>("terminal://exit", (event) => markExited(event.payload)).then((dispose) => {
-      exitUnlisten = dispose;
-    });
+    if (hasTauriRuntime()) {
+      void listen<TerminalOutputEvent>("terminal://output", (event) => terminalTabs.enqueueOutput(event.payload)).then((dispose) => {
+        outputUnlisten = dispose;
+      });
+      void listen<TerminalExitEvent>("terminal://exit", (event) => terminalTabs.markExited(event.payload)).then((dispose) => {
+        exitUnlisten = dispose;
+      });
+      void listen("config://changed", () => {
+        void loadSettings().catch((error) => {
+          settingsError = error instanceof Error ? error.message : String(error);
+        });
+      }).then((dispose) => {
+        configUnlisten = dispose;
+      });
+    }
     window.addEventListener("keydown", handleKeyboard);
     return () => {
       window.removeEventListener("keydown", handleKeyboard);
       outputUnlisten?.();
       exitUnlisten?.();
+      configUnlisten?.();
       for (const tab of tabs) {
-        disposeTab(tab);
+        disposeTerminalTab(tab);
         if (tab.status === "running") void unwrapCommand(commands.closeTerminalSession(tab.id));
       }
     };
@@ -366,8 +157,8 @@
   $effect(() => {
     if (activeId) {
       void tick().then(() => {
-        void mountTerminal(activeId);
-        scheduleFit(activeId);
+        void terminalTabs.mountTerminal(activeId);
+        terminalTabs.scheduleFit(activeId);
       });
     }
   });
@@ -432,6 +223,10 @@
     --terminal-bg: #101113;
     --terminal-fg: #eef1f6;
     --terminal-selection: #36506f;
+    --terminal-padding-top: 8px;
+    --terminal-padding-right: 10px;
+    --terminal-padding-bottom: 8px;
+    --terminal-padding-left: 10px;
   }
 
   :global(body) {
@@ -626,7 +421,7 @@
   .terminal-host {
     width: 100%;
     height: 100%;
-    padding: 8px 10px;
+    padding: var(--terminal-padding-top) var(--terminal-padding-right) var(--terminal-padding-bottom) var(--terminal-padding-left);
   }
 
   .terminal-error {

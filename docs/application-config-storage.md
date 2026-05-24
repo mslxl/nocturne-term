@@ -249,7 +249,8 @@ This is the rule that enables fast profile switching without duplicating the ent
 
 ```toml
 [ui]
-theme = "dark"
+theme = "system"
+language = "en"
 
 [editor]
 tab_width = 2
@@ -266,11 +267,30 @@ host_dirs = ["hosts"]
 tab_width = 4
 ```
 
+### Terminal padding
+
+Terminal content padding is configured under `terminal.padding`. A single numeric value applies to all sides:
+
+```toml
+[terminal]
+padding = 6
+```
+
+For per-edge control, use a nested table. `horizontal` applies to left and right, `vertical` applies to top and bottom, and explicit edge values win over axis values:
+
+```toml
+[terminal.padding]
+horizontal = 10
+vertical = 8
+left = 12
+```
+
 ### Effective config
 
 ```toml
 [ui]
-theme = "dark"
+theme = "system"
+language = "en"
 
 [editor]
 tab_width = 4
@@ -294,11 +314,15 @@ The host file name is derived from the content hash, not the host name.
 - Do not bypass the Rust backend from the frontend.
 - Do not mix application config and application state into one file.
 - Do not remove the config-changed event unless the frontend invalidation strategy changes with it.
+- Do not hand-edit `src/lib/bindings.ts`; regenerate it from Tauri/Specta after Rust command or type changes.
+- Do not show main/profile/effective settings as three simultaneous editing columns. Use the menu entry to select the edit target.
 
 ## Current Source Locations
 
-- Rust storage and commands: `src-tauri/src/lib.rs`
+- Rust storage and commands: `src-tauri/src/config.rs`
+- Native menu and settings/dialog windows: `src-tauri/src/app_shell.rs`
 - Tauri command bindings: `src/lib/bindings.ts`
 - Query-driven UI: `src/routes/+page.svelte`
+- Settings UI: `src/routes/settings/+page.svelte`
 
 This document should be updated whenever the storage contract changes.
