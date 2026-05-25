@@ -107,7 +107,7 @@ pub enum ConfigDocumentTarget {
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
 #[serde(rename_all = "snake_case")]
 pub enum TerminalRenderer {
-    Canvas,
+    Dom,
     Webgl,
 }
 
@@ -185,6 +185,8 @@ pub struct TerminalSettings {
 pub struct CreateTerminalSessionInput {
     pub cols: u16,
     pub rows: u16,
+    pub pixel_width: u16,
+    pub pixel_height: u16,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
@@ -192,6 +194,8 @@ pub struct TerminalSizeInput {
     pub session_id: String,
     pub cols: u16,
     pub rows: u16,
+    pub pixel_width: u16,
+    pub pixel_height: u16,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
@@ -205,8 +209,11 @@ pub struct TerminalSessionInfo {
     pub id: String,
     pub title: String,
     pub command: String,
+    pub cwd: Option<String>,
     pub cols: u16,
     pub rows: u16,
+    pub pixel_width: u16,
+    pub pixel_height: u16,
     pub process_id: Option<u32>,
 }
 

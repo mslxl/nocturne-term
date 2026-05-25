@@ -32,11 +32,13 @@
   gap: 6px;
   margin-top: 18px;
   font-size: 13px;
+  min-width: 0;
 }
 
 .dialog-body input,
 .dialog-body select {
   width: 100%;
+  min-width: 0;
   min-height: 30px;
   border: 1px solid var(--dialog-border);
   border-radius: 6px;
@@ -113,4 +115,14 @@
 
 :global(*) {
   box-sizing: border-box;
+}
+
+@media (max-width: 420px) {
+  .dialog-body {
+    padding: 18px 16px 12px;
+  }
+
+  .dialog-actions {
+    padding: 12px 12px 14px;
+  }
 }

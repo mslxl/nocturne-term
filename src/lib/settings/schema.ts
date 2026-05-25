@@ -163,12 +163,14 @@ export const settingsSchema: SettingDefinition[] = [
     label: "renderer",
     path: ["terminal", "renderer"],
     kind: "select",
-    defaultValue: "canvas" satisfies TerminalRenderer,
+    defaultValue: "dom" satisfies TerminalRenderer,
     options: [
-      { value: "canvas", label: "canvas" },
+      { value: "dom", label: "dom" },
       { value: "webgl", label: "webgl" },
     ],
-    get: (root) => stringValue(valueAt(root, ["terminal", "renderer"])) ?? "canvas",
+    get: (root) => {
+      return stringValue(valueAt(root, ["terminal", "renderer"])) ?? "dom";
+    },
     toConfigValue: (value) => configString(String(value)),
   },
   {
