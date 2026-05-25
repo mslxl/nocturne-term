@@ -80,7 +80,8 @@ Some settings, such as terminal command, args, cwd, and environment-related valu
 Settings rows use small reusable Svelte components under `src/lib/settings/components/`:
 
 - `SettingRow.svelte` owns the label/help/inheritance layout for a single row.
-- `SegmentedControl.svelte` is for compact mutually exclusive choices such as theme, language, renderer, and tab bar placement.
+- `SegmentedControl.svelte` is for compact mutually exclusive choices such as theme, renderer, and tab bar placement.
+- Language uses a native select so the control scales better as more locales are added.
 - `SwitchControl.svelte` is for boolean settings.
 - `HostDirsControl.svelte` is for the host directory list, with `+` opening the native directory picker and `-` removing the selected row.
 

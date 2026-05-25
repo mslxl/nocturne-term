@@ -79,6 +79,8 @@ export type ConfigValue = { kind: "String"; value: string } | { kind: "Integer";
 export type CreateTerminalSessionInput = {
 	cols: number,
 	rows: number,
+	pixel_width: number,
+	pixel_height: number,
 };
 
 export type EffectiveConfigDocument = {
@@ -143,14 +145,17 @@ export type TerminalPadding = {
 	left: number | null,
 };
 
-export type TerminalRenderer = "canvas" | "webgl";
+export type TerminalRenderer = "dom" | "webgl";
 
 export type TerminalSessionInfo = {
 	id: string,
 	title: string,
 	command: string,
+	cwd: string | null,
 	cols: number,
 	rows: number,
+	pixel_width: number,
+	pixel_height: number,
 	process_id: number | null,
 };
 
@@ -173,6 +178,8 @@ export type TerminalSizeInput = {
 	session_id: string,
 	cols: number,
 	rows: number,
+	pixel_width: number,
+	pixel_height: number,
 };
 
 export type TerminalTheme = {

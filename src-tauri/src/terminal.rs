@@ -92,7 +92,7 @@ impl Default for TerminalSettings {
                 .to_string(),
             font_size: 13.0,
             scrollback: 10_000,
-            renderer: TerminalRenderer::Canvas,
+            renderer: TerminalRenderer::Dom,
             cursor_blink: true,
             cursor_style: TerminalCursorStyle::Block,
             theme: default_terminal_theme(),
@@ -260,9 +260,9 @@ fn apply_padding_config(padding: &mut TerminalPadding, table: &toml::Table) -> R
 
 fn parse_renderer(value: &str) -> Result<TerminalRenderer> {
     match value {
-        "canvas" => Ok(TerminalRenderer::Canvas),
+        "dom" => Ok(TerminalRenderer::Dom),
         "webgl" => Ok(TerminalRenderer::Webgl),
-        _ => Err(invalid_error("terminal.renderer must be canvas or webgl")),
+        _ => Err(invalid_error("terminal.renderer must be dom or webgl")),
     }
 }
 
@@ -398,7 +398,12 @@ fn terminal_env_from_config(config: &toml::Value) -> Result<BTreeMap<String, Str
     optional_string_map(table, "env").map(Option::unwrap_or_default)
 }
 
-fn validated_pty_size(cols: u16, rows: u16) -> Result<PtySize> {
+fn validated_pty_size(
+    cols: u16,
+    rows: u16,
+    pixel_width: u16,
+    pixel_height: u16,
+) -> Result<PtySize> {
     if !(2..=500).contains(&cols) {
         return Err(invalid_error("terminal cols must be between 2 and 500"));
     }
@@ -408,8 +413,8 @@ fn validated_pty_size(cols: u16, rows: u16) -> Result<PtySize> {
     Ok(PtySize {
         rows,
         cols,
-        pixel_width: 0,
-        pixel_height: 0,
+        pixel_width,
+        pixel_height,
     })
 }
 
@@ -429,6 +434,10 @@ fn build_terminal_command(
     }
     command.env("TERM", "xterm-256color");
     command.env("COLORTERM", "truecolor");
+    command.env("TERM_PROGRAM", "Nocturne");
+    command.env("NOCTURNE", "1");
+    command.env("NOCTURNE_IMAGE_PROTOCOL", "iip");
+    command.env("ITERM_SESSION_ID", "nocturne");
     for (key, value) in env_overrides {
         command.env(key, value);
     }
@@ -518,7 +527,12 @@ pub(crate) fn create_terminal_session(
     app: AppHandle,
     input: CreateTerminalSessionInput,
 ) -> Result<TerminalSessionInfo> {
-    let size = validated_pty_size(input.cols, input.rows)?;
+    let size = validated_pty_size(
+        input.cols,
+        input.rows,
+        input.pixel_width,
+        input.pixel_height,
+    )?;
     let config = effective_application_config(&app)?;
     let settings = terminal_settings_from_config(&config)?;
     let env_overrides = terminal_env_from_config(&config)?;
@@ -551,8 +565,11 @@ pub(crate) fn create_terminal_session(
         id,
         title: format!("Session {session_number}"),
         command: command_label,
+        cwd: settings.cwd.clone(),
         cols: input.cols,
         rows: input.rows,
+        pixel_width: input.pixel_width,
+        pixel_height: input.pixel_height,
         process_id,
     })
 }
@@ -571,7 +588,12 @@ pub(crate) fn write_terminal(input: TerminalInput) -> Result<()> {
 #[tauri::command]
 #[specta::specta]
 pub(crate) fn resize_terminal(input: TerminalSizeInput) -> Result<()> {
-    let size = validated_pty_size(input.cols, input.rows)?;
+    let size = validated_pty_size(
+        input.cols,
+        input.rows,
+        input.pixel_width,
+        input.pixel_height,
+    )?;
     let session = session_by_id(&input.session_id)?;
     let master = session.master.lock().unwrap();
     master.resize(size).map_err(terminal_error)
@@ -644,5 +666,45 @@ mod tests {
         assert_eq!(left, TabBarOrientation::VerticalLeft);
         assert_eq!(right, TabBarOrientation::VerticalRight);
         assert_eq!(legacy_vertical, TabBarOrientation::VerticalRight);
+    }
+
+    #[test]
+    fn rejects_legacy_canvas_renderer() {
+        let config = parse_toml(
+            r#"
+            [terminal]
+            renderer = "canvas"
+            "#,
+        )
+        .expect("valid TOML");
+
+        let error = terminal_settings_from_config(&config).expect_err("legacy renderer is invalid");
+
+        assert!(format!("{error:?}").contains("terminal.renderer must be dom or webgl"));
+    }
+
+    #[test]
+    fn terminal_command_advertises_iip_compatibility() {
+        let settings = TerminalSettings::default();
+        let command = build_terminal_command(&settings, &BTreeMap::new());
+
+        assert_eq!(
+            command
+                .get_env("TERM_PROGRAM")
+                .and_then(|value| value.to_str()),
+            Some("Nocturne")
+        );
+        assert_eq!(
+            command
+                .get_env("ITERM_SESSION_ID")
+                .and_then(|value| value.to_str()),
+            Some("nocturne")
+        );
+        assert_eq!(
+            command
+                .get_env("NOCTURNE_IMAGE_PROTOCOL")
+                .and_then(|value| value.to_str()),
+            Some("iip")
+        );
     }
 }

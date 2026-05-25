@@ -210,11 +210,19 @@
             inherited={isInherited}
           >
             {#if setting.kind === "select"}
-              <SegmentedControl
-                value={String(value)}
-                options={(setting.options ?? []).map((option) => ({ value: option.value, label: t(option.label) }))}
-                update={(next) => updateSetting(setting, next)}
-              />
+              {#if setting.key === "ui.language"}
+                <select value={String(value)} onchange={(event) => updateSetting(setting, event.currentTarget.value)}>
+                  {#each setting.options ?? [] as option}
+                    <option value={option.value}>{t(option.label)}</option>
+                  {/each}
+                </select>
+              {:else}
+                <SegmentedControl
+                  value={String(value)}
+                  options={(setting.options ?? []).map((option) => ({ value: option.value, label: t(option.label) }))}
+                  update={(next) => updateSetting(setting, next)}
+                />
+              {/if}
             {:else if setting.kind === "boolean"}
               <SwitchControl checked={Boolean(value)} update={(next) => updateSetting(setting, next)} />
             {:else if setting.kind === "host-dirs"}

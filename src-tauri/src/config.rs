@@ -629,7 +629,7 @@ fn emit_change(app: &AppHandle<impl Runtime>) {
     let _ = app.emit(CONFIG_CHANGED_EVENT, ());
 }
 
-pub(crate) fn effective_application_config(app: &AppHandle) -> Result<toml::Value> {
+pub(crate) fn effective_application_config(app: &AppHandle<impl Runtime>) -> Result<toml::Value> {
     let root = ensure_layout(app)?;
     let root_path = PathBuf::from(&root.root_dir);
     let main_config = read_main_config_from_path(Path::new(&root.main_config_path))?;

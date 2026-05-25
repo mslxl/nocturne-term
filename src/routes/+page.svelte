@@ -12,6 +12,7 @@
     createTerminalTab,
     createTerminalTabController,
     disposeTerminalTab,
+    measureTerminalFit,
     type TerminalExitEvent,
     type TerminalOutputEvent,
     type TerminalTab,
@@ -28,6 +29,7 @@
   let outputUnlisten: undefined | (() => void);
   let exitUnlisten: undefined | (() => void);
   let configUnlisten: undefined | (() => void);
+  let terminalMeasureContainer: HTMLDivElement;
 
   let activeTab = $derived(tabs.find((tab) => tab.id === activeId));
   let isVertical = $derived(tabBarOrientation !== "horizontal");
@@ -49,7 +51,7 @@
     tabBarOrientation = next.tab_bar_orientation;
     syncSettingsVariables(next);
     for (const tab of tabs) {
-      if (tab.term) tab.term.options = { ...tab.term.options, ...xtermOptions(next) };
+      if (tab.term) tab.term.options = xtermOptions(next);
       terminalTabs.scheduleFit(tab.id);
     }
   }
@@ -57,10 +59,15 @@
   async function newSession() {
     try {
       if (!settings) await loadSettings();
+      if (!settings) throw new Error("Terminal settings are not loaded");
+      await tick();
+      const measuredSize = measureTerminalFit(terminalMeasureContainer, settings, { cols: initialCols, rows: initialRows });
       const info = await unwrapCommand(
         commands.createTerminalSession({
-          cols: initialCols,
-          rows: initialRows,
+          cols: measuredSize.cols,
+          rows: measuredSize.rows,
+          pixel_width: measuredSize.pixelWidth,
+          pixel_height: measuredSize.pixelHeight,
         }),
       );
       tabs = [...tabs, createTerminalTab(info)];
@@ -168,6 +175,10 @@
 </script>
 
 <main class:left-tabs={tabsOnLeft} class:vertical={isVertical} class="workspace">
+  <div class="terminal-measure-host" aria-hidden="true">
+    <div class="terminal-mount" bind:this={terminalMeasureContainer}></div>
+  </div>
+
   {#if !isVertical || tabsOnLeft}
     <TerminalTabBar
       {tabs}
@@ -195,7 +206,9 @@
     {:else}
       {#each tabs as tab}
         <div class:active={tab.id === activeId} class="terminal-pane">
-          <div class="terminal-host" bind:this={tab.container}></div>
+          <div class="terminal-host">
+            <div class="terminal-mount" bind:this={tab.container}></div>
+          </div>
           {#if tab.error}
             <p class="terminal-error">{tab.error}</p>
           {/if}
@@ -246,6 +259,24 @@
     display: grid;
     grid-template-rows: 40px minmax(0, 1fr);
     background: color-mix(in srgb, var(--terminal-bg) 94%, black);
+  }
+
+  .terminal-measure-host {
+    position: fixed;
+    inset: 0 208px 0 0;
+    z-index: -1;
+    padding: var(--terminal-padding-top) var(--terminal-padding-right) var(--terminal-padding-bottom) var(--terminal-padding-left);
+    overflow: hidden;
+    visibility: hidden;
+    pointer-events: none;
+  }
+
+  .workspace:not(.vertical) .terminal-measure-host {
+    inset: 40px 0 0 0;
+  }
+
+  .workspace.vertical.left-tabs .terminal-measure-host {
+    inset: 0 0 0 208px;
   }
 
   .workspace.vertical {
@@ -303,6 +334,7 @@
     min-width: 0;
     min-height: 0;
     background: var(--terminal-bg);
+    overflow: hidden;
   }
 
   .terminal-pane.active {
@@ -313,6 +345,15 @@
     width: 100%;
     height: 100%;
     padding: var(--terminal-padding-top) var(--terminal-padding-right) var(--terminal-padding-bottom) var(--terminal-padding-left);
+    overflow: hidden;
+  }
+
+  .terminal-mount {
+    width: 100%;
+    height: 100%;
+    min-width: 0;
+    min-height: 0;
+    overflow: hidden;
   }
 
   .terminal-error {
@@ -330,11 +371,30 @@
   }
 
   :global(.xterm) {
+    width: 100%;
     height: 100%;
+    box-sizing: content-box;
+  }
+
+  :global(.xterm *) {
+    box-sizing: content-box;
   }
 
   :global(.xterm .xterm-viewport) {
     background-color: transparent;
+  }
+
+  :global(.xterm .xterm-screen) {
+    overflow: hidden;
+  }
+
+  :global(.xterm .xterm-rows) {
+    position: absolute;
+    inset: 0 auto auto 0;
+  }
+
+  :global(.xterm .xterm-rows > div) {
+    display: block;
   }
 
   @media (max-width: 720px) {
@@ -344,6 +404,14 @@
 
     .workspace.vertical.left-tabs {
       grid-template-columns: 160px minmax(0, 1fr);
+    }
+
+    .workspace.vertical .terminal-measure-host {
+      inset: 0 160px 0 0;
+    }
+
+    .workspace.vertical.left-tabs .terminal-measure-host {
+      inset: 0 0 0 160px;
     }
   }
 </style>
