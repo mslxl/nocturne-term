@@ -10,7 +10,7 @@ export type AppLanguage = "en" | "zh";
 export type ConfigDocument = MainConfigDocument | ProfileConfigDocument;
 
 export function cloneDocument<T extends ConfigDocument>(document: T): T {
-  return structuredClone(document);
+  return JSON.parse(JSON.stringify(document)) as T;
 }
 
 export function readValue(table: ConfigTable, path: string[]): ConfigValue | undefined {

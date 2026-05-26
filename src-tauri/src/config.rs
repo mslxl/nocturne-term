@@ -27,6 +27,7 @@ const ROOT_DIR_NAME: &str = "nocturne";
 const MAIN_CONFIG_FILE: &str = "config.toml";
 const STATE_FILE: &str = "state.toml";
 pub(crate) const PROFILES_DIR: &str = "profiles";
+const TERMINAL_COLOR_SCHEMES_DIR: &str = "terminal-color-schemes";
 const DEFAULT_PROFILE_FILE: &str = "default.toml";
 const DEFAULT_HOSTS_DIR: &str = "hosts";
 const DEFAULT_PROFILE_NAME: &str = "default";
@@ -141,8 +142,10 @@ pub(crate) fn ensure_layout(app: &AppHandle<impl Runtime>) -> Result<ConfigRootI
     fs::create_dir_all(&root).map_err(io_error)?;
     let profiles_dir = root.join(PROFILES_DIR);
     let hosts_dir = root.join(DEFAULT_HOSTS_DIR);
+    let terminal_color_schemes_dir = root.join(TERMINAL_COLOR_SCHEMES_DIR);
     fs::create_dir_all(&profiles_dir).map_err(io_error)?;
     fs::create_dir_all(&hosts_dir).map_err(io_error)?;
+    fs::create_dir_all(&terminal_color_schemes_dir).map_err(io_error)?;
 
     let state_path = root.join(STATE_FILE);
     if !state_path.exists() {
@@ -625,7 +628,7 @@ pub(crate) fn set_active_profile_impl(
     root_paths(app)
 }
 
-fn emit_change(app: &AppHandle<impl Runtime>) {
+pub(crate) fn emit_change(app: &AppHandle<impl Runtime>) {
     let _ = app.emit(CONFIG_CHANGED_EVENT, ());
 }
 
@@ -942,6 +945,7 @@ pub(crate) fn watch_config_command(app: AppHandle) -> Result<()> {
         PathBuf::from(&root.main_config_path),
         PathBuf::from(&root.state_path),
         Path::new(&root.root_dir).join(PROFILES_DIR),
+        Path::new(&root.root_dir).join(TERMINAL_COLOR_SCHEMES_DIR),
     ];
     paths.extend(host_dirs(Path::new(&root.root_dir), &state.active_profile)?);
     watch_config(app, paths)

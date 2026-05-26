@@ -1,5 +1,6 @@
 import type { ITerminalOptions, ITheme } from "@xterm/xterm";
 import type { TerminalSettings } from "$lib/bindings";
+import type { TerminalColorSchemeVariant } from "$lib/terminal/color-scheme";
 
 export function xtermOptions(config: TerminalSettings): ITerminalOptions {
   return {
@@ -21,6 +22,10 @@ export function syncSettingsVariables(config: TerminalSettings) {
   document.documentElement.style.setProperty("--terminal-padding-right", `${finiteNumber("terminal.padding.right", config.padding.right)}px`);
   document.documentElement.style.setProperty("--terminal-padding-bottom", `${finiteNumber("terminal.padding.bottom", config.padding.bottom)}px`);
   document.documentElement.style.setProperty("--terminal-padding-left", `${finiteNumber("terminal.padding.left", config.padding.left)}px`);
+}
+
+export function resolvedTerminalTheme(): TerminalColorSchemeVariant {
+  return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
 }
 
 function xtermTheme(config: TerminalSettings["theme"]): ITheme {

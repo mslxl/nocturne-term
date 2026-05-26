@@ -3,7 +3,7 @@
   import { listen } from "@tauri-apps/api/event";
   import "@xterm/xterm/css/xterm.css";
   import { commands, type TabBarOrientation, type TerminalSettings } from "$lib/bindings";
-  import { applyAppPreferences } from "$lib/config/document";
+  import { appThemeFromConfig, applyAppPreferences, readValue, resolveTheme } from "$lib/config/document";
   import { hasTauriRuntime } from "$lib/tauri/runtime";
   import TerminalTabBar from "$lib/terminal/components/TerminalTabBar.svelte";
   import { unwrapCommand } from "$lib/terminal/commands";
@@ -30,6 +30,7 @@
   let exitUnlisten: undefined | (() => void);
   let configUnlisten: undefined | (() => void);
   let terminalMeasureContainer: HTMLDivElement;
+  let appTheme: "light" | "dark" = "dark";
 
   let activeTab = $derived(tabs.find((tab) => tab.id === activeId));
   let isVertical = $derived(tabBarOrientation !== "horizontal");
@@ -46,7 +47,8 @@
     settingsError = "";
     const snapshot = await unwrapCommand(commands.getConfigSnapshot());
     applyAppPreferences(snapshot.effective_config.root);
-    const next = await unwrapCommand(commands.getTerminalSettings());
+    appTheme = resolveTheme(appThemeFromConfig(readValue(snapshot.effective_config.root, ["ui", "theme"])));
+    const next = await unwrapCommand(commands.getTerminalSettingsForTheme({ resolved_theme: appTheme }));
     settings = next;
     tabBarOrientation = next.tab_bar_orientation;
     syncSettingsVariables(next);
@@ -68,6 +70,7 @@
           rows: measuredSize.rows,
           pixel_width: measuredSize.pixelWidth,
           pixel_height: measuredSize.pixelHeight,
+          resolved_theme: appTheme,
         }),
       );
       tabs = [...tabs, createTerminalTab(info)];
@@ -242,15 +245,7 @@
   }
 
   :global(body) {
-    margin: 0;
-    font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-    background: var(--terminal-bg);
-    color: var(--terminal-fg);
     overflow: hidden;
-  }
-
-  :global(*) {
-    box-sizing: border-box;
   }
 
   .workspace {
@@ -258,7 +253,7 @@
     height: 100vh;
     display: grid;
     grid-template-rows: 40px minmax(0, 1fr);
-    background: color-mix(in srgb, var(--terminal-bg) 94%, black);
+    background: color-mix(in srgb, var(--app-bg) 94%, var(--app-fg));
   }
 
   .terminal-measure-host {
@@ -301,7 +296,7 @@
     place-content: center;
     justify-items: center;
     gap: 12px;
-    color: color-mix(in srgb, var(--terminal-fg) 72%, transparent);
+    color: color-mix(in srgb, var(--app-fg) 72%, transparent);
     user-select: none;
     -webkit-user-select: none;
   }
@@ -322,7 +317,7 @@
   .placeholder p {
     max-width: min(560px, calc(100vw - 48px));
     margin: 0;
-    color: #ffb4b4;
+    color: var(--app-danger);
     text-align: center;
     overflow-wrap: anywhere;
   }
@@ -364,8 +359,8 @@
     margin: 0;
     padding: 6px 8px;
     border-radius: 6px;
-    background: color-mix(in srgb, #551818 78%, transparent);
-    color: #ffd0d0;
+    background: color-mix(in srgb, var(--app-danger) 22%, transparent);
+    color: var(--app-danger);
     font-size: 12px;
     overflow-wrap: anywhere;
   }

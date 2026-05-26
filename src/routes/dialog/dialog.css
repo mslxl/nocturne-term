@@ -65,6 +65,22 @@
   background: var(--dialog-control);
   color: var(--dialog-fg);
   font: inherit;
+  box-shadow: var(--app-shadow);
+}
+
+.dialog-actions button:hover:not(:disabled) {
+  background: var(--app-control-hover);
+}
+
+.dialog-actions button:active:not(:disabled) {
+  background: var(--app-control-pressed);
+}
+
+.dialog-actions button:focus-visible,
+.dialog-body input:focus-visible,
+.dialog-body select:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--app-accent) 68%, transparent);
+  outline-offset: 2px;
 }
 
 .dialog-actions button.primary {
@@ -90,22 +106,12 @@
 }
 
 :global(:root) {
-  color-scheme: light dark;
-  --dialog-bg: #f6f6f6;
-  --dialog-fg: #1f1f1f;
-  --dialog-muted: #696969;
-  --dialog-border: #d3d3d3;
-  --dialog-control: #ffffff;
-  --dialog-danger: #a92727;
-}
-
-:global(:root[data-theme="dark"]) {
-  --dialog-bg: #242529;
-  --dialog-fg: #efefef;
-  --dialog-muted: #a7a7a7;
-  --dialog-border: #414348;
-  --dialog-control: #2d2f34;
-  --dialog-danger: #ffb5b5;
+  --dialog-bg: var(--app-bg);
+  --dialog-fg: var(--app-fg);
+  --dialog-muted: var(--app-muted);
+  --dialog-border: var(--app-border);
+  --dialog-control: var(--app-control);
+  --dialog-danger: var(--app-danger);
 }
 
 :global(body) {

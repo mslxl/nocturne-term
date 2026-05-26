@@ -7,10 +7,18 @@ export const commands = {
 	getConfigRoot: () => typedError<ConfigRootInfo, ConfigError>(__TAURI_INVOKE("get_config_root")),
 	getConfigSnapshot: () => typedError<AppConfigSnapshot, ConfigError>(__TAURI_INVOKE("get_config_snapshot")),
 	getTerminalSettings: () => typedError<TerminalSettings, ConfigError>(__TAURI_INVOKE("get_terminal_settings")),
+	getTerminalSettingsForTheme: (input: TerminalSettingsInput) => typedError<TerminalSettings, ConfigError>(__TAURI_INVOKE("get_terminal_settings_for_theme", { input })),
 	createTerminalSession: (input: CreateTerminalSessionInput) => typedError<TerminalSessionInfo, ConfigError>(__TAURI_INVOKE("create_terminal_session", { input })),
 	writeTerminal: (input: TerminalInput) => typedError<null, ConfigError>(__TAURI_INVOKE("write_terminal", { input })),
 	resizeTerminal: (input: TerminalSizeInput) => typedError<null, ConfigError>(__TAURI_INVOKE("resize_terminal", { input })),
 	closeTerminalSession: (sessionId: string) => typedError<null, ConfigError>(__TAURI_INVOKE("close_terminal_session", { sessionId })),
+	listTerminalColorSchemes: () => typedError<TerminalColorSchemeEntry[], ConfigError>(__TAURI_INVOKE("list_terminal_color_schemes")),
+	readTerminalColorScheme: (id: string) => typedError<TerminalColorSchemeEntry, ConfigError>(__TAURI_INVOKE("read_terminal_color_scheme", { id })),
+	createTerminalColorScheme: (input: TerminalColorSchemeInput) => typedError<TerminalColorSchemeEntry, ConfigError>(__TAURI_INVOKE("create_terminal_color_scheme", { input })),
+	updateTerminalColorScheme: (input: TerminalColorSchemeInput) => typedError<TerminalColorSchemeEntry, ConfigError>(__TAURI_INVOKE("update_terminal_color_scheme", { input })),
+	deleteTerminalColorScheme: (id: string) => typedError<null, ConfigError>(__TAURI_INVOKE("delete_terminal_color_scheme", { id })),
+	exportTerminalColorScheme: (id: string) => typedError<string, ConfigError>(__TAURI_INVOKE("export_terminal_color_scheme", { id })),
+	exportTerminalColorSchemeToPath: (input: TerminalColorSchemeExportInput) => typedError<string, ConfigError>(__TAURI_INVOKE("export_terminal_color_scheme_to_path", { input })),
 	listProfiles: () => typedError<ProfileEntry[], ConfigError>(__TAURI_INVOKE("list_profiles")),
 	readProfile: (name: string) => typedError<ProfileConfigDocument, ConfigError>(__TAURI_INVOKE("read_profile", { name })),
 	createProfile: (input: ProfileDocumentInput) => typedError<ProfileEntry, ConfigError>(__TAURI_INVOKE("create_profile", { input })),
@@ -81,6 +89,7 @@ export type CreateTerminalSessionInput = {
 	rows: number,
 	pixel_width: number,
 	pixel_height: number,
+	resolved_theme: TerminalColorSchemeVariant | null,
 };
 
 export type EffectiveConfigDocument = {
@@ -131,6 +140,54 @@ export type TabBarContextMenuInput = {
 
 export type TabBarOrientation = "horizontal" | "vertical_left" | "vertical_right";
 
+export type TerminalColorScheme = {
+	id: string,
+	name: string,
+	author: string | null,
+	variant: TerminalColorSchemeVariant,
+	background: string,
+	foreground: string,
+	cursor: string,
+	selection_background: string,
+	black: string,
+	red: string,
+	green: string,
+	yellow: string,
+	blue: string,
+	magenta: string,
+	cyan: string,
+	white: string,
+	bright_black: string,
+	bright_red: string,
+	bright_green: string,
+	bright_yellow: string,
+	bright_blue: string,
+	bright_magenta: string,
+	bright_cyan: string,
+	bright_white: string,
+};
+
+export type TerminalColorSchemeEntry = {
+	id: string,
+	source: TerminalColorSchemeSource,
+	path: string | null,
+	scheme: TerminalColorScheme,
+};
+
+export type TerminalColorSchemeExportInput = {
+	id: string,
+	path: string,
+};
+
+export type TerminalColorSchemeInput = {
+	id: string | null,
+	scheme: TerminalColorScheme,
+};
+
+export type TerminalColorSchemeSource = "builtin" | "user" | "legacy";
+
+export type TerminalColorSchemeVariant = "light" | "dark";
+
 export type TerminalCursorStyle = "block" | "underline" | "bar";
 
 export type TerminalInput = {
@@ -172,6 +229,10 @@ export type TerminalSettings = {
 	theme: TerminalTheme,
 	padding: TerminalPadding,
 	tab_bar_orientation: TabBarOrientation,
+};
+
+export type TerminalSettingsInput = {
+	resolved_theme: TerminalColorSchemeVariant | null,
 };
 
 export type TerminalSizeInput = {

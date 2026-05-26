@@ -47,7 +47,34 @@ The app-level theme is stored at:
 theme = "system" # system | light | dark
 ```
 
-`system` follows `prefers-color-scheme`. The frontend applies the resolved theme to `document.documentElement.dataset.theme`, and windows listen for config changes so the main terminal and settings windows refresh immediately.
+`system` follows `prefers-color-scheme`. The frontend applies the resolved theme to `document.documentElement.dataset.theme`, and windows listen for config changes so the main terminal, settings window, and profile dialogs refresh immediately.
+
+The app theme owns shared chrome: settings pages, profile dialogs, terminal tab bars, section backgrounds, and error surfaces use the shared app palette. Terminal content uses a theme-specific terminal color scheme.
+
+## Terminal Color Schemes
+
+Terminal color schemes are stored separately from app theme settings and are mapped by app theme:
+
+```toml
+[terminal.color_scheme]
+light = "builtin:nocturne-light"
+dark = "builtin:nocturne-dark"
+```
+
+The built-in schemes are:
+
+- `builtin:nocturne-light`
+- `builtin:nocturne-dark`
+
+User-created schemes are stored under the app config directory in `terminal-color-schemes/` as individual TOML files. The settings page lets users:
+
+- preview a scheme before saving
+- create a new scheme from a blank or copied template
+- edit existing user schemes
+- export a scheme to a chosen file path
+- map the light and dark app themes to different schemes
+
+The terminal preview should include the palette, foreground/background, and a small ANSI swatch set so the user can see what they are editing before saving.
 
 ## Language
 
@@ -84,6 +111,7 @@ Settings rows use small reusable Svelte components under `src/lib/settings/compo
 - Language uses a native select so the control scales better as more locales are added.
 - `SwitchControl.svelte` is for boolean settings.
 - `HostDirsControl.svelte` is for the host directory list, with `+` opening the native directory picker and `-` removing the selected row.
+- `TerminalColorSchemeManager.svelte` manages terminal palette schemes, previews, and light/dark theme mapping.
 
 Keep these controls visually restrained. They should feel like compact desktop settings controls, not web cards. Add focus-visible states for keyboard users and keep pressed/selected states distinct.
 

@@ -63,6 +63,69 @@ pub struct HostEntry {
     pub document: HostConfigDocument,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum TerminalColorSchemeVariant {
+    Light,
+    Dark,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum TerminalColorSchemeSource {
+    Builtin,
+    User,
+    Legacy,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct TerminalColorScheme {
+    pub id: String,
+    pub name: String,
+    pub author: Option<String>,
+    pub variant: TerminalColorSchemeVariant,
+    pub background: String,
+    pub foreground: String,
+    pub cursor: String,
+    pub selection_background: String,
+    pub black: String,
+    pub red: String,
+    pub green: String,
+    pub yellow: String,
+    pub blue: String,
+    pub magenta: String,
+    pub cyan: String,
+    pub white: String,
+    pub bright_black: String,
+    pub bright_red: String,
+    pub bright_green: String,
+    pub bright_yellow: String,
+    pub bright_blue: String,
+    pub bright_magenta: String,
+    pub bright_cyan: String,
+    pub bright_white: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct TerminalColorSchemeEntry {
+    pub id: String,
+    pub source: TerminalColorSchemeSource,
+    pub path: Option<String>,
+    pub scheme: TerminalColorScheme,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct TerminalColorSchemeInput {
+    pub id: Option<String>,
+    pub scheme: TerminalColorScheme,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct TerminalColorSchemeExportInput {
+    pub id: String,
+    pub path: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
 pub struct AppConfigSnapshot {
     pub root: ConfigRootInfo,
@@ -182,11 +245,17 @@ pub struct TerminalSettings {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct TerminalSettingsInput {
+    pub resolved_theme: Option<TerminalColorSchemeVariant>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
 pub struct CreateTerminalSessionInput {
     pub cols: u16,
     pub rows: u16,
     pub pixel_width: u16,
     pub pixel_height: u16,
+    pub resolved_theme: Option<TerminalColorSchemeVariant>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
