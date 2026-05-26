@@ -31,6 +31,7 @@ The current layout is:
 - `profiles/default.toml` - default profile
 - `profiles/<name>.toml` - additional profiles
 - `hosts/<hash>.toml` - host configs when using the default host directory
+- `terminal-color-schemes/<id>.toml` - user terminal color schemes
 
 The system also supports additional host directories through application config.
 
@@ -73,6 +74,10 @@ If no custom host directory is stored, the default is:
 relative to the application config root.
 
 Each host is stored in its own TOML file inside one of the configured host directories.
+
+Terminal color schemes are stored separately from app config under `terminal-color-schemes/`.
+Built-in schemes are provided by Rust and do not live on disk. User schemes are individual TOML files
+that can be previewed, edited, copied, and exported from the settings window.
 
 ### 5. Hash-based host identity
 
@@ -141,6 +146,12 @@ The important commands are:
 - `delete_host`
 - `set_host_dirs_command`
 - `watch_config_command`
+- `list_terminal_color_schemes`
+- `read_terminal_color_scheme`
+- `create_terminal_color_scheme`
+- `update_terminal_color_scheme`
+- `delete_terminal_color_scheme`
+- `export_terminal_color_scheme_to_path`
 
 ### Command behavior notes
 
@@ -161,6 +172,11 @@ Pattern:
 - listen for `config://changed` and invalidate the same query group
 
 The frontend should never read or write config files directly.
+
+Terminal color scheme commands manage the standalone scheme files in `terminal-color-schemes/`.
+The app theme to scheme mapping lives in config under `terminal.color_scheme.light` and
+`terminal.color_scheme.dark`. The terminal content area uses the mapped scheme, while the app
+chrome, settings window, and profile dialogs keep following `ui.theme`.
 
 ## Frontend Data Contract
 

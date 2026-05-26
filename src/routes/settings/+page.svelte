@@ -16,6 +16,7 @@
   import SegmentedControl from "$lib/settings/components/SegmentedControl.svelte";
   import SettingRow from "$lib/settings/components/SettingRow.svelte";
   import SwitchControl from "$lib/settings/components/SwitchControl.svelte";
+  import TerminalColorSchemeManager from "$lib/settings/components/TerminalColorSchemeManager.svelte";
   import { saveConfigValue } from "$lib/settings/save";
   import { settingCategories, settingsSchema, type SettingCategoryId, type SettingDefinition } from "$lib/settings/schema";
   import { hasTauriRuntime } from "$lib/tauri/runtime";
@@ -243,6 +244,10 @@
             {/if}
           </SettingRow>
         {/each}
+
+        {#if activeCategory === "terminal" && snapshot && editableDocument && effectiveRoot}
+          <TerminalColorSchemeManager target={{ kind: mode, profile: activeProfile }} document={editableDocument} effectiveRoot={effectiveRoot} />
+        {/if}
       </div>
     {/if}
   </section>
@@ -259,6 +264,7 @@
     --settings-active: #dce8fb;
     --settings-accent: #3d7dd8;
     --settings-danger: #a92727;
+    overflow: hidden;
   }
 
   :global(:root[data-theme="dark"]) {
@@ -349,6 +355,10 @@
     background: var(--settings-active);
   }
 
+  nav button:hover:not(.active) {
+    background: color-mix(in srgb, var(--settings-control) 82%, var(--settings-bg));
+  }
+
   .detail {
     min-width: 0;
     min-height: 0;
@@ -386,6 +396,13 @@
     font: inherit;
   }
 
+  input:focus-visible,
+  textarea:focus-visible,
+  select:focus-visible {
+    outline: 2px solid color-mix(in srgb, var(--settings-accent) 68%, transparent);
+    outline-offset: 2px;
+  }
+
   textarea {
     resize: vertical;
     min-height: 80px;
@@ -398,6 +415,16 @@
     border-radius: 6px;
     color: var(--settings-fg);
     background: color-mix(in srgb, var(--settings-control) 88%, var(--settings-bg));
+  }
+
+  .default-button:hover,
+  .back:hover {
+    background: color-mix(in srgb, var(--settings-control) 72%, var(--settings-bg));
+  }
+
+  .default-button:active,
+  .back:active {
+    background: color-mix(in srgb, var(--settings-accent) 18%, var(--settings-control));
   }
 
   .back {

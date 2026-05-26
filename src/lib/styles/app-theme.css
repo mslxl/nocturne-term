@@ -1,0 +1,71 @@
+:root {
+  color-scheme: light dark;
+  --app-bg: #f7f8fa;
+  --app-fg: #1f2328;
+  --app-muted: #66707a;
+  --app-border: #d0d7de;
+  --app-control: #ffffff;
+  --app-control-hover: #f2f5f8;
+  --app-control-pressed: #e9eef5;
+  --app-active: #dbe9ff;
+  --app-accent: #2f6fca;
+  --app-danger: #b42318;
+  --app-surface: #ffffff;
+  --app-surface-raised: #ffffff;
+  --app-shadow: 0 1px 2px color-mix(in srgb, black 10%, transparent);
+  --settings-bg: var(--app-bg);
+  --settings-fg: var(--app-fg);
+  --settings-muted: var(--app-muted);
+  --settings-border: var(--app-border);
+  --settings-control: var(--app-control);
+  --settings-active: var(--app-active);
+  --settings-accent: var(--app-accent);
+  --settings-danger: var(--app-danger);
+  --dialog-bg: var(--app-bg);
+  --dialog-fg: var(--app-fg);
+  --dialog-muted: var(--app-muted);
+  --dialog-border: var(--app-border);
+  --dialog-control: var(--app-control);
+  --dialog-danger: var(--app-danger);
+}
+
+:root[data-theme="dark"] {
+  --app-bg: #202124;
+  --app-fg: #eeeeee;
+  --app-muted: #a7a7a7;
+  --app-border: #3d3f43;
+  --app-control: #2b2d31;
+  --app-control-hover: #33363b;
+  --app-control-pressed: #3a3e45;
+  --app-active: #36465f;
+  --app-accent: #74a7f2;
+  --app-danger: #ffb5b5;
+  --app-surface: #2a2c31;
+  --app-surface-raised: #303238;
+  --app-shadow: 0 1px 2px color-mix(in srgb, black 34%, transparent);
+  --settings-bg: var(--app-bg);
+  --settings-fg: var(--app-fg);
+  --settings-muted: var(--app-muted);
+  --settings-border: var(--app-border);
+  --settings-control: var(--app-control);
+  --settings-active: var(--app-active);
+  --settings-accent: var(--app-accent);
+  --settings-danger: var(--app-danger);
+  --dialog-bg: var(--app-bg);
+  --dialog-fg: var(--app-fg);
+  --dialog-muted: var(--app-muted);
+  --dialog-border: var(--app-border);
+  --dialog-control: var(--app-control);
+  --dialog-danger: var(--app-danger);
+}
+
+body {
+  margin: 0;
+  background: var(--app-bg);
+  color: var(--app-fg);
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}

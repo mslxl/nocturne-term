@@ -2,6 +2,7 @@ mod app_shell;
 mod config;
 mod error;
 mod terminal;
+mod terminal_schemes;
 mod types;
 
 #[cfg(debug_assertions)]
@@ -17,10 +18,18 @@ pub fn run() {
         config::get_config_root,
         config::get_config_snapshot,
         terminal::get_terminal_settings,
+        terminal::get_terminal_settings_for_theme,
         terminal::create_terminal_session,
         terminal::write_terminal,
         terminal::resize_terminal,
         terminal::close_terminal_session,
+        terminal_schemes::list_terminal_color_schemes,
+        terminal_schemes::read_terminal_color_scheme,
+        terminal_schemes::create_terminal_color_scheme,
+        terminal_schemes::update_terminal_color_scheme,
+        terminal_schemes::delete_terminal_color_scheme,
+        terminal_schemes::export_terminal_color_scheme,
+        terminal_schemes::export_terminal_color_scheme_to_path,
         config::list_profiles,
         config::read_profile,
         config::create_profile,

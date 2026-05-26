@@ -16,10 +16,15 @@ use tauri::{AppHandle, Emitter};
 use crate::{
     config::effective_application_config,
     error::{invalid_error, missing_error, terminal_error, Result},
+    terminal_schemes::{
+        builtin_dark_scheme, builtin_light_scheme, scheme_to_terminal_theme,
+        terminal_color_scheme_by_id,
+    },
     types::{
         CreateTerminalSessionInput, TabBarOrientation, TerminalCursorStyle, TerminalExitEvent,
         TerminalInput, TerminalOutputEvent, TerminalPadding, TerminalRenderer, TerminalSessionInfo,
-        TerminalSettings, TerminalSizeInput, TerminalTheme,
+        TerminalSettings, TerminalSettingsInput, TerminalSizeInput, TerminalTheme,
+        TerminalColorSchemeVariant,
     },
 };
 
@@ -47,28 +52,7 @@ fn terminal_state() -> Arc<TerminalState> {
 }
 
 fn default_terminal_theme() -> TerminalTheme {
-    TerminalTheme {
-        background: "#101113".to_string(),
-        foreground: "#eef1f6".to_string(),
-        cursor: "#eef1f6".to_string(),
-        selection_background: "#36506f".to_string(),
-        black: "#1f2329".to_string(),
-        red: "#e06c75".to_string(),
-        green: "#98c379".to_string(),
-        yellow: "#e5c07b".to_string(),
-        blue: "#61afef".to_string(),
-        magenta: "#c678dd".to_string(),
-        cyan: "#56b6c2".to_string(),
-        white: "#d7dae0".to_string(),
-        bright_black: "#5c6370".to_string(),
-        bright_red: "#f28b91".to_string(),
-        bright_green: "#b4d99c".to_string(),
-        bright_yellow: "#f0d49a".to_string(),
-        bright_blue: "#82c4ff".to_string(),
-        bright_magenta: "#d99af0".to_string(),
-        bright_cyan: "#7fd3df".to_string(),
-        bright_white: "#ffffff".to_string(),
-    }
+    scheme_to_terminal_theme(&builtin_dark_scheme())
 }
 
 impl Default for TerminalPadding {
@@ -343,6 +327,37 @@ fn apply_theme_config(theme: &mut TerminalTheme, table: &toml::Table) -> Result<
     Ok(())
 }
 
+fn apply_legacy_theme_config(theme: &mut TerminalTheme, table: &toml::Table) -> Result<()> {
+    apply_theme_config(theme, table)
+}
+
+fn parse_color_scheme_map(table: &toml::Table) -> Result<(Option<String>, Option<String>)> {
+    let Some(toml::Value::Table(values)) = table.get("color_scheme") else {
+        if table.contains_key("color_scheme") {
+            return Err(invalid_error("terminal.color_scheme must be a table"));
+        }
+        return Ok((None, None));
+    };
+
+    let light = match values.get("light") {
+        Some(toml::Value::String(value)) if !value.trim().is_empty() => Some(value.clone()),
+        Some(toml::Value::String(_)) => {
+            return Err(invalid_error("terminal.color_scheme.light cannot be empty"));
+        }
+        Some(_) => return Err(invalid_error("terminal.color_scheme.light must be a string")),
+        None => None,
+    };
+    let dark = match values.get("dark") {
+        Some(toml::Value::String(value)) if !value.trim().is_empty() => Some(value.clone()),
+        Some(toml::Value::String(_)) => {
+            return Err(invalid_error("terminal.color_scheme.dark cannot be empty"));
+        }
+        Some(_) => return Err(invalid_error("terminal.color_scheme.dark must be a string")),
+        None => None,
+    };
+    Ok((light, dark))
+}
+
 fn is_css_color_like(value: &str) -> bool {
     let hex = value.strip_prefix('#');
     matches!(hex.map(str::len), Some(3 | 6 | 8))
@@ -351,7 +366,11 @@ fn is_css_color_like(value: &str) -> bool {
             .unwrap_or(false)
 }
 
-fn terminal_settings_from_config(config: &toml::Value) -> Result<TerminalSettings> {
+fn terminal_settings_from_config(
+    app: &AppHandle,
+    config: &toml::Value,
+    resolved_theme: Option<TerminalColorSchemeVariant>,
+) -> Result<TerminalSettings> {
     let mut settings = TerminalSettings::default();
     let Some(table) = terminal_table(config)? else {
         return Ok(settings);
@@ -386,7 +405,29 @@ fn terminal_settings_from_config(config: &toml::Value) -> Result<TerminalSetting
     if let Some(orientation) = optional_string(table, "tab_bar_orientation")? {
         settings.tab_bar_orientation = parse_tab_bar_orientation(&orientation)?;
     }
-    apply_theme_config(&mut settings.theme, table)?;
+    let (light_scheme, dark_scheme) = parse_color_scheme_map(table)?;
+    if let Some(theme_variant) = resolved_theme {
+        let theme_id = match theme_variant {
+            TerminalColorSchemeVariant::Light => light_scheme,
+            TerminalColorSchemeVariant::Dark => dark_scheme,
+        };
+        if let Some(theme_id) = theme_id {
+            let scheme = terminal_color_scheme_by_id(app, &theme_id)?.scheme;
+            settings.theme = scheme_to_terminal_theme(&scheme);
+        } else {
+            settings.theme = match theme_variant {
+                TerminalColorSchemeVariant::Light => {
+                    scheme_to_terminal_theme(&builtin_light_scheme())
+                }
+                TerminalColorSchemeVariant::Dark => {
+                    scheme_to_terminal_theme(&builtin_dark_scheme())
+                }
+            };
+            apply_theme_config(&mut settings.theme, table)?;
+        }
+    } else {
+        apply_legacy_theme_config(&mut settings.theme, table)?;
+    }
     apply_padding_config(&mut settings.padding, table)?;
     Ok(settings)
 }
@@ -518,7 +559,18 @@ fn spawn_terminal_waiter(app: AppHandle, session_id: String, mut child: Box<dyn 
 #[tauri::command]
 #[specta::specta]
 pub(crate) fn get_terminal_settings(app: AppHandle) -> Result<TerminalSettings> {
-    terminal_settings_from_config(&effective_application_config(&app)?)
+    terminal_settings_from_config(&app, &effective_application_config(&app)?, None)
+}
+
+#[tauri::command]
+#[specta::specta]
+pub(crate) fn get_terminal_settings_for_theme(
+    app: AppHandle,
+    input: TerminalSettingsInput,
+) -> Result<TerminalSettings> {
+    let resolved_theme = input.resolved_theme;
+    let config = effective_application_config(&app)?;
+    terminal_settings_from_config(&app, &config, resolved_theme)
 }
 
 #[tauri::command]
@@ -534,7 +586,7 @@ pub(crate) fn create_terminal_session(
         input.pixel_height,
     )?;
     let config = effective_application_config(&app)?;
-    let settings = terminal_settings_from_config(&config)?;
+    let settings = terminal_settings_from_config(&app, &config, input.resolved_theme)?;
     let env_overrides = terminal_env_from_config(&config)?;
     let command_label = terminal_command_label(&settings);
     let command = build_terminal_command(&settings, &env_overrides);

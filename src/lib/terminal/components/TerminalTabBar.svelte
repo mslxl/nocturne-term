@@ -61,21 +61,21 @@
   .tabbar {
     user-select: none;
     -webkit-user-select: none;
-    border-color: color-mix(in srgb, var(--terminal-fg) 16%, transparent);
-    background: color-mix(in srgb, var(--terminal-bg) 88%, var(--terminal-fg));
+    border-color: var(--app-border);
+    background: color-mix(in srgb, var(--app-bg) 88%, var(--app-control));
   }
 
   .tabbar.horizontal {
     display: grid;
     grid-template-columns: minmax(0, 1fr) 36px;
     align-items: stretch;
-    border-bottom: 1px solid color-mix(in srgb, var(--terminal-fg) 16%, transparent);
+    border-bottom: 1px solid var(--app-border);
   }
 
   .vertical-tabs {
     display: grid;
     grid-template-rows: minmax(0, 1fr) 40px;
-    border-inline: 1px solid color-mix(in srgb, var(--terminal-fg) 16%, transparent);
+    border-inline: 1px solid var(--app-border);
   }
 
   .tabs {
@@ -104,26 +104,26 @@
     display: grid;
     grid-template-columns: minmax(0, 1fr) 28px;
     align-items: stretch;
-    border-right: 1px solid color-mix(in srgb, var(--terminal-fg) 12%, transparent);
+    border-right: 1px solid var(--app-border);
   }
 
   .vertical-tabs .tab-item {
     width: 100%;
     max-width: none;
     border-right: 0;
-    border-bottom: 1px solid color-mix(in srgb, var(--terminal-fg) 12%, transparent);
+    border-bottom: 1px solid var(--app-border);
   }
 
   .tab-item.active {
-    background: var(--terminal-bg);
+    background: var(--app-control);
   }
 
   .tab-item.exited {
-    color: color-mix(in srgb, var(--terminal-fg) 62%, transparent);
+    color: color-mix(in srgb, var(--app-fg) 62%, transparent);
   }
 
   .tab-item.error {
-    color: #ffb4b4;
+    color: var(--app-danger);
   }
 
   .tab-activate {
@@ -152,7 +152,7 @@
   .tab-activate small {
     font-size: 10px;
     line-height: 1.1;
-    color: color-mix(in srgb, var(--terminal-fg) 64%, transparent);
+    color: color-mix(in srgb, var(--app-fg) 64%, transparent);
   }
 
   .close-tab {
@@ -160,7 +160,7 @@
     height: 39px;
     display: grid;
     place-items: center;
-    color: color-mix(in srgb, var(--terminal-fg) 58%, transparent);
+    color: color-mix(in srgb, var(--app-fg) 58%, transparent);
     font-size: 16px;
     line-height: 1;
   }
@@ -168,11 +168,11 @@
   .close-tab:active,
   .new-session:active,
   .tab-activate:active {
-    background: color-mix(in srgb, var(--terminal-selection) 38%, transparent);
+    background: var(--app-active);
   }
 
   .close-tab:hover {
-    color: var(--terminal-fg);
+    color: var(--app-fg);
   }
 
   .new-session {
@@ -183,13 +183,13 @@
     place-items: center;
     font-size: 21px;
     line-height: 1;
-    border-left: 1px solid color-mix(in srgb, var(--terminal-fg) 12%, transparent);
+    border-left: 1px solid var(--app-border);
   }
 
   .vertical-tabs .new-session {
     width: 100%;
     border-left: 0;
-    border-top: 1px solid color-mix(in srgb, var(--terminal-fg) 12%, transparent);
+    border-top: 1px solid var(--app-border);
   }
 
   @media (max-width: 720px) {
