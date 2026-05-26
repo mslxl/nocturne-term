@@ -461,6 +461,7 @@ fn validated_pty_size(
 
 fn build_terminal_command(
     settings: &TerminalSettings,
+    cwd_override: Option<&str>,
     env_overrides: &BTreeMap<String, String>,
 ) -> CommandBuilder {
     let mut command = if let Some(program) = &settings.command {
@@ -470,7 +471,7 @@ fn build_terminal_command(
     } else {
         CommandBuilder::new_default_prog()
     };
-    if let Some(cwd) = &settings.cwd {
+    if let Some(cwd) = cwd_override.or(settings.cwd.as_deref()) {
         command.cwd(cwd);
     }
     command.env("TERM", "xterm-256color");
@@ -589,7 +590,7 @@ pub(crate) fn create_terminal_session(
     let settings = terminal_settings_from_config(&app, &config, input.resolved_theme)?;
     let env_overrides = terminal_env_from_config(&config)?;
     let command_label = terminal_command_label(&settings);
-    let command = build_terminal_command(&settings, &env_overrides);
+    let command = build_terminal_command(&settings, input.cwd.as_deref(), &env_overrides);
     let pty_system = native_pty_system();
     let pair = pty_system.openpty(size).map_err(terminal_error)?;
     let reader = pair.master.try_clone_reader().map_err(terminal_error)?;
@@ -617,7 +618,7 @@ pub(crate) fn create_terminal_session(
         id,
         title: format!("Session {session_number}"),
         command: command_label,
-        cwd: settings.cwd.clone(),
+        cwd: input.cwd.or(settings.cwd),
         cols: input.cols,
         rows: input.rows,
         pixel_width: input.pixel_width,
@@ -738,7 +739,7 @@ mod tests {
     #[test]
     fn terminal_command_advertises_iip_compatibility() {
         let settings = TerminalSettings::default();
-        let command = build_terminal_command(&settings, &BTreeMap::new());
+        let command = build_terminal_command(&settings, None, &BTreeMap::new());
 
         assert_eq!(
             command
@@ -757,6 +758,20 @@ mod tests {
                 .get_env("NOCTURNE_IMAGE_PROTOCOL")
                 .and_then(|value| value.to_str()),
             Some("iip")
+        );
+    }
+
+    #[test]
+    fn terminal_command_prefers_runtime_cwd_override() {
+        let settings = TerminalSettings {
+            cwd: Some("/configured".to_string()),
+            ..TerminalSettings::default()
+        };
+        let command = build_terminal_command(&settings, Some("/runtime"), &BTreeMap::new());
+
+        assert_eq!(
+            command.get_cwd().and_then(|value| value.to_str()),
+            Some("/runtime")
         );
     }
 }

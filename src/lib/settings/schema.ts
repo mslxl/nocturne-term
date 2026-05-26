@@ -16,9 +16,10 @@ import {
   type AppTheme,
 } from "$lib/config/document";
 import type { MessageKey } from "$lib/i18n/messages";
+import { defaultKeybindingMap, terminalKeybindings, type KeybindingMap } from "$lib/terminal/keybindings";
 
-export type SettingCategoryId = "appearance" | "terminal" | "profiles" | "hosts";
-export type SettingValueKind = "text" | "number" | "integer" | "boolean" | "select" | "textarea" | "host-dirs" | "color";
+export type SettingCategoryId = "appearance" | "terminal" | "keybindings" | "profiles" | "hosts";
+export type SettingValueKind = "text" | "number" | "integer" | "boolean" | "select" | "textarea" | "host-dirs" | "color" | "keybindings";
 
 export type SettingDefinition<T = unknown> = {
   key: string;
@@ -47,9 +48,14 @@ function tabBarOrientationValue(value: ConfigValue | undefined): TabBarOrientati
   throw new Error(`unsupported terminal.tab_bar_orientation value: ${raw}`);
 }
 
+function isMacPlatform() {
+  return typeof navigator !== "undefined" && navigator.platform.toLowerCase().includes("mac");
+}
+
 export const settingCategories: { id: SettingCategoryId; label: MessageKey }[] = [
   { id: "appearance", label: "appearance" },
   { id: "terminal", label: "terminal" },
+  { id: "keybindings", label: "keybindings" },
   { id: "profiles", label: "profiles" },
   { id: "hosts", label: "hosts" },
 ];
@@ -226,6 +232,39 @@ export const settingsSchema: SettingDefinition[] = [
       numberValue(valueAt(root, ["terminal", "padding", edge])) ?? 8,
     toConfigValue: (value: unknown) => configFloat(Number(value)),
   })),
+  {
+    key: "keybindings.terminal",
+    category: "keybindings",
+    label: "terminalKeybindings",
+    path: ["keybindings", "terminal"],
+    kind: "keybindings",
+    defaultValue: defaultKeybindingMap(isMacPlatform()),
+    get: (root) => {
+      const table = valueAt(root, ["keybindings", "terminal"]);
+      const defaults = defaultKeybindingMap(isMacPlatform());
+      if (!table) return defaults;
+      if (table.kind !== "Table") throw new Error("keybindings.terminal must be a table");
+      const next: KeybindingMap = { ...defaults };
+      for (const binding of terminalKeybindings) {
+        const key = binding.command.replace("terminal.", "");
+        const configured = stringValue(table.value[key]);
+        if (configured !== undefined) next[binding.command] = configured;
+      }
+      return next;
+    },
+    toConfigValue: (value) => {
+      const bindings = value as KeybindingMap;
+      return {
+        kind: "Table",
+        value: Object.fromEntries(
+          terminalKeybindings.map((binding) => [
+            binding.command.replace("terminal.", ""),
+            configString(bindings[binding.command]),
+          ]),
+        ),
+      };
+    },
+  },
   {
     key: "host_dirs",
     category: "hosts",

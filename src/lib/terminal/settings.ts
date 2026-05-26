@@ -4,7 +4,6 @@ import type { TerminalColorSchemeVariant } from "$lib/terminal/color-scheme";
 
 export function xtermOptions(config: TerminalSettings): ITerminalOptions {
   return {
-    allowProposedApi: config.renderer === "webgl",
     cursorBlink: config.cursor_blink,
     cursorStyle: config.cursor_style,
     fontFamily: config.font_family,

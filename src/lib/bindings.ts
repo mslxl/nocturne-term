@@ -35,6 +35,7 @@ export const commands = {
 	setHostDirsCommand: (input: HostDirsInput) => typedError<ConfigRootInfo, ConfigError>(__TAURI_INVOKE("set_host_dirs_command", { input })),
 	removeConfigKey: (input: ConfigKeyPathInput) => typedError<null, ConfigError>(__TAURI_INVOKE("remove_config_key", { input })),
 	showTabBarContextMenu: (input: TabBarContextMenuInput) => typedError<null, ConfigError>(__TAURI_INVOKE("show_tab_bar_context_menu", { input })),
+	showPaneContextMenu: (input: PaneContextMenuInput) => typedError<null, ConfigError>(__TAURI_INVOKE("show_pane_context_menu", { input })),
 	refreshAppMenu: () => typedError<null, ConfigError>(__TAURI_INVOKE("refresh_app_menu")),
 	watchConfigCommand: () => typedError<null, ConfigError>(__TAURI_INVOKE("watch_config_command")),
 };
@@ -90,6 +91,7 @@ export type CreateTerminalSessionInput = {
 	pixel_width: number,
 	pixel_height: number,
 	resolved_theme: TerminalColorSchemeVariant | null,
+	cwd: string | null,
 };
 
 export type EffectiveConfigDocument = {
@@ -117,6 +119,12 @@ export type HostEntry = {
 
 export type MainConfigDocument = {
 	root: ConfigTable,
+};
+
+export type PaneContextMenuInput = {
+	x: number | null,
+	y: number | null,
+	pane_id: string,
 };
 
 export type ProfileConfigDocument = {

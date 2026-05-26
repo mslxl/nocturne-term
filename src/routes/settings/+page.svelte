@@ -13,6 +13,7 @@
   } from "$lib/config/document";
   import { setLanguage, t } from "$lib/i18n";
   import HostDirsControl from "$lib/settings/components/HostDirsControl.svelte";
+  import KeybindingsControl from "$lib/settings/components/KeybindingsControl.svelte";
   import SegmentedControl from "$lib/settings/components/SegmentedControl.svelte";
   import SettingRow from "$lib/settings/components/SettingRow.svelte";
   import SwitchControl from "$lib/settings/components/SwitchControl.svelte";
@@ -228,6 +229,8 @@
               <SwitchControl checked={Boolean(value)} update={(next) => updateSetting(setting, next)} />
             {:else if setting.kind === "host-dirs"}
               <HostDirsControl dirs={value as string[]} update={(next) => updateSetting(setting, next)} />
+            {:else if setting.kind === "keybindings"}
+              <KeybindingsControl value={value as never} update={(next) => updateSetting(setting, next)} />
             {:else if setting.kind === "textarea"}
               <textarea value={String(value)} rows="4" onblur={(event) => updateSetting(setting, event.currentTarget.value)}></textarea>
             {:else}

@@ -46,6 +46,7 @@ pub fn run() {
         config::set_host_dirs_command,
         config::remove_config_key,
         app_shell::show_tab_bar_context_menu,
+        app_shell::show_pane_context_menu,
         app_shell::refresh_app_menu,
         config::watch_config_command
     ]);
