@@ -10,15 +10,46 @@
     closeTab: (id: string) => void | Promise<void>;
     newSession: () => void | Promise<void>;
     openContextMenu: (event: MouseEvent) => void | Promise<void>;
+    startTabPointerDrag: (event: PointerEvent, tabId: string) => void;
   };
 
-  let { tabs, activeId, placement, activateTab, closeTab, newSession, openContextMenu }: Props = $props();
+  let {
+    tabs,
+    activeId,
+    placement,
+    activateTab,
+    closeTab,
+    newSession,
+    openContextMenu,
+    startTabPointerDrag,
+  }: Props = $props();
 
   const isVertical = $derived(placement !== "horizontal");
 
+  function activePane(tab: TerminalTab) {
+    const pane = tab.panes.find((item) => item.id === tab.activePaneId);
+    if (!pane) throw new Error(`active pane ${tab.activePaneId} not found in tab ${tab.id}`);
+    return pane;
+  }
+
   function close(event: MouseEvent, id: string) {
+    event.preventDefault();
     event.stopPropagation();
     void closeTab(id);
+  }
+
+  function stopPointer(event: PointerEvent) {
+    event.stopPropagation();
+  }
+
+  function activate(event: MouseEvent, id: string) {
+    event.preventDefault();
+    event.stopPropagation();
+    void activateTab(id);
+  }
+
+  function pointerDragStart(event: PointerEvent, id: string) {
+    startTabPointerDrag(event, id);
   }
 </script>
 
@@ -29,24 +60,40 @@
   aria-label="Terminal sessions"
   data-placement={placement}
   oncontextmenu={openContextMenu}
+  data-testid="terminal-tabbar"
 >
   <div class="tabs">
-    {#each tabs as tab}
+    {#each tabs as tab (tab.id)}
+      {@const pane = activePane(tab)}
       <div
         class:active={tab.id === activeId}
-        class:error={tab.status === "error"}
-        class:exited={tab.status === "exited"}
+        class:error={pane.status === "error"}
+        class:exited={pane.status === "exited"}
         class="tab-item"
+        data-tab-id={tab.id}
+        data-testid="terminal-tab"
+        role="listitem"
       >
-        <button class="tab-activate" type="button" onclick={() => activateTab(tab.id)}>
+        <button
+          class="tab-activate"
+          data-testid="tab-activate"
+          type="button"
+          onpointerdown={(event) => pointerDragStart(event, tab.id)}
+          onclick={(event) => activate(event, tab.id)}
+        >
           <span>{tab.title}</span>
-          <small>{tab.command}</small>
+          <small>{pane.command}</small>
         </button>
         <button
           class="close-tab"
+          data-testid="tab-close"
           type="button"
           aria-label={`Close ${tab.title}`}
           title="Close tab"
+          draggable="false"
+          onpointerdown={stopPointer}
+          onpointerup={stopPointer}
+          onmousedown={(event) => event.stopPropagation()}
           onclick={(event) => close(event, tab.id)}
         >
           &times;
@@ -54,7 +101,7 @@
       </div>
     {/each}
   </div>
-  <button class="new-session" type="button" aria-label="New session" title="New session" onclick={newSession}>+</button>
+  <button class="new-session" data-testid="new-session" type="button" aria-label="New session" title="New session" onclick={newSession}>+</button>
 </nav>
 
 <style>
@@ -83,6 +130,11 @@
     min-height: 0;
     display: flex;
     overflow: auto;
+    scrollbar-width: none;
+  }
+
+  .tabs::-webkit-scrollbar {
+    display: none;
   }
 
   .vertical-tabs .tabs {

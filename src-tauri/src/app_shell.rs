@@ -8,7 +8,7 @@ use crate::{
     config,
     error::{invalid_error, Result},
     terminal,
-    types::{TabBarContextMenuInput, TabBarOrientation},
+    types::{PaneContextMenuInput, PaneMenuAction, PaneMenuEvent, TabBarContextMenuInput, TabBarOrientation},
 };
 use std::env;
 
@@ -24,7 +24,12 @@ const TAB_BAR_ORIENTATION_PREFIX: &str = "terminal.tab_bar_orientation.";
 const TAB_BAR_ORIENTATION_HORIZONTAL: &str = "terminal.tab_bar_orientation.horizontal";
 const TAB_BAR_ORIENTATION_VERTICAL_LEFT: &str = "terminal.tab_bar_orientation.vertical_left";
 const TAB_BAR_ORIENTATION_VERTICAL_RIGHT: &str = "terminal.tab_bar_orientation.vertical_right";
+const PANE_SPLIT_LEFT: &str = "terminal.pane.split_left";
+const PANE_SPLIT_RIGHT: &str = "terminal.pane.split_right";
+const PANE_SPLIT_UP: &str = "terminal.pane.split_up";
+const PANE_SPLIT_DOWN: &str = "terminal.pane.split_down";
 const SETTINGS_NAVIGATE_EVENT: &str = "settings://navigate";
+const PANE_MENU_EVENT: &str = "terminal://pane-menu";
 
 #[derive(Copy, Clone, PartialEq, Eq)]
 enum UiLanguage {
@@ -43,6 +48,10 @@ struct MenuText {
     horizontal_tabs: &'static str,
     vertical_left_tabs: &'static str,
     vertical_right_tabs: &'static str,
+    split_left: &'static str,
+    split_right: &'static str,
+    split_up: &'static str,
+    split_down: &'static str,
     settings_title: &'static str,
     new_profile_title: &'static str,
     delete_profile_title: &'static str,
@@ -61,6 +70,10 @@ fn menu_text(language: UiLanguage) -> MenuText {
             horizontal_tabs: "Horizontal Tabs",
             vertical_left_tabs: "Vertical Tabs on Left",
             vertical_right_tabs: "Vertical Tabs on Right",
+            split_left: "Split Left",
+            split_right: "Split Right",
+            split_up: "Split Up",
+            split_down: "Split Down",
             settings_title: "Nocturne Settings",
             new_profile_title: "New Profile",
             delete_profile_title: "Delete Profile",
@@ -76,6 +89,10 @@ fn menu_text(language: UiLanguage) -> MenuText {
             horizontal_tabs: "水平标签",
             vertical_left_tabs: "左侧标签",
             vertical_right_tabs: "右侧标签",
+            split_left: "向左分割",
+            split_right: "向右分割",
+            split_up: "向上分割",
+            split_down: "向下分割",
             settings_title: "Nocturne 设置",
             new_profile_title: "新建档案",
             delete_profile_title: "删除档案",
@@ -156,6 +173,12 @@ pub(crate) fn handle_menu_event<R: Runtime>(app: &AppHandle<R>, id: &str) {
     } else if let Some(placement) = id.strip_prefix(TAB_BAR_ORIENTATION_PREFIX) {
         let orientation = tab_bar_orientation_from_menu_id(placement);
         orientation.and_then(|value| config::set_effective_tab_bar_orientation(app, value))
+    } else if id.starts_with(&format!("{PANE_SPLIT_LEFT}:"))
+        || id.starts_with(&format!("{PANE_SPLIT_RIGHT}:"))
+        || id.starts_with(&format!("{PANE_SPLIT_UP}:"))
+        || id.starts_with(&format!("{PANE_SPLIT_DOWN}:"))
+    {
+        emit_pane_menu_event(app, id)
     } else {
         Ok(())
     };
@@ -163,6 +186,52 @@ pub(crate) fn handle_menu_event<R: Runtime>(app: &AppHandle<R>, id: &str) {
     if let Err(error) = result {
         eprintln!("menu action failed: {error}");
     }
+}
+
+#[tauri::command]
+#[specta::specta]
+pub(crate) fn show_pane_context_menu(app: AppHandle, input: PaneContextMenuInput) -> Result<()> {
+    let labels = menu_text(resolve_ui_language(&app));
+    let split_left = MenuItem::with_id(
+        &app,
+        format!("{PANE_SPLIT_LEFT}:{}", input.pane_id),
+        labels.split_left,
+        true,
+        None::<&str>,
+    )
+    .map_err(to_config_error)?;
+    let split_right = MenuItem::with_id(
+        &app,
+        format!("{PANE_SPLIT_RIGHT}:{}", input.pane_id),
+        labels.split_right,
+        true,
+        None::<&str>,
+    )
+    .map_err(to_config_error)?;
+    let split_up = MenuItem::with_id(
+        &app,
+        format!("{PANE_SPLIT_UP}:{}", input.pane_id),
+        labels.split_up,
+        true,
+        None::<&str>,
+    )
+    .map_err(to_config_error)?;
+    let split_down = MenuItem::with_id(
+        &app,
+        format!("{PANE_SPLIT_DOWN}:{}", input.pane_id),
+        labels.split_down,
+        true,
+        None::<&str>,
+    )
+    .map_err(to_config_error)?;
+    let menu = Menu::with_items(&app, &[&split_left, &split_right, &split_up, &split_down])
+        .map_err(to_config_error)?;
+    let window = app
+        .get_webview_window("main")
+        .ok_or_else(|| invalid_error("main window not found"))?;
+    window
+        .popup_menu_at(&menu, LogicalPosition::new(input.x, input.y))
+        .map_err(to_config_error)
 }
 
 #[tauri::command]
@@ -231,6 +300,32 @@ fn tab_bar_orientation_from_menu_id(id: &str) -> Result<TabBarOrientation> {
             "unsupported tab bar placement: {id}"
         ))),
     }
+}
+
+fn emit_pane_menu_event<R: Runtime>(app: &AppHandle<R>, id: &str) -> Result<()> {
+    let (action, pane_id) = if let Some(pane_id) = id.strip_prefix(&format!("{PANE_SPLIT_LEFT}:")) {
+        (PaneMenuAction::SplitLeft, pane_id)
+    } else if let Some(pane_id) = id.strip_prefix(&format!("{PANE_SPLIT_RIGHT}:")) {
+        (PaneMenuAction::SplitRight, pane_id)
+    } else if let Some(pane_id) = id.strip_prefix(&format!("{PANE_SPLIT_UP}:")) {
+        (PaneMenuAction::SplitUp, pane_id)
+    } else if let Some(pane_id) = id.strip_prefix(&format!("{PANE_SPLIT_DOWN}:")) {
+        (PaneMenuAction::SplitDown, pane_id)
+    } else {
+        return Ok(());
+    };
+    let window = app
+        .get_webview_window("main")
+        .ok_or_else(|| invalid_error("main window not found"))?;
+    window
+        .emit(
+            PANE_MENU_EVENT,
+            PaneMenuEvent {
+                action,
+                pane_id: pane_id.to_string(),
+            },
+        )
+        .map_err(to_config_error)
 }
 
 fn open_settings<R: Runtime>(app: &AppHandle<R>, mode: &str) -> Result<()> {

@@ -197,6 +197,28 @@ pub struct TabBarContextMenuInput {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct PaneContextMenuInput {
+    pub x: f64,
+    pub y: f64,
+    pub pane_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct PaneMenuEvent {
+    pub action: PaneMenuAction,
+    pub pane_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum PaneMenuAction {
+    SplitLeft,
+    SplitRight,
+    SplitUp,
+    SplitDown,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
 pub struct TerminalTheme {
     pub background: String,
     pub foreground: String,
@@ -256,6 +278,7 @@ pub struct CreateTerminalSessionInput {
     pub pixel_width: u16,
     pub pixel_height: u16,
     pub resolved_theme: Option<TerminalColorSchemeVariant>,
+    pub cwd: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
