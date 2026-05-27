@@ -4,6 +4,7 @@ import {
   countPaneLeaves,
   createPaneLeaf,
   clonePaneTree,
+  deriveCustomizableTabTitle,
   deriveTabDisplayTitle,
   layoutPaneTree,
   listPaneIds,
@@ -119,6 +120,11 @@ describe("pane tree", () => {
   it("derives tab display titles from active pane title and pane count", () => {
     assert.equal(deriveTabDisplayTitle("server", 1), "server");
     assert.equal(deriveTabDisplayTitle("server", 3), "server | 3 panes");
+  });
+
+  it("prefers a custom tab title until it is cleared", () => {
+    assert.equal(deriveCustomizableTabTitle("Production", "server", 3), "Production");
+    assert.equal(deriveCustomizableTabTitle("  ", "server", 3), "server | 3 panes");
   });
 
   it("rejects invalid ratios instead of silently fixing them", () => {

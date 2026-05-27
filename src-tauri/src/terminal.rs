@@ -21,20 +21,27 @@ use crate::{
         terminal_color_scheme_by_id,
     },
     types::{
-        CreateTerminalSessionInput, TabBarOrientation, TerminalCursorStyle, TerminalExitEvent,
-        TerminalInput, TerminalOutputEvent, TerminalPadding, TerminalRenderer, TerminalSessionInfo,
-        TerminalSettings, TerminalSettingsInput, TerminalSizeInput, TerminalTheme,
-        TerminalColorSchemeVariant,
+        CreateTerminalSessionInput, ExistingTerminalSessionInput, TabBarOrientation,
+        TerminalColorSchemeVariant, TerminalCursorStyle, TerminalExitEvent, TerminalInput,
+        TerminalOutputBacklogInput, TerminalOutputEvent, TerminalPadding, TerminalRenderer,
+        TerminalSessionInfo, TerminalSessionOwnershipInput, TerminalSettings,
+        TerminalSettingsInput, TerminalSizeInput, TerminalTheme,
     },
 };
 
 const TERMINAL_OUTPUT_EVENT: &str = "terminal://output";
 const TERMINAL_EXIT_EVENT: &str = "terminal://exit";
+const OUTPUT_BACKLOG_LIMIT: usize = 512 * 1024;
 
 struct TerminalSession {
     master: Mutex<Box<dyn MasterPty + Send>>,
     writer: Mutex<Box<dyn Write + Send>>,
     killer: Mutex<Box<dyn ChildKiller + Send + Sync>>,
+    info: Mutex<TerminalSessionInfo>,
+    window_label: Mutex<String>,
+    output_backlog: Mutex<Vec<u8>>,
+    output_sequence: Mutex<u64>,
+    output_backlog_start_sequence: Mutex<u64>,
 }
 
 #[derive(Default)]
@@ -344,7 +351,11 @@ fn parse_color_scheme_map(table: &toml::Table) -> Result<(Option<String>, Option
         Some(toml::Value::String(_)) => {
             return Err(invalid_error("terminal.color_scheme.light cannot be empty"));
         }
-        Some(_) => return Err(invalid_error("terminal.color_scheme.light must be a string")),
+        Some(_) => {
+            return Err(invalid_error(
+                "terminal.color_scheme.light must be a string",
+            ))
+        }
         None => None,
     };
     let dark = match values.get("dark") {
@@ -432,6 +443,61 @@ fn terminal_settings_from_config(
     Ok(settings)
 }
 
+#[cfg(test)]
+fn terminal_settings_from_config_for_test(config: &toml::Value) -> Result<TerminalSettings> {
+    terminal_settings_from_config_without_scheme_lookup(config, None)
+}
+
+#[cfg(test)]
+fn terminal_settings_from_config_without_scheme_lookup(
+    config: &toml::Value,
+    resolved_theme: Option<TerminalColorSchemeVariant>,
+) -> Result<TerminalSettings> {
+    let mut settings = TerminalSettings::default();
+    let Some(table) = terminal_table(config)? else {
+        return Ok(settings);
+    };
+
+    settings.command = optional_string(table, "command")?;
+    settings.args = optional_string_array(table, "args")?.unwrap_or_default();
+    settings.cwd = optional_string(table, "cwd")?;
+    if settings.command.is_none() && !settings.args.is_empty() {
+        return Err(invalid_error(
+            "terminal.args requires terminal.command because default system commands cannot accept configured args",
+        ));
+    }
+    if let Some(font_family) = optional_string(table, "font_family")? {
+        settings.font_family = font_family;
+    }
+    if let Some(font_size) = optional_positive_f64(table, "font_size")? {
+        settings.font_size = font_size;
+    }
+    if let Some(scrollback) = optional_positive_u32(table, "scrollback")? {
+        settings.scrollback = scrollback;
+    }
+    if let Some(renderer) = optional_string(table, "renderer")? {
+        settings.renderer = parse_renderer(&renderer)?;
+    }
+    if let Some(cursor_blink) = optional_bool(table, "cursor_blink")? {
+        settings.cursor_blink = cursor_blink;
+    }
+    if let Some(cursor_style) = optional_string(table, "cursor_style")? {
+        settings.cursor_style = parse_cursor_style(&cursor_style)?;
+    }
+    if let Some(orientation) = optional_string(table, "tab_bar_orientation")? {
+        settings.tab_bar_orientation = parse_tab_bar_orientation(&orientation)?;
+    }
+    if let Some(theme_variant) = resolved_theme {
+        settings.theme = match theme_variant {
+            TerminalColorSchemeVariant::Light => scheme_to_terminal_theme(&builtin_light_scheme()),
+            TerminalColorSchemeVariant::Dark => scheme_to_terminal_theme(&builtin_dark_scheme()),
+        };
+    }
+    apply_theme_config(&mut settings.theme, table)?;
+    apply_padding_config(&mut settings.padding, table)?;
+    Ok(settings)
+}
+
 fn terminal_env_from_config(config: &toml::Value) -> Result<BTreeMap<String, String>> {
     let Some(table) = terminal_table(config)? else {
         return Ok(BTreeMap::new());
@@ -507,6 +573,36 @@ fn remove_terminal_session(id: &str) {
     };
 }
 
+fn kill_terminal_session(session: Arc<TerminalSession>) -> Result<()> {
+    let mut killer = session.killer.lock().unwrap();
+    killer.kill().map_err(terminal_error)
+}
+
+pub(crate) fn close_terminal_sessions_for_window(window_label: &str) {
+    let state = terminal_state();
+    let sessions = {
+        let Ok(sessions) = state.sessions.lock() else {
+            return;
+        };
+        sessions
+            .iter()
+            .filter_map(|(id, session)| {
+                let Ok(owner) = session.window_label.lock() else {
+                    return None;
+                };
+                (owner.as_str() == window_label).then(|| (id.clone(), session.clone()))
+            })
+            .collect::<Vec<_>>()
+    };
+
+    for (id, session) in sessions {
+        if let Err(error) = kill_terminal_session(session) {
+            eprintln!("failed to close terminal session {id} for window {window_label}: {error}");
+        }
+        remove_terminal_session(&id);
+    }
+}
+
 fn session_by_id(id: &str) -> Result<Arc<TerminalSession>> {
     let state = terminal_state();
     let sessions = state.sessions.lock().unwrap();
@@ -516,6 +612,24 @@ fn session_by_id(id: &str) -> Result<Arc<TerminalSession>> {
         .ok_or_else(|| missing_error(format!("terminal session {id} not found")))
 }
 
+fn push_output_backlog(session_id: &str, bytes: &[u8]) -> u64 {
+    let Ok(session) = session_by_id(session_id) else {
+        return 0;
+    };
+    let mut sequence = session.output_sequence.lock().unwrap();
+    let start = *sequence;
+    *sequence = sequence.saturating_add(bytes.len() as u64);
+    let mut backlog = session.output_backlog.lock().unwrap();
+    backlog.extend_from_slice(bytes);
+    if backlog.len() > OUTPUT_BACKLOG_LIMIT {
+        let overflow = backlog.len() - OUTPUT_BACKLOG_LIMIT;
+        backlog.drain(0..overflow);
+        let mut backlog_start = session.output_backlog_start_sequence.lock().unwrap();
+        *backlog_start = backlog_start.saturating_add(overflow as u64);
+    }
+    start
+}
+
 fn spawn_terminal_reader(app: AppHandle, session_id: String, mut reader: Box<dyn Read + Send>) {
     thread::spawn(move || {
         let mut buffer = [0_u8; 8192];
@@ -523,8 +637,11 @@ fn spawn_terminal_reader(app: AppHandle, session_id: String, mut reader: Box<dyn
             match reader.read(&mut buffer) {
                 Ok(0) => break,
                 Ok(size) => {
+                    let sequence = push_output_backlog(&session_id, &buffer[..size]);
                     let event = TerminalOutputEvent {
                         session_id: session_id.clone(),
+                        sequence: sequence.to_string(),
+                        backlog: false,
                         data: BASE64_STANDARD.encode(&buffer[..size]),
                     };
                     if app.emit(TERMINAL_OUTPUT_EVENT, event).is_err() {
@@ -605,26 +722,75 @@ pub(crate) fn create_terminal_session(
         master: Mutex::new(pair.master),
         writer: Mutex::new(writer),
         killer: Mutex::new(killer),
+        info: Mutex::new(TerminalSessionInfo {
+            id: id.clone(),
+            title: format!("Session {session_number}"),
+            command: command_label,
+            cwd: input.cwd.or(settings.cwd),
+            cols: input.cols,
+            rows: input.rows,
+            pixel_width: input.pixel_width,
+            pixel_height: input.pixel_height,
+            process_id,
+        }),
+        window_label: Mutex::new(input.window_label),
+        output_backlog: Mutex::new(Vec::new()),
+        output_sequence: Mutex::new(0),
+        output_backlog_start_sequence: Mutex::new(0),
     });
     {
         let mut sessions = state.sessions.lock().unwrap();
-        sessions.insert(id.clone(), session);
+        sessions.insert(id.clone(), session.clone());
     }
 
     spawn_terminal_reader(app.clone(), id.clone(), reader);
     spawn_terminal_waiter(app, id.clone(), child);
 
-    Ok(TerminalSessionInfo {
-        id,
-        title: format!("Session {session_number}"),
-        command: command_label,
-        cwd: input.cwd.or(settings.cwd),
-        cols: input.cols,
-        rows: input.rows,
-        pixel_width: input.pixel_width,
-        pixel_height: input.pixel_height,
-        process_id,
-    })
+    let info = session.info.lock().unwrap().clone();
+    Ok(info)
+}
+
+#[tauri::command]
+#[specta::specta]
+pub(crate) fn existing_terminal_session_info(
+    input: ExistingTerminalSessionInput,
+) -> Result<TerminalSessionInfo> {
+    let session = session_by_id(&input.session_id)?;
+    let info = session.info.lock().unwrap().clone();
+    Ok(info)
+}
+
+#[tauri::command]
+#[specta::specta]
+pub(crate) fn transfer_terminal_sessions_to_window(
+    input: TerminalSessionOwnershipInput,
+) -> Result<()> {
+    for session_id in input.session_ids {
+        let session = session_by_id(&session_id)?;
+        let mut window_label = session.window_label.lock().unwrap();
+        *window_label = input.window_label.clone();
+    }
+    Ok(())
+}
+
+#[tauri::command]
+#[specta::specta]
+pub(crate) fn take_terminal_output_backlog(
+    input: TerminalOutputBacklogInput,
+) -> Result<Option<TerminalOutputEvent>> {
+    let session = session_by_id(&input.session_id)?;
+    let backlog = session.output_backlog.lock().unwrap();
+    if backlog.is_empty() {
+        return Ok(None);
+    }
+    let data = BASE64_STANDARD.encode(&*backlog);
+    let sequence = *session.output_backlog_start_sequence.lock().unwrap();
+    Ok(Some(TerminalOutputEvent {
+        session_id: input.session_id,
+        sequence: sequence.to_string(),
+        backlog: true,
+        data,
+    }))
 }
 
 #[tauri::command]
@@ -649,6 +815,13 @@ pub(crate) fn resize_terminal(input: TerminalSizeInput) -> Result<()> {
     )?;
     let session = session_by_id(&input.session_id)?;
     let master = session.master.lock().unwrap();
+    {
+        let mut info = session.info.lock().unwrap();
+        info.cols = input.cols;
+        info.rows = input.rows;
+        info.pixel_width = input.pixel_width;
+        info.pixel_height = input.pixel_height;
+    }
     master.resize(size).map_err(terminal_error)
 }
 
@@ -656,10 +829,7 @@ pub(crate) fn resize_terminal(input: TerminalSizeInput) -> Result<()> {
 #[specta::specta]
 pub(crate) fn close_terminal_session(session_id: String) -> Result<()> {
     let session = session_by_id(&session_id)?;
-    {
-        let mut killer = session.killer.lock().unwrap();
-        killer.kill().map_err(terminal_error)?;
-    }
+    kill_terminal_session(session)?;
     remove_terminal_session(&session_id);
     Ok(())
 }
@@ -679,7 +849,8 @@ mod tests {
         )
         .expect("valid TOML");
 
-        let settings = terminal_settings_from_config(&config).expect("valid terminal settings");
+        let settings =
+            terminal_settings_from_config_for_test(&config).expect("valid terminal settings");
 
         assert_eq!(settings.padding.top, 6.0);
         assert_eq!(settings.padding.right, 6.0);
@@ -700,7 +871,8 @@ mod tests {
         )
         .expect("valid TOML");
 
-        let settings = terminal_settings_from_config(&config).expect("valid terminal settings");
+        let settings =
+            terminal_settings_from_config_for_test(&config).expect("valid terminal settings");
 
         assert_eq!(settings.padding.top, 7.0);
         assert_eq!(settings.padding.right, 14.0);
@@ -731,7 +903,8 @@ mod tests {
         )
         .expect("valid TOML");
 
-        let error = terminal_settings_from_config(&config).expect_err("legacy renderer is invalid");
+        let error = terminal_settings_from_config_for_test(&config)
+            .expect_err("legacy renderer is invalid");
 
         assert!(format!("{error:?}").contains("terminal.renderer must be dom or webgl"));
     }

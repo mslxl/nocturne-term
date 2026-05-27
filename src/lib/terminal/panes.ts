@@ -181,6 +181,11 @@ export function deriveTabDisplayTitle(activePaneTitle: string, paneCount: number
   return paneCount === 1 ? title : `${title} | ${paneCount} panes`;
 }
 
+export function deriveCustomizableTabTitle(customTitle: string, activePaneTitle: string, paneCount: number): string {
+  const title = customTitle.trim();
+  return title || deriveTabDisplayTitle(activePaneTitle, paneCount);
+}
+
 export function resizeAdjacentPanes(input: SplitterResizeInput): PaneTree {
   if (!Number.isFinite(input.deltaPixels)) {
     throw new Error("resize delta must be finite");

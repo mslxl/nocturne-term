@@ -255,8 +255,11 @@ Terminal commands are shared by keyboard handling and settings. When adding a te
 Native menu behavior:
 
 - Tab bar context menus belong to tab-bar actions and settings such as tab placement.
-- Pane context menus belong to pane actions such as split direction.
-- Native menu item selection emits a typed event back to the main window.
+- Pane context menus belong to pane actions such as copy, paste, reset terminal, read-only state, tab title changes, and split direction.
+- Window menu actions that affect terminal state emit a typed event back to the focused main window.
+- Window menu actions that are purely native window operations, such as minimize, center, fill, fullscreen, and bring all to front, stay in the Tauri shell.
+- User-set tab titles override derived terminal titles until the custom title is cleared.
+- Moving a tab to a new window must preserve backend PTY sessions. The source window may dispose xterm renderers for moved panes, but it must not close the moved terminal sessions.
 - `src/lib/bindings.ts` is generated from Rust Specta exports. Do not edit it manually.
 
 Settings behavior:

@@ -1,13 +1,18 @@
 import { FitAddon } from "@xterm/addon-fit";
+import { SearchAddon } from "@xterm/addon-search";
+import { SerializeAddon } from "@xterm/addon-serialize";
 import { Terminal } from "@xterm/xterm";
 import { commands, type TerminalSessionInfo, type TerminalSettings } from "$lib/bindings";
 import { unwrapCommand } from "./commands";
-import { countPaneLeaves, createPaneLeaf, deriveTabDisplayTitle, type PaneTree } from "./panes";
+import { orderedTerminalOutputChunks } from "./output";
+import { countPaneLeaves, createPaneLeaf, deriveCustomizableTabTitle, type PaneTree } from "./panes";
 import { xtermOptions } from "./settings";
 import { normalizeTerminalFitSize, normalizeTerminalSessionSize, type TerminalFitSize } from "./sizes";
 
 export type TerminalOutputEvent = {
   session_id: string;
+  sequence: string;
+  backlog: boolean;
   data: string;
 };
 
@@ -19,8 +24,10 @@ export type TerminalExitEvent = {
 
 export type TerminalStatus = "starting" | "running" | "exited" | "error";
 type WebglTerminalAddon = { clearTextureAtlas?: () => void; dispose: () => void };
+export type TerminalSearchAddon = SearchAddon & { clearDecorations?: () => void };
 type WebglRenderService = {
   handleResize?: (cols: number, rows: number) => void;
+  clear?: () => void;
   refreshRows?: (start: number, end: number, isRedrawOnly?: boolean) => void;
 };
 type TerminalWithRenderService = Terminal & {
@@ -31,6 +38,7 @@ type TerminalWithRenderService = Terminal & {
 export type TerminalTab = {
   id: string;
   title: string;
+  customTitle: string;
   activePaneId: string;
   panes: TerminalPane[];
   tree: PaneTree;
@@ -45,10 +53,13 @@ export type TerminalPane = {
   currentDirectory: string;
   titleOverride: string;
   status: TerminalStatus;
+  readOnly: boolean;
   exitText: string;
   error: string;
   term?: Terminal;
   fit?: FitAddon;
+  search?: TerminalSearchAddon;
+  serialize?: SerializeAddon;
   image?: { dispose: () => void };
   webgl?: WebglTerminalAddon;
   container?: HTMLDivElement;
@@ -57,6 +68,8 @@ export type TerminalPane = {
   decoder: TextDecoder;
   outputQueue: string[];
   outputFrame: number | null;
+  nextOutputSequence: bigint;
+  pendingOutput: Map<string, string>;
   resizeTimer: number | null;
   mountPromise: Promise<void> | null;
   lastCols: number;
@@ -72,6 +85,7 @@ type TerminalTabContext = {
   settings: () => TerminalSettings | null;
   tabs: () => TerminalTab[];
   setGlobalError: (message: string) => void;
+  notifySelectionChange?: () => void;
 };
 
 export function createTerminalTab(info: TerminalSessionInfo): TerminalTab {
@@ -80,6 +94,7 @@ export function createTerminalTab(info: TerminalSessionInfo): TerminalTab {
   return {
     id: tabId,
     title: pane.title,
+    customTitle: "",
     activePaneId: pane.id,
     panes: [pane],
     tree: createPaneLeaf(pane.id),
@@ -92,6 +107,7 @@ export function createTerminalTabFromPane(pane: TerminalPane): TerminalTab {
   return {
     id: tabId,
     title: pane.title,
+    customTitle: "",
     activePaneId: pane.id,
     panes: [pane],
     tree: createPaneLeaf(pane.id),
@@ -109,12 +125,15 @@ export function createTerminalPane(info: TerminalSessionInfo, tabId: string): Te
     currentDirectory: info.cwd ?? "",
     titleOverride: "",
     status: "running",
+    readOnly: false,
     exitText: "",
     error: "",
     dataDisposables: [],
     decoder: new TextDecoder(),
     outputQueue: [],
     outputFrame: null,
+    nextOutputSequence: 0n,
+    pendingOutput: new Map(),
     resizeTimer: null,
     mountPromise: null,
     lastCols: size.cols,
@@ -127,7 +146,7 @@ export function createTerminalPane(info: TerminalSessionInfo, tabId: string): Te
 export function refreshTerminalTabTitle(tab: TerminalTab) {
   const activePane = terminalPaneById(tab, tab.activePaneId);
   if (!activePane) throw new Error(`active pane ${tab.activePaneId} not found in tab ${tab.id}`);
-  tab.title = deriveTabDisplayTitle(activePane.title, countPaneLeaves(tab.tree));
+  tab.title = deriveCustomizableTabTitle(tab.customTitle, activePane.title, countPaneLeaves(tab.tree));
 }
 
 export function terminalPaneById(tab: TerminalTab, paneId: string): TerminalPane | undefined {
@@ -186,7 +205,11 @@ export function createTerminalTabController(context: TerminalTabContext) {
       rows: pane.lastRows,
     });
     const fit = new FitAddon();
+    const search = new SearchAddon({ highlightLimit: 1000 }) as TerminalSearchAddon;
+    const serialize = new SerializeAddon();
     term.loadAddon(fit);
+    term.loadAddon(search);
+    term.loadAddon(serialize);
 
     try {
       const { ImageAddon } = await import("@xterm/addon-image");
@@ -198,14 +221,20 @@ export function createTerminalTabController(context: TerminalTabContext) {
       term.open(container);
       pane.term = term;
       pane.fit = fit;
+      pane.search = search;
+      pane.serialize = serialize;
       fitTerminal(pane);
 
       if (config.renderer === "webgl") {
         const { WebglAddon } = await import("@xterm/addon-webgl");
-        const webgl = new WebglAddon();
+        const webgl = new WebglAddon(true);
         term.loadAddon(webgl);
         pane.webgl = webgl;
         stabilizeWebglTerminal(term, webgl);
+      }
+
+      if (pane.outputQueue.length) {
+        scheduleOutputFlush(pane);
       }
 
       pane.dataDisposables = [
@@ -219,6 +248,7 @@ export function createTerminalTabController(context: TerminalTabContext) {
           return true;
         }),
         term.onData((data) => {
+          if (pane.readOnly) return;
           void unwrapCommand(commands.writeTerminal({ session_id: pane.id, data })).catch((error) => {
             markPaneError(pane.id, error instanceof Error ? error.message : String(error));
           });
@@ -226,6 +256,9 @@ export function createTerminalTabController(context: TerminalTabContext) {
         term.onResize(() => {
           const size = fitTerminal(pane);
           if (size) scheduleResize(pane.id, size);
+        }),
+        term.onSelectionChange(() => {
+          context.notifySelectionChange?.();
         }),
       ];
       pane.resizeObserver = new ResizeObserver(() => scheduleFit(pane.id));
@@ -240,6 +273,8 @@ export function createTerminalTabController(context: TerminalTabContext) {
       term.dispose();
       pane.term = undefined;
       pane.fit = undefined;
+      pane.search = undefined;
+      pane.serialize = undefined;
       pane.image = undefined;
       pane.webgl = undefined;
       markPaneError(pane.id, error instanceof Error ? error.message : String(error));
@@ -253,6 +288,9 @@ export function createTerminalTabController(context: TerminalTabContext) {
       const size = fitTerminal(pane);
       if (size) scheduleResize(id, size);
       if (pane.webgl && pane.term) stabilizeWebglTerminal(pane.term, pane.webgl);
+      requestAnimationFrame(() => {
+        if (pane.webgl && pane.term) stabilizeWebglTerminal(pane.term, pane.webgl);
+      });
     });
   }
 
@@ -295,16 +333,10 @@ export function createTerminalTabController(context: TerminalTabContext) {
   function enqueueOutput(event: TerminalOutputEvent) {
     const pane = paneById(event.session_id);
     if (!pane) return;
-    const chunk = decodeOutput(pane, event.data);
-    if (!chunk) return;
-    pane.outputQueue.push(chunk);
-    if (pane.outputFrame !== null) return;
-    pane.outputFrame = requestAnimationFrame(() => {
-      pane.outputFrame = null;
-      const text = pane.outputQueue.join("");
-      pane.outputQueue = [];
-      pane.term?.write(text);
-    });
+    const chunks = orderedTerminalOutputChunks(pane, event, pane.decoder);
+    if (!chunks.length) return;
+    pane.outputQueue.push(...chunks);
+    scheduleOutputFlush(pane);
   }
 
   function markExited(event: TerminalExitEvent) {
@@ -334,6 +366,17 @@ export function createTerminalTabController(context: TerminalTabContext) {
     if (tab && tab.activePaneId === pane.id) refreshTerminalTabTitle(tab);
   }
 
+  function scheduleOutputFlush(pane: TerminalPane) {
+    if (!pane.term || pane.outputFrame !== null) return;
+    pane.outputFrame = requestAnimationFrame(() => {
+      pane.outputFrame = null;
+      if (!pane.term || !pane.outputQueue.length) return;
+      const text = pane.outputQueue.join("");
+      pane.outputQueue = [];
+      pane.term.write(text);
+    });
+  }
+
   return {
     enqueueOutput,
     markExited,
@@ -360,22 +403,34 @@ export function disposeTerminalTab(tab: TerminalTab) {
 }
 
 export function disposeTerminalPane(pane: TerminalPane) {
-  if (pane.outputFrame !== null) cancelAnimationFrame(pane.outputFrame);
-  if (pane.resizeTimer !== null) window.clearTimeout(pane.resizeTimer);
-  pane.resizeObserver?.disconnect();
-  pane.dataDisposables.forEach((disposable) => disposable.dispose());
-  pane.image?.dispose();
-  pane.webgl?.dispose();
-  pane.term?.dispose();
+  detachTerminalPane(pane);
 }
 
-function decodeOutput(pane: TerminalPane, data: string): string {
-  const binary = atob(data);
-  const bytes = new Uint8Array(binary.length);
-  for (let index = 0; index < binary.length; index += 1) {
-    bytes[index] = binary.charCodeAt(index);
-  }
-  return pane.decoder.decode(bytes, { stream: true });
+export function detachTerminalPane(pane: TerminalPane) {
+  const serialized = pane.serialize?.serialize({ scrollback: 1000 }) ?? "";
+  if (serialized) pane.outputQueue = [serialized, ...pane.outputQueue];
+  if (pane.outputFrame !== null) cancelAnimationFrame(pane.outputFrame);
+  pane.outputFrame = null;
+  if (pane.resizeTimer !== null) window.clearTimeout(pane.resizeTimer);
+  pane.resizeTimer = null;
+  pane.resizeObserver?.disconnect();
+  pane.resizeObserver = undefined;
+  pane.dataDisposables.forEach((disposable) => disposable.dispose());
+  pane.dataDisposables = [];
+  pane.search?.dispose();
+  pane.search = undefined;
+  pane.serialize?.dispose();
+  pane.serialize = undefined;
+  pane.image?.dispose();
+  pane.image = undefined;
+  pane.webgl?.dispose();
+  pane.webgl = undefined;
+  pane.fit?.dispose();
+  pane.fit = undefined;
+  pane.term?.dispose();
+  pane.term = undefined;
+  pane.container?.replaceChildren();
+  pane.container = undefined;
 }
 
 function fitTerminal(pane: TerminalPane): TerminalFitSize | null {
@@ -421,8 +476,10 @@ function stabilizeWebglTerminal(term: Terminal, webgl: WebglTerminalAddon) {
 
 function refreshWebglTerminal(term: Terminal, webgl: WebglTerminalAddon) {
   const renderService = (term as TerminalWithRenderService)._core?._renderService;
+  renderService?.clear?.();
   renderService?.handleResize?.(term.cols, term.rows);
   webgl.clearTextureAtlas?.();
+  term.clearTextureAtlas();
   term.refresh(0, term.rows - 1);
   renderService?.refreshRows?.(0, term.rows - 1, true);
 }

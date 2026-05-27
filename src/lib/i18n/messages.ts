@@ -77,6 +77,11 @@ export const messages = {
     blankMeansDefault: "Leave blank to use the default.",
     onePerLine: "One item per line.",
     profileInheritedHint: "This value is inherited from the main settings or built-in defaults.",
+    changeTabTitlePrompt: "Enter a custom tab title. Leave blank to use the terminal title.",
+    find: "Find",
+    findNext: "Find Next",
+    findPrevious: "Find Previous",
+    hideFindBar: "Hide Find Bar",
   },
   zh: {
     appName: "Nocturne",
@@ -154,6 +159,11 @@ export const messages = {
     blankMeansDefault: "留空则使用默认值。",
     onePerLine: "每行一项。",
     profileInheritedHint: "该值继承自主设置或内置默认值。",
+    changeTabTitlePrompt: "输入自定义标签标题。留空则使用终端标题。",
+    find: "查找",
+    findNext: "查找下一个",
+    findPrevious: "查找上一个",
+    hideFindBar: "隐藏查找栏",
   },
 } satisfies Record<AppLanguage, Record<string, string>>;
 

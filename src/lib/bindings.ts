@@ -9,6 +9,14 @@ export const commands = {
 	getTerminalSettings: () => typedError<TerminalSettings, ConfigError>(__TAURI_INVOKE("get_terminal_settings")),
 	getTerminalSettingsForTheme: (input: TerminalSettingsInput) => typedError<TerminalSettings, ConfigError>(__TAURI_INVOKE("get_terminal_settings_for_theme", { input })),
 	createTerminalSession: (input: CreateTerminalSessionInput) => typedError<TerminalSessionInfo, ConfigError>(__TAURI_INVOKE("create_terminal_session", { input })),
+	existingTerminalSessionInfo: (input: ExistingTerminalSessionInput) => typedError<TerminalSessionInfo, ConfigError>(__TAURI_INVOKE("existing_terminal_session_info", { input })),
+	transferTerminalSessionsToWindow: (input: TerminalSessionOwnershipInput) => typedError<null, ConfigError>(__TAURI_INVOKE("transfer_terminal_sessions_to_window", { input })),
+	takeTerminalOutputBacklog: (input: TerminalOutputBacklogInput) => typedError<{
+	session_id: string,
+	sequence: string,
+	backlog: boolean,
+	data: string,
+} | null, ConfigError>(__TAURI_INVOKE("take_terminal_output_backlog", { input })),
 	writeTerminal: (input: TerminalInput) => typedError<null, ConfigError>(__TAURI_INVOKE("write_terminal", { input })),
 	resizeTerminal: (input: TerminalSizeInput) => typedError<null, ConfigError>(__TAURI_INVOKE("resize_terminal", { input })),
 	closeTerminalSession: (sessionId: string) => typedError<null, ConfigError>(__TAURI_INVOKE("close_terminal_session", { sessionId })),
@@ -36,7 +44,9 @@ export const commands = {
 	removeConfigKey: (input: ConfigKeyPathInput) => typedError<null, ConfigError>(__TAURI_INVOKE("remove_config_key", { input })),
 	showTabBarContextMenu: (input: TabBarContextMenuInput) => typedError<null, ConfigError>(__TAURI_INVOKE("show_tab_bar_context_menu", { input })),
 	showPaneContextMenu: (input: PaneContextMenuInput) => typedError<null, ConfigError>(__TAURI_INVOKE("show_pane_context_menu", { input })),
+	openMainWindow: (route: string | null) => typedError<null, ConfigError>(__TAURI_INVOKE("open_main_window", { route })),
 	refreshAppMenu: () => typedError<null, ConfigError>(__TAURI_INVOKE("refresh_app_menu")),
+	updateTerminalMenuState: (input: TerminalMenuStateInput) => typedError<null, ConfigError>(__TAURI_INVOKE("update_terminal_menu_state", { input })),
 	watchConfigCommand: () => typedError<null, ConfigError>(__TAURI_INVOKE("watch_config_command")),
 };
 
@@ -92,10 +102,15 @@ export type CreateTerminalSessionInput = {
 	pixel_height: number,
 	resolved_theme: TerminalColorSchemeVariant | null,
 	cwd: string | null,
+	window_label: string,
 };
 
 export type EffectiveConfigDocument = {
 	root: ConfigTable,
+};
+
+export type ExistingTerminalSessionInput = {
+	session_id: string,
 };
 
 export type HostConfigDocument = {
@@ -125,6 +140,9 @@ export type PaneContextMenuInput = {
 	x: number | null,
 	y: number | null,
 	pane_id: string,
+	window_label: string,
+	has_selection: boolean,
+	read_only: boolean,
 };
 
 export type ProfileConfigDocument = {
@@ -144,6 +162,7 @@ export type ProfileEntry = {
 export type TabBarContextMenuInput = {
 	x: number | null,
 	y: number | null,
+	window_label: string,
 };
 
 export type TabBarOrientation = "horizontal" | "vertical_left" | "vertical_right";
@@ -203,6 +222,40 @@ export type TerminalInput = {
 	data: string,
 };
 
+export type TerminalMenuCommand = "new_window" | "new_tab" | "split_right" | "split_left" | "split_down" | "split_up" | "close" | "close_tab" | "close_window" | "undo" | "redo" | "copy" | "paste" | "paste_selection" | "select_all" | "find" | "find_next" | "find_previous" | "hide_find_bar" | "use_selection_for_find" | "jump_to_selection" | "reset_font_size" | "increase_font_size" | "decrease_font_size" | "change_tab_title" | "toggle_read_only" | "minimize" | "zoom" | "fill" | "center" | "move_resize_left" | "move_resize_right" | "move_resize_top" | "move_resize_bottom" | "move_resize_top_left" | "move_resize_top_right" | "move_resize_bottom_left" | "move_resize_bottom_right" | "toggle_full_screen" | "show_previous_tab" | "show_next_tab" | "move_tab_to_new_window" | "zoom_split" | "select_previous_split" | "select_next_split" | "select_split_left" | "select_split_right" | "select_split_up" | "select_split_down" | "resize_split_left" | "resize_split_right" | "resize_split_up" | "resize_split_down" | "bring_all_to_front";
+
+export type TerminalMenuEvent = {
+	command: TerminalMenuCommand,
+};
+
+export type TerminalMenuStateInput = {
+	can_edit_text: boolean,
+	can_undo_text: boolean,
+	can_redo_text: boolean,
+	has_active_tab: boolean,
+	has_active_pane: boolean,
+	has_multiple_tabs: boolean,
+	has_multiple_panes: boolean,
+	has_selection: boolean,
+	can_paste: boolean,
+	can_paste_selection: boolean,
+	can_select_all: boolean,
+	can_jump_to_selection: boolean,
+	find_visible: boolean,
+	has_find_query: boolean,
+};
+
+export type TerminalOutputBacklogInput = {
+	session_id: string,
+};
+
+export type TerminalOutputEvent = {
+	session_id: string,
+	sequence: string,
+	backlog: boolean,
+	data: string,
+};
+
 export type TerminalPadding = {
 	top: number | null,
 	right: number | null,
@@ -222,6 +275,11 @@ export type TerminalSessionInfo = {
 	pixel_width: number,
 	pixel_height: number,
 	process_id: number | null,
+};
+
+export type TerminalSessionOwnershipInput = {
+	session_ids: string[],
+	window_label: string,
 };
 
 export type TerminalSettings = {

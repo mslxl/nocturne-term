@@ -10,8 +10,9 @@ use crate::{
     config,
     error::{invalid_error, io_error, missing_error, parse_error, Result},
     types::{
-        TerminalColorScheme, TerminalColorSchemeEntry, TerminalColorSchemeExportInput, TerminalColorSchemeInput,
-        TerminalColorSchemeSource, TerminalColorSchemeVariant, TerminalTheme,
+        TerminalColorScheme, TerminalColorSchemeEntry, TerminalColorSchemeExportInput,
+        TerminalColorSchemeInput, TerminalColorSchemeSource, TerminalColorSchemeVariant,
+        TerminalTheme,
     },
 };
 
@@ -391,9 +392,7 @@ pub(crate) fn terminal_color_scheme_by_id(
 
 #[tauri::command]
 #[specta::specta]
-pub(crate) fn list_terminal_color_schemes(
-    app: AppHandle,
-) -> Result<Vec<TerminalColorSchemeEntry>> {
+pub(crate) fn list_terminal_color_schemes(app: AppHandle) -> Result<Vec<TerminalColorSchemeEntry>> {
     list_terminal_color_scheme_entries(&app)
 }
 
