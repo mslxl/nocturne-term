@@ -1,7 +1,9 @@
 <script lang="ts">
   import { onMount, tick } from "svelte";
   import { listen } from "@tauri-apps/api/event";
+  import { getCurrentWindow } from "@tauri-apps/api/window";
   import { ask } from "@tauri-apps/plugin-dialog";
+  import { readText, writeText } from "@tauri-apps/plugin-clipboard-manager";
   import "@xterm/xterm/css/xterm.css";
   import { commands, type TabBarOrientation, type TerminalSettings } from "$lib/bindings";
   import { appThemeFromConfig, applyAppPreferences, readValue, resolveTheme } from "$lib/config/document";
@@ -26,28 +28,163 @@
   import {
     createTerminalPane,
     createTerminalTab,
+    createTerminalTabFromPane,
     createTerminalTabController,
+    detachTerminalPane,
     disposeTerminalPane,
     disposeTerminalTab,
     measureTerminalFit,
     refreshTerminalTabTitle,
     terminalPaneById,
-    createTerminalTabFromPane,
     type TerminalExitEvent,
     type TerminalOutputEvent,
     type TerminalPane,
     type TerminalTab,
   } from "$lib/terminal/tabs";
   import { toTerminalSessionSizeInput } from "$lib/terminal/sizes";
+  import { terminalMenuCanRedo, terminalMenuCanUndo } from "$lib/terminal/menu-history";
+  import { t } from "$lib/i18n";
+
+  type TerminalMenuCommand =
+    | "new_window"
+    | "new_tab"
+    | "split_right"
+    | "split_left"
+    | "split_down"
+    | "split_up"
+    | "close"
+    | "close_tab"
+    | "close_window"
+    | "undo"
+    | "redo"
+    | "copy"
+    | "paste"
+    | "paste_selection"
+    | "select_all"
+    | "find"
+    | "find_next"
+    | "find_previous"
+    | "hide_find_bar"
+    | "use_selection_for_find"
+    | "jump_to_selection"
+    | "reset_font_size"
+    | "increase_font_size"
+    | "decrease_font_size"
+    | "change_tab_title"
+    | "toggle_read_only"
+    | "show_previous_tab"
+    | "show_next_tab"
+    | "move_tab_to_new_window"
+    | "zoom_split"
+    | "select_previous_split"
+    | "select_next_split"
+    | "select_split_left"
+    | "select_split_right"
+    | "select_split_up"
+    | "select_split_down"
+    | "resize_split_left"
+    | "resize_split_right"
+    | "resize_split_up"
+    | "resize_split_down";
+
+  type TerminalMenuEvent = {
+    command: TerminalMenuCommand;
+  };
+
+  type StoredPane = {
+    id: string;
+    title: string;
+    baseTitle: string;
+    command: string;
+    currentDirectory: string;
+    titleOverride: string;
+    readOnly: boolean;
+    status: TerminalPane["status"];
+    serialized: string;
+    lastCols: number;
+    lastRows: number;
+    lastPixelWidth: number;
+    lastPixelHeight: number;
+    nextOutputSequence: string;
+  };
+
+  type StoredTab = {
+    customTitle: string;
+    activePaneId: string;
+    tree: TerminalTab["tree"];
+    panes: StoredPane[];
+  };
 
   const initialCols = 80;
   const initialRows = 24;
   const minPaneWidth = 160;
   const minPaneHeight = 96;
   type PaneMenuEvent = {
-    action: "split_left" | "split_right" | "split_up" | "split_down";
+    action:
+      | "copy"
+      | "paste"
+      | "reset_terminal"
+      | "toggle_read_only"
+      | "change_tab_title"
+      | "split_left"
+      | "split_right"
+      | "split_up"
+    | "split_down";
     pane_id: string;
   };
+  type TextInputElement = HTMLInputElement | HTMLTextAreaElement;
+  type TextEditSnapshot = {
+    selectionEnd: number;
+    selectionStart: number;
+    value: string;
+  };
+  type TextEditHistory = {
+    current: TextEditSnapshot;
+    redo: TextEditSnapshot[];
+    undo: TextEditSnapshot[];
+  };
+  type CreateTabAction = {
+    kind: "create_tab";
+    tabId: string;
+  };
+  type CreatePaneAction = {
+    kind: "create_pane";
+    paneId: string;
+    side: SplitSide;
+    tabId: string;
+    targetPaneId: string;
+  };
+  type CloseTabAction = {
+    kind: "close_tab";
+    tab: TerminalTab;
+    index: number;
+    previousActiveId: string;
+  };
+  type ClosePaneAction = {
+    kind: "close_pane";
+    pane: TerminalPane;
+    tabId: string;
+    index: number;
+    tree: TerminalTab["tree"];
+    activePaneId: string;
+  };
+  type TerminalUndoAction =
+    | CreateTabAction
+    | CreatePaneAction
+    | CloseTabAction
+    | ClosePaneAction;
+  type TerminalRedoAction =
+    | {
+        kind: "create_tab";
+      }
+    | {
+        kind: "create_pane";
+        side: SplitSide;
+        tabId: string;
+        targetPaneId: string;
+      }
+    | CloseTabAction
+    | ClosePaneAction;
 
   let settings = $state<TerminalSettings | null>(null);
   let keybindings = $state<KeybindingMap | null>(null);
@@ -59,8 +196,18 @@
   let exitUnlisten: undefined | (() => void);
   let configUnlisten: undefined | (() => void);
   let paneMenuUnlisten: undefined | (() => void);
+  let terminalMenuUnlisten: undefined | (() => void);
   let terminalMeasureContainer: HTMLDivElement;
   let appTheme: "light" | "dark" = "dark";
+  let findVisible = $state(false);
+  let findQuery = $state("");
+  let movedPaneIds = new Set<string>();
+  let findInput = $state<HTMLInputElement>();
+  let lastFocusedTextInput: TextInputElement | null = null;
+  let serializedMenuState = "";
+  let undoStack: TerminalUndoAction[] = [];
+  let redoStack: TerminalRedoAction[] = [];
+  const textEditHistories = new WeakMap<TextInputElement, TextEditHistory>();
   let resizeDrag = $state<{
     tabId: string;
     baseTree: TerminalTab["tree"];
@@ -91,6 +238,9 @@
     setGlobalError: (message) => {
       settingsError = message;
     },
+    notifySelectionChange: () => {
+      syncTerminalMenuState();
+    },
   });
 
   async function loadSettings() {
@@ -111,6 +261,10 @@
     }
   }
 
+  function currentWindowLabel() {
+    return hasTauriRuntime() ? getCurrentWindow().label : "main";
+  }
+
   function measureNewTerminal(cwd: string | null = null) {
     if (!settings) throw new Error("Terminal settings are not loaded");
     const measuredSize = measureTerminalFit(terminalMeasureContainer, settings, { cols: initialCols, rows: initialRows });
@@ -118,10 +272,11 @@
       ...toTerminalSessionSizeInput(measuredSize),
       resolved_theme: appTheme,
       cwd,
+      window_label: currentWindowLabel(),
     };
   }
 
-  async function newSession() {
+  async function newSession({ recordHistory = true }: { recordHistory?: boolean } = {}) {
     try {
       if (!settings) await loadSettings();
       await tick();
@@ -130,11 +285,34 @@
       tabs = [...tabs, tab];
       activeId = tab.id;
       await tick();
-      await terminalTabs.mountTerminal(tab.activePaneId);
+      await mountTerminalWhenReady(tab.activePaneId);
+      await flushTerminalOutputBacklog(tab.activePaneId);
       terminalPaneById(tab, tab.activePaneId)?.term?.focus();
+      if (recordHistory) {
+        pushUndoAction({ kind: "create_tab", tabId: tab.id });
+      } else {
+        syncTerminalMenuState();
+      }
     } catch (error) {
       settingsError = error instanceof Error ? error.message : String(error);
     }
+  }
+
+  async function ensureStartupSession(restored: boolean) {
+    if (restored || tabs.length > 0) return;
+    await newSession({ recordHistory: false });
+  }
+
+  async function flushTerminalOutputBacklog(paneId: string) {
+    if (!hasTauriRuntime()) return;
+    const event = await unwrapCommand(commands.takeTerminalOutputBacklog({ session_id: paneId }));
+    if (event) terminalTabs.enqueueOutput(event);
+  }
+
+  function activePane(): TerminalPane | null {
+    const tab = activeTab;
+    if (!tab) return null;
+    return terminalPaneById(tab, tab.activePaneId) ?? null;
   }
 
   async function activateTab(id: string) {
@@ -144,6 +322,7 @@
     await tick();
     await mountAndFitTabPanes(tab);
     terminalPaneById(tab, tab.activePaneId)?.term?.focus();
+    syncTerminalMenuState();
   }
 
   async function activatePane(paneId: string) {
@@ -152,29 +331,54 @@
     tab.activePaneId = paneId;
     refreshTerminalTabTitle(tab);
     await tick();
-    await terminalTabs.mountTerminal(paneId);
+    await mountTerminalWhenReady(paneId);
     terminalTabs.scheduleFit(paneId);
     terminalPaneById(tab, paneId)?.term?.focus();
+    syncTerminalMenuState();
   }
 
-  async function closeTab(id: string) {
+  async function closeTab(id: string, { recordHistory = false }: { recordHistory?: boolean } = {}) {
     const tab = tabs.find((item) => item.id === id);
     if (!tab) return;
     const shouldClose = await confirmRunningPanes(tab.panes);
     if (!shouldClose) return;
-    disposeTerminalTab(tab);
-    for (const pane of tab.panes) {
-      if (pane.status === "running") {
-        await unwrapCommand(commands.closeTerminalSession(pane.id)).catch((error) => {
-          settingsError = error instanceof Error ? error.message : String(error);
-        });
+    const index = tabs.findIndex((item) => item.id === id);
+    const previousActiveId = activeId;
+    if (recordHistory) {
+      for (const pane of tab.panes) detachTerminalPane(pane);
+      pushUndoAction({ kind: "close_tab", tab, index, previousActiveId });
+    } else {
+      disposeTerminalTab(tab);
+      for (const pane of tab.panes) {
+        if (pane.status === "running") {
+          await closePaneSession(pane);
+        }
       }
     }
-    const index = tabs.findIndex((item) => item.id === id);
     tabs = tabs.filter((item) => item.id !== id);
     if (activeId === id) {
       activeId = tabs[Math.max(0, index - 1)]?.id ?? tabs[0]?.id ?? "";
       if (activeId) await activateTab(activeId);
+    }
+    syncTerminalMenuState();
+  }
+
+  async function closeActiveTarget() {
+    const tab = activeTab;
+    if (!tab) {
+      await closeCurrentWindow();
+      return;
+    }
+    if (tab.panes.length > 1) {
+      await closePane(tab.activePaneId, { recordHistory: true });
+      return;
+    }
+    await closeTab(tab.id, { recordHistory: true });
+  }
+
+  async function closeCurrentWindow() {
+    if (hasTauriRuntime()) {
+      await getCurrentWindow().close();
     }
   }
 
@@ -184,13 +388,13 @@
     return tab;
   }
 
-  async function splitActivePane(side: SplitSide) {
+  async function splitActivePane(side: SplitSide, { recordHistory = true }: { recordHistory?: boolean } = {}) {
     const tab = activeTab;
     if (!tab) return;
-    await splitPaneById(tab.activePaneId, side);
+    await splitPaneById(tab.activePaneId, side, { recordHistory });
   }
 
-  async function splitPaneById(paneId: string, side: SplitSide) {
+  async function splitPaneById(paneId: string, side: SplitSide, { recordHistory = true }: { recordHistory?: boolean } = {}) {
     try {
       const tab = tabs.find((item) => item.panes.some((pane) => pane.id === paneId));
       if (!tab) throw new Error(`tab for pane ${paneId} not found`);
@@ -206,15 +410,21 @@
       tab.activePaneId = nextPane.id;
       refreshTerminalTabTitle(tab);
       await tick();
-      await terminalTabs.mountTerminal(nextPane.id);
+      await mountTerminalWhenReady(nextPane.id);
+      await flushTerminalOutputBacklog(nextPane.id);
       await mountAndFitTabPanes(tab);
       nextPane.term?.focus();
+      if (recordHistory) {
+        pushUndoAction({ kind: "create_pane", paneId: nextPane.id, side, tabId: tab.id, targetPaneId: paneId });
+      } else {
+        syncTerminalMenuState();
+      }
     } catch (error) {
       settingsError = error instanceof Error ? error.message : String(error);
     }
   }
 
-  async function closePane(paneId: string) {
+  async function closePane(paneId: string, { recordHistory = false }: { recordHistory?: boolean } = {}) {
     const tab = findTabByPaneId(paneId);
     const pane = terminalPaneById(tab, paneId);
     if (!pane) return;
@@ -222,19 +432,22 @@
     if (!shouldClose) return;
 
     if (tab.panes.length === 1) {
-      await closeTab(tab.id);
+      await closeTab(tab.id, { recordHistory });
       return;
     }
 
-    disposeTerminalPane(pane);
-    if (pane.status === "running") {
-      await unwrapCommand(commands.closeTerminalSession(pane.id)).catch((error) => {
-        settingsError = error instanceof Error ? error.message : String(error);
-      });
+    const index = tab.panes.findIndex((item) => item.id === pane.id);
+    const previousTree = clonePaneTree(tab.tree);
+    const previousActivePaneId = tab.activePaneId;
+    if (recordHistory) {
+      detachTerminalPane(pane);
+    } else {
+      disposeTerminalPane(pane);
+      if (pane.status === "running") await closePaneSession(pane);
     }
     const nextTree = removePane(tab.tree, pane.id);
     if (!nextTree) {
-      await closeTab(tab.id);
+      await closeTab(tab.id, { recordHistory });
       return;
     }
     tab.tree = nextTree;
@@ -245,6 +458,11 @@
     refreshTerminalTabTitle(tab);
     await activatePane(tab.activePaneId);
     await mountAndFitTabPanes(tab);
+    if (recordHistory) {
+      pushUndoAction({ kind: "close_pane", pane, tabId: tab.id, index, tree: previousTree, activePaneId: previousActivePaneId });
+    } else {
+      syncTerminalMenuState();
+    }
   }
 
   async function confirmRunningPanes(panes: TerminalPane[]) {
@@ -257,6 +475,209 @@
       okLabel: "Close",
       cancelLabel: "Cancel",
     });
+  }
+
+  async function closePaneSession(pane: TerminalPane) {
+    await unwrapCommand(commands.closeTerminalSession(pane.id)).catch((error) => {
+      settingsError = error instanceof Error ? error.message : String(error);
+    });
+  }
+
+  function pushUndoAction(action: TerminalUndoAction) {
+    undoStack = appendUndoAction(undoStack, action);
+    clearRedoStack();
+    syncTerminalMenuState();
+  }
+
+  async function runTerminalUndo() {
+    const action = undoStack.at(-1);
+    if (!action) return;
+    undoStack = undoStack.slice(0, -1);
+    const redoAction = await applyTerminalUndo(action);
+    redoStack = appendRedoAction(redoStack, redoAction);
+    syncTerminalMenuState();
+  }
+
+  async function runTerminalRedo() {
+    const action = redoStack.at(-1);
+    if (!action) return;
+    redoStack = redoStack.slice(0, -1);
+    const redone = await applyTerminalRedo(action);
+    undoStack = appendUndoAction(undoStack, redone);
+    syncTerminalMenuState();
+  }
+
+  function appendUndoAction(stack: TerminalUndoAction[], action: TerminalUndoAction) {
+    const next = [...stack, action];
+    const discarded = next.length > 50 ? next.shift() : undefined;
+    if (discarded) void finalizeDiscardedAction(discarded);
+    return next;
+  }
+
+  function appendRedoAction(stack: TerminalRedoAction[], action: TerminalRedoAction) {
+    const next = [...stack, action];
+    const discarded = next.length > 50 ? next.shift() : undefined;
+    if (discarded) void finalizeDiscardedAction(discarded);
+    return next;
+  }
+
+  function clearRedoStack() {
+    for (const action of redoStack) void finalizeDiscardedAction(action);
+    redoStack = [];
+  }
+
+  async function finalizeDiscardedAction(action: TerminalUndoAction | TerminalRedoAction) {
+    if (action.kind === "close_tab") {
+      for (const pane of action.tab.panes) {
+        if (pane.status === "running") await closePaneSession(pane);
+      }
+      return;
+    }
+    if (action.kind === "close_pane" && action.pane.status === "running") {
+      await closePaneSession(action.pane);
+    }
+  }
+
+  async function applyTerminalUndo(action: TerminalUndoAction): Promise<TerminalRedoAction> {
+    if (action.kind === "create_tab") {
+      await closeCreatedTabForUndo(action.tabId);
+      return { kind: "create_tab" };
+    }
+    if (action.kind === "create_pane") {
+      await closeCreatedPaneForUndo(action.tabId, action.paneId);
+      return { kind: "create_pane", side: action.side, tabId: action.tabId, targetPaneId: action.targetPaneId };
+    }
+    if (action.kind === "close_tab") {
+      await restoreClosedTab(action);
+      return action;
+    }
+    if (action.kind === "close_pane") {
+      await restoreClosedPane(action);
+    }
+    return action;
+  }
+
+  async function applyTerminalRedo(action: TerminalRedoAction): Promise<TerminalUndoAction> {
+    if (action.kind === "create_tab") {
+      return restoreCreatedTabForRedo();
+    }
+    if (action.kind === "create_pane") {
+      return restoreCreatedPaneForRedo(action);
+    }
+    if (action.kind === "close_tab") {
+      await closeRestoredTabForRedo(action.tab.id);
+      return action;
+    }
+    if (action.kind === "close_pane") {
+      await closeRestoredPaneForRedo(action.tabId, action.pane.id);
+    }
+    return action;
+  }
+
+  async function closeCreatedTabForUndo(tabId: string) {
+    const tab = tabs.find((item) => item.id === tabId);
+    if (!tab) return;
+    for (const pane of tab.panes) {
+      disposeTerminalPane(pane);
+      if (pane.status === "running") await closePaneSession(pane);
+    }
+    tabs = tabs.filter((item) => item.id !== tab.id);
+    if (activeId === tab.id) {
+      activeId = tabs.at(-1)?.id ?? "";
+      if (activeId) await activateTab(activeId);
+    }
+  }
+
+  async function closeCreatedPaneForUndo(tabId: string, paneId: string) {
+    const tab = tabs.find((item) => item.id === tabId);
+    const pane = tab ? terminalPaneById(tab, paneId) : undefined;
+    if (!tab || !pane) return;
+    disposeTerminalPane(pane);
+    if (pane.status === "running") await closePaneSession(pane);
+    const nextTree = removePane(tab.tree, paneId);
+    if (!nextTree) {
+      tabs = tabs.filter((item) => item.id !== tab.id);
+      activeId = tabs.at(-1)?.id ?? "";
+      if (activeId) await activateTab(activeId);
+      return;
+    }
+    tab.tree = nextTree;
+    tab.panes = tab.panes.filter((item) => item.id !== paneId);
+    tab.activePaneId = tab.panes[0]?.id ?? "";
+    refreshTerminalTabTitle(tab);
+    await activatePane(tab.activePaneId);
+    await mountAndFitTabPanes(tab);
+  }
+
+  async function restoreCreatedTabForRedo(): Promise<TerminalUndoAction> {
+    await newSession({ recordHistory: false });
+    const tab = tabs.find((item) => item.id === activeId);
+    if (!tab) throw new Error("redo did not create a terminal tab");
+    return { kind: "create_tab", tabId: tab.id };
+  }
+
+  async function restoreCreatedPaneForRedo(action: Extract<TerminalRedoAction, { kind: "create_pane" }>): Promise<TerminalUndoAction> {
+    const tab = tabs.find((item) => item.id === action.tabId);
+    if (!tab) throw new Error(`redo target tab ${action.tabId} not found`);
+    activeId = tab.id;
+    const targetPaneId = terminalPaneById(tab, action.targetPaneId) ? action.targetPaneId : tab.activePaneId;
+    await splitPaneById(targetPaneId, action.side, { recordHistory: false });
+    const pane = activePane();
+    if (!pane) throw new Error("redo did not create a terminal pane");
+    return { ...action, paneId: pane.id, targetPaneId };
+  }
+
+  async function restoreClosedTab(action: Extract<TerminalUndoAction, { kind: "close_tab" }>) {
+    tabs = [...tabs.slice(0, action.index), action.tab, ...tabs.slice(action.index)];
+    activeId = action.tab.id;
+    await tick();
+    await mountAndFitTabPanes(action.tab);
+    terminalPaneById(action.tab, action.tab.activePaneId)?.term?.focus();
+  }
+
+  async function restoreClosedPane(action: Extract<TerminalUndoAction, { kind: "close_pane" }>) {
+    const tab = tabs.find((item) => item.id === action.tabId);
+    if (!tab) return;
+    action.pane.tabId = tab.id;
+    tab.panes = [...tab.panes.slice(0, action.index), action.pane, ...tab.panes.slice(action.index)];
+    tab.tree = clonePaneTree(action.tree);
+    tab.activePaneId = action.activePaneId;
+    refreshTerminalTabTitle(tab);
+    activeId = tab.id;
+    await tick();
+    await mountAndFitTabPanes(tab);
+    terminalPaneById(tab, tab.activePaneId)?.term?.focus();
+  }
+
+  async function closeRestoredTabForRedo(tabId: string) {
+    const tab = tabs.find((item) => item.id === tabId);
+    if (!tab) return;
+    for (const pane of tab.panes) detachTerminalPane(pane);
+    tabs = tabs.filter((item) => item.id !== tabId);
+    if (activeId === tabId) {
+      activeId = tabs.at(-1)?.id ?? "";
+      if (activeId) await activateTab(activeId);
+    }
+  }
+
+  async function closeRestoredPaneForRedo(tabId: string, paneId: string) {
+    const tab = tabs.find((item) => item.id === tabId);
+    const pane = tab ? terminalPaneById(tab, paneId) : undefined;
+    if (!tab || !pane) return;
+    detachTerminalPane(pane);
+    const nextTree = removePane(tab.tree, paneId);
+    if (!nextTree) {
+      tabs = tabs.filter((item) => item.id !== tab.id);
+      activeId = tabs.at(-1)?.id ?? "";
+      if (activeId) await activateTab(activeId);
+      return;
+    }
+    tab.tree = nextTree;
+    tab.panes = tab.panes.filter((item) => item.id !== paneId);
+    tab.activePaneId = tab.panes[0]?.id ?? "";
+    refreshTerminalTabTitle(tab);
+    await activatePane(tab.activePaneId);
+    await mountAndFitTabPanes(tab);
   }
 
   function startResize(event: PointerEvent, firstPaneId: string, secondPaneId: string, direction: SplitDirection) {
@@ -490,12 +911,117 @@
     await mountAndFitTabPanes(newTab);
   }
 
+  async function moveActiveTabToNewWindow() {
+    const tab = activeTab;
+    if (!tab) return;
+    const handoffKey = storeTabHandoff(tab);
+    await unwrapCommand(commands.openMainWindow(`/?tab_handoff=${encodeURIComponent(handoffKey)}`));
+    movedPaneIds = new Set([...movedPaneIds, ...tab.panes.map((pane) => pane.id)]);
+    disposeTerminalTab(tab);
+    tabs = tabs.filter((item) => item.id !== tab.id);
+    activeId = tabs[0]?.id ?? "";
+    if (activeId) await activateTab(activeId);
+  }
+
+  function storeTabHandoff(tab: TerminalTab): string {
+    const key = `nocturne:tab-handoff:${crypto.randomUUID()}`;
+    const stored: StoredTab = {
+      customTitle: tab.customTitle,
+      activePaneId: tab.activePaneId,
+      tree: clonePaneTree(tab.tree),
+      panes: tab.panes.map((pane) => ({
+        id: pane.id,
+        title: pane.title,
+        baseTitle: pane.baseTitle,
+        command: pane.command,
+        currentDirectory: pane.currentDirectory,
+        titleOverride: pane.titleOverride,
+        readOnly: pane.readOnly,
+        status: pane.status,
+        serialized: pane.serialize?.serialize({ scrollback: 1000 }) ?? "",
+        lastCols: pane.lastCols,
+        lastRows: pane.lastRows,
+        lastPixelWidth: pane.lastPixelWidth,
+        lastPixelHeight: pane.lastPixelHeight,
+        nextOutputSequence: pane.nextOutputSequence.toString(),
+      })),
+    };
+    localStorage.setItem(key, JSON.stringify(stored));
+    return key;
+  }
+
+  async function restoreTabHandoff() {
+    const key = new URLSearchParams(window.location.search).get("tab_handoff");
+    if (!key) return false;
+    const raw = localStorage.getItem(key);
+    if (!raw) throw new Error(`tab handoff ${key} not found`);
+    localStorage.removeItem(key);
+    const stored = JSON.parse(raw) as StoredTab;
+    const restoredPanes: TerminalPane[] = [];
+    for (const pane of stored.panes) {
+      const info = await unwrapCommand(commands.existingTerminalSessionInfo({ session_id: pane.id }));
+      const restored = createTerminalPane(info, "");
+      restored.title = pane.title;
+      restored.baseTitle = pane.baseTitle;
+      restored.command = pane.command;
+      restored.currentDirectory = pane.currentDirectory;
+      restored.titleOverride = pane.titleOverride;
+      restored.readOnly = pane.readOnly;
+      restored.status = pane.status;
+      restored.lastCols = pane.lastCols;
+      restored.lastRows = pane.lastRows;
+      restored.lastPixelWidth = pane.lastPixelWidth;
+      restored.lastPixelHeight = pane.lastPixelHeight;
+      restored.nextOutputSequence = BigInt(pane.nextOutputSequence ?? "0");
+      restored.outputQueue = pane.serialized ? [pane.serialized] : [];
+      restoredPanes.push(restored);
+    }
+    const firstPane = restoredPanes[0];
+    if (!firstPane) throw new Error("tab handoff has no panes");
+    await unwrapCommand(
+      commands.transferTerminalSessionsToWindow({
+        session_ids: restoredPanes.map((pane) => pane.id),
+        window_label: currentWindowLabel(),
+      }),
+    );
+    const tab = createTerminalTabFromPane(firstPane);
+    tab.customTitle = stored.customTitle;
+    tab.activePaneId = stored.activePaneId;
+    tab.tree = clonePaneTree(stored.tree);
+    for (const pane of restoredPanes) pane.tabId = tab.id;
+    tab.panes = restoredPanes;
+    refreshTerminalTabTitle(tab);
+    tabs = [tab];
+    activeId = tab.id;
+    await tick();
+    await mountAndFitTabPanes(tab);
+    terminalPaneById(tab, tab.activePaneId)?.term?.focus();
+    syncTerminalMenuState();
+    return true;
+  }
+
   async function mountAndFitTabPanes(tab: TerminalTab) {
     await tick();
     for (const pane of tab.panes) {
-      await terminalTabs.mountTerminal(pane.id);
+      await mountTerminalWhenReady(pane.id);
+      await flushTerminalOutputBacklog(pane.id);
       terminalTabs.scheduleFit(pane.id);
     }
+  }
+
+  async function mountTerminalWhenReady(paneId: string) {
+    await waitForPaneContainer(paneId);
+    await terminalTabs.mountTerminal(paneId);
+  }
+
+  async function waitForPaneContainer(paneId: string) {
+    for (let attempt = 0; attempt < 30; attempt += 1) {
+      const pane = terminalPaneById(findTabByPaneId(paneId), paneId);
+      if (pane?.container) return;
+      await tick();
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+    }
+    throw new Error(`terminal pane ${paneId} did not mount a container`);
   }
 
   function removePaneFromTab(tab: TerminalTab, paneId: string) {
@@ -524,6 +1050,7 @@
       commands.showTabBarContextMenu({
         x: event.clientX,
         y: event.clientY,
+        window_label: currentWindowLabel(),
       }),
     ).catch((error) => {
       settingsError = error instanceof Error ? error.message : String(error);
@@ -534,11 +1061,16 @@
     event.preventDefault();
     await activatePane(paneId);
     if (!hasTauriRuntime()) return;
+    const pane = terminalPaneById(findTabByPaneId(paneId), paneId);
+    if (!pane) throw new Error(`pane ${paneId} not found`);
     await unwrapCommand(
       commands.showPaneContextMenu({
         x: event.clientX,
         y: event.clientY,
         pane_id: paneId,
+        window_label: currentWindowLabel(),
+        has_selection: pane.term?.hasSelection() === true,
+        read_only: pane.readOnly,
       }),
     ).catch((error) => {
       settingsError = error instanceof Error ? error.message : String(error);
@@ -546,6 +1078,26 @@
   }
 
   function handlePaneMenu(event: PaneMenuEvent) {
+    if (event.action === "copy") {
+      void copyPaneSelection(event.pane_id);
+      return;
+    }
+    if (event.action === "paste") {
+      void pasteIntoPane(event.pane_id);
+      return;
+    }
+    if (event.action === "reset_terminal") {
+      resetPaneTerminal(event.pane_id);
+      return;
+    }
+    if (event.action === "toggle_read_only") {
+      togglePaneReadOnly(event.pane_id);
+      return;
+    }
+    if (event.action === "change_tab_title") {
+      changeTabTitleForPane(event.pane_id);
+      return;
+    }
     if (event.action === "split_left") {
       void splitPaneById(event.pane_id, "left");
       return;
@@ -563,6 +1115,476 @@
       return;
     }
     settingsError = `Unsupported pane menu action: ${event.action}`;
+  }
+
+  async function copyPaneSelection(paneId: string) {
+    const pane = terminalPaneById(findTabByPaneId(paneId), paneId);
+    if (!pane?.term || !pane.term.hasSelection()) return;
+    const selection = pane.term.getSelection();
+    if (!selection) return;
+    if (hasTauriRuntime()) await writeText(selection);
+    else await navigator.clipboard.writeText(selection);
+  }
+
+  async function pasteIntoPane(paneId: string) {
+    const pane = terminalPaneById(findTabByPaneId(paneId), paneId);
+    if (!pane?.term || pane.readOnly) return;
+    const text = hasTauriRuntime() ? await readText() : await navigator.clipboard.readText();
+    if (!text) return;
+    pane.term.paste(text);
+  }
+
+  async function pasteSelectionIntoActivePane() {
+    const pane = activePane();
+    if (!pane?.term || pane.readOnly || !pane.term.hasSelection()) return;
+    const selection = pane.term.getSelection();
+    if (!selection) return;
+    pane.term.paste(selection);
+  }
+
+  function syncTerminalMenuState() {
+    const pane = activePane();
+    const hasActiveTab = activeTab !== undefined;
+    const hasActivePane = pane !== null;
+    const hasSelection = pane?.term?.hasSelection() === true;
+    const textInput = activeTextInput();
+    const textInputHasSelection = textInput ? textInput.selectionStart !== textInput.selectionEnd : false;
+    const textHistory = textInput ? textEditHistories.get(textInput) : undefined;
+    const canUndo = terminalMenuCanUndo({
+      activePaneWritable: pane !== null && !pane.readOnly,
+      activeTextInputCanRedo: (textHistory?.redo.length ?? 0) > 0,
+      activeTextInputCanUndo: textInput !== null && ((textHistory?.undo.length ?? 0) > 0 || textInput.value.length > 0),
+      redoDepth: redoStack.length,
+      undoDepth: undoStack.length,
+    });
+    const canRedo = terminalMenuCanRedo({
+      activePaneWritable: pane !== null && !pane.readOnly,
+      activeTextInputCanRedo: (textHistory?.redo.length ?? 0) > 0,
+      activeTextInputCanUndo: textInput !== null && ((textHistory?.undo.length ?? 0) > 0 || textInput.value.length > 0),
+      redoDepth: redoStack.length,
+      undoDepth: undoStack.length,
+    });
+    const state = {
+      can_edit_text: textInput !== null,
+      can_undo_text: canUndo,
+      can_redo_text: canRedo,
+      has_active_tab: hasActiveTab,
+      has_active_pane: hasActivePane,
+      has_multiple_tabs: tabs.length > 1,
+      has_multiple_panes: (activeTab?.panes.length ?? 0) > 1,
+      has_selection: hasSelection || textInputHasSelection,
+      can_paste: textInput !== null || (pane !== null && !pane.readOnly),
+      can_paste_selection: hasSelection && pane !== null && !pane.readOnly,
+      can_select_all: textInput !== null || hasActivePane,
+      can_jump_to_selection: hasSelection,
+      find_visible: findVisible,
+      has_find_query: findQuery.trim().length > 0,
+    };
+    const serialized = JSON.stringify(state);
+    if (serialized === serializedMenuState) return;
+    serializedMenuState = serialized;
+    if (!hasTauriRuntime()) return;
+    void unwrapCommand(commands.updateTerminalMenuState(state)).catch((error) => {
+      settingsError = error instanceof Error ? error.message : String(error);
+    });
+  }
+
+  function resetPaneTerminal(paneId: string) {
+    const pane = terminalPaneById(findTabByPaneId(paneId), paneId);
+    if (!pane?.term) return;
+    pane.term.reset();
+    pane.term.clear();
+    terminalTabs.scheduleFit(pane.id);
+  }
+
+  function togglePaneReadOnly(paneId: string) {
+    const pane = terminalPaneById(findTabByPaneId(paneId), paneId);
+    if (!pane) return;
+    pane.readOnly = !pane.readOnly;
+    syncTerminalMenuState();
+  }
+
+  function changeTabTitleForPane(paneId: string) {
+    const tab = findTabByPaneId(paneId);
+    changeTabTitle(tab);
+  }
+
+  function changeTabTitle(tab: TerminalTab) {
+    const nextTitle = window.prompt(t("changeTabTitlePrompt"), tab.customTitle || tab.title);
+    if (nextTitle === null) return;
+    tab.customTitle = nextTitle.trim();
+    refreshTerminalTabTitle(tab);
+  }
+
+  function adjustFontSize(delta: number) {
+    const tab = activeTab;
+    const baseSize = settings?.font_size ?? 13;
+    for (const pane of tab?.panes ?? []) {
+      if (!pane.term) continue;
+      const currentSize = typeof pane.term.options.fontSize === "number" ? pane.term.options.fontSize : baseSize;
+      pane.term.options.fontSize = Math.max(6, Math.min(48, currentSize + delta));
+      terminalTabs.scheduleFit(pane.id);
+    }
+  }
+
+  function resetFontSize() {
+    if (!settings || !activeTab) return;
+    if (settings.font_size === null) throw new Error("terminal font size is missing");
+    for (const pane of activeTab.panes) {
+      if (!pane.term) continue;
+      pane.term.options.fontSize = settings.font_size;
+      terminalTabs.scheduleFit(pane.id);
+    }
+  }
+
+  function showFind() {
+    findVisible = true;
+    const selection = activePane()?.term?.getSelection() ?? "";
+    if (selection) findQuery = selection;
+    syncTerminalMenuState();
+    void focusFindInput();
+  }
+
+  function hideFind() {
+    findVisible = false;
+    activePane()?.search?.clearDecorations?.();
+    activePane()?.term?.focus();
+    syncTerminalMenuState();
+  }
+
+  function findNext({ focusTerminal = true }: { focusTerminal?: boolean } = {}) {
+    const pane = activePane();
+    if (!pane?.search || !findQuery.trim()) return;
+    pane.search.findNext(findQuery, { decorations: searchDecorations() });
+    if (focusTerminal) pane.term?.focus();
+  }
+
+  function findPrevious({ focusTerminal = true }: { focusTerminal?: boolean } = {}) {
+    const pane = activePane();
+    if (!pane?.search || !findQuery.trim()) return;
+    pane.search.findPrevious(findQuery, { decorations: searchDecorations() });
+    if (focusTerminal) pane.term?.focus();
+  }
+
+  function useSelectionForFind() {
+    const selection = focusedTextSelection() || activePane()?.term?.getSelection() || "";
+    if (!selection) return;
+    findQuery = selection;
+    findVisible = true;
+    findNext();
+    syncTerminalMenuState();
+    void focusFindInput();
+  }
+
+  function jumpToSelection() {
+    const term = activePane()?.term;
+    const position = term?.getSelectionPosition();
+    if (!term || !position) return;
+    const line = Math.min(position.start.y, position.end.y);
+    term.scrollToLine(Math.max(0, line - Math.floor(term.rows / 2)));
+    term.focus();
+  }
+
+  function focusedTextInput(): TextInputElement | null {
+    const element = document.activeElement;
+    if (isEditableTextInput(element)) {
+      lastFocusedTextInput = element;
+      ensureTextEditHistory(element);
+      return element;
+    }
+    if (isEditableTextInput(lastFocusedTextInput)) {
+      ensureTextEditHistory(lastFocusedTextInput);
+      return lastFocusedTextInput;
+    }
+    lastFocusedTextInput = null;
+    return null;
+  }
+
+  function activeTextInput(): TextInputElement | null {
+    const element = document.activeElement;
+    if (!isEditableTextInput(element)) return null;
+    lastFocusedTextInput = element;
+    ensureTextEditHistory(element);
+    return element;
+  }
+
+  function focusedTextSelection(): string {
+    const element = focusedTextInput();
+    if (!element) return "";
+    const start = element.selectionStart ?? 0;
+    const end = element.selectionEnd ?? start;
+    return element.value.slice(start, end);
+  }
+
+  function pasteIntoTextInput(element: TextInputElement, text: string) {
+    const start = element.selectionStart ?? element.value.length;
+    const end = element.selectionEnd ?? start;
+    element.focus();
+    element.setRangeText(text, start, end, "end");
+    element.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertFromPaste", data: text }));
+  }
+
+  function runTextInputEditCommand(element: TextInputElement, command: "undo" | "redo" | "copy") {
+    element.focus();
+    if (command === "undo") return undoTextInputEdit(element);
+    if (command === "redo") return redoTextInputEdit(element);
+    document.execCommand(command);
+  }
+
+  function isEditableTextInput(element: Element | null): element is TextInputElement {
+    if (!(element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement)) return false;
+    if (element.disabled || element.readOnly) return false;
+    if (!element.isConnected) return false;
+    return !element.closest(".xterm");
+  }
+
+  function textEditSnapshot(element: TextInputElement): TextEditSnapshot {
+    const fallback = element.value.length;
+    return {
+      value: element.value,
+      selectionStart: element.selectionStart ?? fallback,
+      selectionEnd: element.selectionEnd ?? fallback,
+    };
+  }
+
+  function snapshotsEqual(first: TextEditSnapshot, second: TextEditSnapshot) {
+    return first.value === second.value && first.selectionStart === second.selectionStart && first.selectionEnd === second.selectionEnd;
+  }
+
+  function ensureTextEditHistory(element: TextInputElement): TextEditHistory {
+    const current = textEditSnapshot(element);
+    const existing = textEditHistories.get(element);
+    if (existing) return existing;
+    const history = { current, undo: [], redo: [] };
+    textEditHistories.set(element, history);
+    return history;
+  }
+
+  function pushTextUndoSnapshot(element: TextInputElement) {
+    const history = ensureTextEditHistory(element);
+    const snapshot = textEditSnapshot(element);
+    if (history.undo.length > 0 && snapshotsEqual(history.undo[history.undo.length - 1], snapshot)) return;
+    history.undo.push(snapshot);
+    if (history.undo.length > 100) history.undo.shift();
+    history.redo = [];
+    history.current = snapshot;
+  }
+
+  function updateTextEditCurrent(element: TextInputElement) {
+    const history = ensureTextEditHistory(element);
+    history.current = textEditSnapshot(element);
+    syncTerminalMenuState();
+  }
+
+  function restoreTextInputSnapshot(element: TextInputElement, snapshot: TextEditSnapshot, inputType: "historyUndo" | "historyRedo") {
+    element.focus();
+    element.value = snapshot.value;
+    element.setSelectionRange(snapshot.selectionStart, snapshot.selectionEnd);
+    element.dispatchEvent(new InputEvent("input", { bubbles: true, inputType }));
+    updateTextEditCurrent(element);
+  }
+
+  async function focusFindInput() {
+    await tick();
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      if (findInput?.isConnected) {
+        findInput.focus({ preventScroll: true });
+        findInput.select();
+        if (document.activeElement === findInput) return;
+      }
+      await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
+    }
+  }
+
+  function undoTextInputEdit(element: TextInputElement) {
+    const history = ensureTextEditHistory(element);
+    const previous = history.undo.pop();
+    if (!previous) {
+      document.execCommand("undo");
+      syncTerminalMenuState();
+      return;
+    }
+    history.redo.push(textEditSnapshot(element));
+    restoreTextInputSnapshot(element, previous, "historyUndo");
+  }
+
+  function redoTextInputEdit(element: TextInputElement) {
+    const history = ensureTextEditHistory(element);
+    const next = history.redo.pop();
+    if (!next) {
+      document.execCommand("redo");
+      syncTerminalMenuState();
+      return;
+    }
+    history.undo.push(textEditSnapshot(element));
+    restoreTextInputSnapshot(element, next, "historyRedo");
+  }
+
+  function handleTextInputBeforeInput(event: InputEvent) {
+    if (event.inputType === "historyUndo" || event.inputType === "historyRedo") return;
+    const target = event.target instanceof Element ? event.target : null;
+    if (!isEditableTextInput(target)) return;
+    pushTextUndoSnapshot(target);
+    syncTerminalMenuState();
+  }
+
+  function handleTextInputInput(event: Event) {
+    const target = event.target instanceof Element ? event.target : null;
+    if (!isEditableTextInput(target)) return;
+    if (event instanceof InputEvent && (event.inputType === "historyUndo" || event.inputType === "historyRedo")) return;
+    const history = ensureTextEditHistory(target);
+    const snapshot = textEditSnapshot(target);
+    if (snapshotsEqual(history.current, snapshot)) return;
+    if (history.undo.length === 0 || !snapshotsEqual(history.undo[history.undo.length - 1], history.current)) {
+      history.undo.push(history.current);
+      if (history.undo.length > 100) history.undo.shift();
+    }
+    history.redo = [];
+    history.current = snapshot;
+    syncTerminalMenuState();
+  }
+
+  function handleTextInputFocus(event: FocusEvent) {
+    const target = event.target instanceof Element ? event.target : null;
+    if (!isEditableTextInput(target)) return;
+    lastFocusedTextInput = target;
+    ensureTextEditHistory(target);
+    syncTerminalMenuState();
+  }
+
+  function searchDecorations() {
+    return {
+      matchBackground: "#9fb6d8",
+      matchOverviewRuler: "#7a91b8",
+      activeMatchBackground: "#ffd166",
+      activeMatchColorOverviewRuler: "#ffd166",
+    };
+  }
+
+  function showPreviousTab() {
+    if (!tabs.length || !activeId) return;
+    const index = tabs.findIndex((tab) => tab.id === activeId);
+    const next = tabs[(index - 1 + tabs.length) % tabs.length];
+    if (next) void activateTab(next.id);
+  }
+
+  function showNextTab() {
+    if (!tabs.length || !activeId) return;
+    const index = tabs.findIndex((tab) => tab.id === activeId);
+    const next = tabs[(index + 1) % tabs.length];
+    if (next) void activateTab(next.id);
+  }
+
+  function siblingPane(side: SplitSide): string | null {
+    const tab = activeTab;
+    if (!tab) return null;
+    const panes = tab.panes.map((pane) => pane.id);
+    const index = panes.indexOf(tab.activePaneId);
+    if (index === -1) return null;
+    if (side === "left" || side === "up") return panes[Math.max(0, index - 1)] ?? null;
+    return panes[Math.min(panes.length - 1, index + 1)] ?? null;
+  }
+
+  function selectSplit(side: SplitSide) {
+    const paneId = siblingPane(side);
+    if (paneId) void activatePane(paneId);
+  }
+
+  function selectPreviousSplit() {
+    selectSplit("left");
+  }
+
+  function selectNextSplit() {
+    selectSplit("right");
+  }
+
+  function resizeActiveSplit(side: SplitSide) {
+    const tab = activeTab;
+    const targetPaneId = siblingPane(side);
+    if (!tab || !targetPaneId) return;
+    const direction = side === "left" || side === "right" ? "row" : "column";
+    const delta = side === "left" || side === "up" ? -32 : 32;
+    tab.tree = resizeAdjacentPanes({
+      tree: tab.tree,
+      firstPaneId: tab.activePaneId,
+      secondPaneId: targetPaneId,
+      deltaPixels: delta,
+      containerPixels: direction === "row" ? window.innerWidth : window.innerHeight,
+      minFirstPixels: direction === "row" ? minPaneWidth : minPaneHeight,
+      minSecondPixels: direction === "row" ? minPaneWidth : minPaneHeight,
+    });
+    void mountAndFitTabPanes(tab);
+  }
+
+  async function runTerminalMenuCommand(command: TerminalMenuEvent["command"]) {
+    if (command === "new_window") {
+      if (hasTauriRuntime()) await unwrapCommand(commands.openMainWindow(null));
+      return;
+    }
+    if (command === "new_tab") {
+      await newSession();
+      return;
+    }
+    if (command === "split_right") return splitActivePane("right");
+    if (command === "split_left") return splitActivePane("left");
+    if (command === "split_down") return splitActivePane("down");
+    if (command === "split_up") return splitActivePane("up");
+    if (command === "close") return closeActiveTarget();
+    if (command === "close_tab" && activeId) return closeTab(activeId, { recordHistory: true });
+    if (command === "close_window") return closeCurrentWindow();
+    if (command === "undo" || command === "redo") {
+      const element = activeTextInput();
+      if (element) runTextInputEditCommand(element, command);
+      else if (command === "undo") await runTerminalUndo();
+      else await runTerminalRedo();
+      return;
+    }
+    if (command === "copy" && activeTextInput()) {
+      const element = activeTextInput();
+      if (!element) return;
+      runTextInputEditCommand(element, "copy");
+      return;
+    }
+    if (command === "paste" && activeTextInput()) {
+      const element = activeTextInput();
+      if (!element) return;
+      const text = hasTauriRuntime() ? await readText() : await navigator.clipboard.readText();
+      pasteIntoTextInput(element, text);
+      return;
+    }
+    if (command === "select_all" && activeTextInput()) {
+      activeTextInput()?.select();
+      return;
+    }
+    if (command === "copy") return activePane() ? copyPaneSelection(activePane()!.id) : undefined;
+    if (command === "paste") return activePane() ? pasteIntoPane(activePane()!.id) : undefined;
+    if (command === "paste_selection") return pasteSelectionIntoActivePane();
+    if (command === "select_all") return activePane()?.term?.selectAll();
+    if (command === "find") return showFind();
+    if (command === "find_next") return findNext();
+    if (command === "find_previous") return findPrevious();
+    if (command === "hide_find_bar") return hideFind();
+    if (command === "use_selection_for_find") return useSelectionForFind();
+    if (command === "jump_to_selection") return jumpToSelection();
+    if (command === "reset_font_size") return resetFontSize();
+    if (command === "increase_font_size") return adjustFontSize(1);
+    if (command === "decrease_font_size") return adjustFontSize(-1);
+    if (command === "change_tab_title" && activeTab) return changeTabTitle(activeTab);
+    if (command === "toggle_read_only" && activePane()) return togglePaneReadOnly(activePane()!.id);
+    if (command === "show_previous_tab") return showPreviousTab();
+    if (command === "show_next_tab") return showNextTab();
+    if (command === "move_tab_to_new_window") return moveActiveTabToNewWindow();
+    if (command === "zoom_split") return activePane()?.term?.focus();
+    if (command === "select_previous_split") return selectPreviousSplit();
+    if (command === "select_next_split") return selectNextSplit();
+    if (command === "select_split_left") return selectSplit("left");
+    if (command === "select_split_right") return selectSplit("right");
+    if (command === "select_split_up") return selectSplit("up");
+    if (command === "select_split_down") return selectSplit("down");
+    if (command === "resize_split_left") return resizeActiveSplit("left");
+    if (command === "resize_split_right") return resizeActiveSplit("right");
+    if (command === "resize_split_up") return resizeActiveSplit("up");
+    if (command === "resize_split_down") return resizeActiveSplit("down");
   }
 
   function handleKeyboard(event: KeyboardEvent) {
@@ -586,7 +1608,7 @@
       return;
     }
     if (command === "terminal.closeTab" && activeId) {
-      void closeTab(activeId);
+      void closeTab(activeId, { recordHistory: true });
       return;
     }
     if (command === "terminal.splitRight" && activeId) {
@@ -606,52 +1628,86 @@
       return;
     }
     if (command === "terminal.closePane" && activeTab) {
-      void closePane(activeTab.activePaneId);
+      void closePane(activeTab.activePaneId, { recordHistory: true });
     }
   }
 
   onMount(() => {
-    void loadSettings().catch((error) => {
+    let mounted = true;
+    void (async () => {
+      if (hasTauriRuntime()) {
+        const windowTarget = { kind: "WebviewWindow" as const, label: currentWindowLabel() };
+        const [outputDispose, exitDispose, configDispose, paneMenuDispose, terminalMenuDispose] = await Promise.all([
+          listen<TerminalOutputEvent>("terminal://output", (event) => terminalTabs.enqueueOutput(event.payload)),
+          listen<TerminalExitEvent>("terminal://exit", (event) => terminalTabs.markExited(event.payload)),
+          listen("config://changed", () => {
+            void loadSettings().catch((error) => {
+              settingsError = error instanceof Error ? error.message : String(error);
+            });
+          }),
+          listen<PaneMenuEvent>("terminal://pane-menu", (event) => handlePaneMenu(event.payload), { target: windowTarget }),
+          listen<TerminalMenuEvent>("terminal://menu-command", (event) => {
+            void runTerminalMenuCommand(event.payload.command).catch((error) => {
+              settingsError = error instanceof Error ? error.message : String(error);
+            });
+          }, { target: windowTarget }),
+        ]);
+        if (!mounted) {
+          outputDispose();
+          exitDispose();
+          configDispose();
+          paneMenuDispose();
+          terminalMenuDispose();
+          return;
+        }
+        outputUnlisten = outputDispose;
+        exitUnlisten = exitDispose;
+        configUnlisten = configDispose;
+        paneMenuUnlisten = paneMenuDispose;
+        terminalMenuUnlisten = terminalMenuDispose;
+      }
+      await loadSettings();
+      const restored = await restoreTabHandoff();
+      await ensureStartupSession(restored);
+    })().catch((error) => {
       settingsError = error instanceof Error ? error.message : String(error);
     });
-    if (hasTauriRuntime()) {
-      void listen<TerminalOutputEvent>("terminal://output", (event) => terminalTabs.enqueueOutput(event.payload)).then((dispose) => {
-        outputUnlisten = dispose;
-      });
-      void listen<TerminalExitEvent>("terminal://exit", (event) => terminalTabs.markExited(event.payload)).then((dispose) => {
-        exitUnlisten = dispose;
-      });
-      void listen("config://changed", () => {
-        void loadSettings().catch((error) => {
-          settingsError = error instanceof Error ? error.message : String(error);
-        });
-      }).then((dispose) => {
-        configUnlisten = dispose;
-      });
-      void listen<PaneMenuEvent>("terminal://pane-menu", (event) => handlePaneMenu(event.payload)).then((dispose) => {
-        paneMenuUnlisten = dispose;
-      });
-    }
     window.addEventListener("keydown", handleKeyboard);
     window.addEventListener("pointermove", handlePointerMove, { capture: true });
     window.addEventListener("pointerup", handlePointerUp, { capture: true });
     window.addEventListener("pointercancel", handlePointerCancel, { capture: true });
     window.addEventListener("blur", handleWindowBlur);
+    window.addEventListener("focus", syncTerminalMenuState);
+    document.addEventListener("beforeinput", handleTextInputBeforeInput);
+    document.addEventListener("input", handleTextInputInput);
+    document.addEventListener("focusin", handleTextInputFocus);
+    document.addEventListener("focusout", syncTerminalMenuState);
+    document.addEventListener("selectionchange", syncTerminalMenuState);
     document.addEventListener("visibilitychange", handleVisibilityChange);
+    syncTerminalMenuState();
     return () => {
+      mounted = false;
       window.removeEventListener("keydown", handleKeyboard);
       window.removeEventListener("pointermove", handlePointerMove, { capture: true });
       window.removeEventListener("pointerup", handlePointerUp, { capture: true });
       window.removeEventListener("pointercancel", handlePointerCancel, { capture: true });
       window.removeEventListener("blur", handleWindowBlur);
+      window.removeEventListener("focus", syncTerminalMenuState);
+      document.removeEventListener("beforeinput", handleTextInputBeforeInput);
+      document.removeEventListener("input", handleTextInputInput);
+      document.removeEventListener("focusin", handleTextInputFocus);
+      document.removeEventListener("focusout", syncTerminalMenuState);
+      document.removeEventListener("selectionchange", syncTerminalMenuState);
       document.removeEventListener("visibilitychange", handleVisibilityChange);
       outputUnlisten?.();
       exitUnlisten?.();
       configUnlisten?.();
       paneMenuUnlisten?.();
+      terminalMenuUnlisten?.();
       for (const tab of tabs) {
         disposeTerminalTab(tab);
         for (const pane of tab.panes) {
+          if (movedPaneIds.has(pane.id)) continue;
           if (pane.status === "running") void unwrapCommand(commands.closeTerminalSession(pane.id));
         }
       }
@@ -664,8 +1720,17 @@
         const tab = tabs.find((item) => item.id === activeId);
         if (!tab) return;
         void mountAndFitTabPanes(tab);
+        syncTerminalMenuState();
       });
     }
+  });
+
+  $effect(() => {
+    tabs.length;
+    activeId;
+    findVisible;
+    findQuery;
+    void tick().then(syncTerminalMenuState);
   });
 </script>
 
@@ -730,6 +1795,44 @@
       openContextMenu={tabContextMenu}
       {startTabPointerDrag}
     />
+  {/if}
+
+  {#if findVisible}
+    <form
+      class="find-bar"
+      role="search"
+      onsubmit={(event) => {
+        event.preventDefault();
+        findNext();
+      }}
+    >
+      <input
+        bind:this={findInput}
+        bind:value={findQuery}
+        aria-label={t("find")}
+        placeholder={t("find")}
+        spellcheck="false"
+        oninput={() => {
+          findNext({ focusTerminal: false });
+          syncTerminalMenuState();
+        }}
+        onkeydown={(event) => {
+          if (event.key === "Escape") {
+            event.preventDefault();
+            hideFind();
+          }
+        }}
+      />
+      <button type="button" aria-label={t("findPrevious")} title={t("findPrevious")} onclick={() => findPrevious()}>
+        ↑
+      </button>
+      <button type="button" aria-label={t("findNext")} title={t("findNext")} onclick={() => findNext()}>
+        ↓
+      </button>
+      <button type="button" aria-label={t("hideFindBar")} title={t("hideFindBar")} onclick={hideFind}>
+        ×
+      </button>
+    </form>
   {/if}
 </main>
 
@@ -880,6 +1983,63 @@
     display: block;
   }
 
+  .find-bar {
+    position: fixed;
+    top: max(48px, env(safe-area-inset-top));
+    right: 14px;
+    z-index: 20;
+    display: grid;
+    grid-template-columns: minmax(160px, 260px) 30px 30px 30px;
+    gap: 6px;
+    align-items: center;
+    padding: 6px;
+    border: 1px solid color-mix(in srgb, var(--app-fg) 16%, transparent);
+    border-radius: 8px;
+    background: color-mix(in srgb, var(--app-bg) 92%, transparent);
+    box-shadow: 0 12px 30px color-mix(in srgb, #000 22%, transparent);
+    -webkit-backdrop-filter: blur(18px);
+    backdrop-filter: blur(18px);
+  }
+
+  .find-bar input {
+    width: 100%;
+    min-width: 0;
+    height: 28px;
+    border: 1px solid color-mix(in srgb, var(--app-fg) 14%, transparent);
+    border-radius: 6px;
+    padding: 0 9px;
+    background: color-mix(in srgb, var(--app-bg) 82%, var(--app-fg));
+    color: var(--app-fg);
+    font: inherit;
+    font-size: 13px;
+    outline: none;
+  }
+
+  .find-bar input:focus-visible {
+    border-color: var(--terminal-selection);
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--terminal-selection) 34%, transparent);
+  }
+
+  .find-bar button {
+    width: 30px;
+    height: 28px;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    color: color-mix(in srgb, var(--app-fg) 82%, transparent);
+    font: inherit;
+    font-size: 16px;
+    line-height: 1;
+  }
+
+  .find-bar button:hover {
+    background: color-mix(in srgb, var(--app-fg) 10%, transparent);
+  }
+
+  .find-bar button:active {
+    background: color-mix(in srgb, var(--app-fg) 16%, transparent);
+  }
+
   @media (max-width: 720px) {
     .workspace.vertical {
       grid-template-columns: minmax(0, 1fr) 160px;
@@ -895,6 +2055,12 @@
 
     .workspace.vertical.left-tabs .terminal-measure-host {
       inset: 0 0 0 160px;
+    }
+
+    .find-bar {
+      left: 10px;
+      right: 10px;
+      grid-template-columns: minmax(0, 1fr) 30px 30px 30px;
     }
   }
 </style>

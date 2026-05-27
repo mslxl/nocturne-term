@@ -194,6 +194,7 @@ pub enum TabBarOrientation {
 pub struct TabBarContextMenuInput {
     pub x: f64,
     pub y: f64,
+    pub window_label: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
@@ -201,6 +202,9 @@ pub struct PaneContextMenuInput {
     pub x: f64,
     pub y: f64,
     pub pane_id: String,
+    pub window_label: String,
+    pub has_selection: bool,
+    pub read_only: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
@@ -210,12 +214,99 @@ pub struct PaneMenuEvent {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct TerminalMenuStateInput {
+    pub can_edit_text: bool,
+    pub can_undo_text: bool,
+    pub can_redo_text: bool,
+    pub has_active_tab: bool,
+    pub has_active_pane: bool,
+    pub has_multiple_tabs: bool,
+    pub has_multiple_panes: bool,
+    pub has_selection: bool,
+    pub can_paste: bool,
+    pub can_paste_selection: bool,
+    pub can_select_all: bool,
+    pub can_jump_to_selection: bool,
+    pub find_visible: bool,
+    pub has_find_query: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
 #[serde(rename_all = "snake_case")]
 pub enum PaneMenuAction {
+    Copy,
+    Paste,
+    ResetTerminal,
+    ToggleReadOnly,
+    ChangeTabTitle,
     SplitLeft,
     SplitRight,
     SplitUp,
     SplitDown,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct TerminalMenuEvent {
+    pub command: TerminalMenuCommand,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum TerminalMenuCommand {
+    NewWindow,
+    NewTab,
+    SplitRight,
+    SplitLeft,
+    SplitDown,
+    SplitUp,
+    Close,
+    CloseTab,
+    CloseWindow,
+    Undo,
+    Redo,
+    Copy,
+    Paste,
+    PasteSelection,
+    SelectAll,
+    Find,
+    FindNext,
+    FindPrevious,
+    HideFindBar,
+    UseSelectionForFind,
+    JumpToSelection,
+    ResetFontSize,
+    IncreaseFontSize,
+    DecreaseFontSize,
+    ChangeTabTitle,
+    ToggleReadOnly,
+    Minimize,
+    Zoom,
+    Fill,
+    Center,
+    MoveResizeLeft,
+    MoveResizeRight,
+    MoveResizeTop,
+    MoveResizeBottom,
+    MoveResizeTopLeft,
+    MoveResizeTopRight,
+    MoveResizeBottomLeft,
+    MoveResizeBottomRight,
+    ToggleFullScreen,
+    ShowPreviousTab,
+    ShowNextTab,
+    MoveTabToNewWindow,
+    ZoomSplit,
+    SelectPreviousSplit,
+    SelectNextSplit,
+    SelectSplitLeft,
+    SelectSplitRight,
+    SelectSplitUp,
+    SelectSplitDown,
+    ResizeSplitLeft,
+    ResizeSplitRight,
+    ResizeSplitUp,
+    ResizeSplitDown,
+    BringAllToFront,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
@@ -279,6 +370,7 @@ pub struct CreateTerminalSessionInput {
     pub pixel_height: u16,
     pub resolved_theme: Option<TerminalColorSchemeVariant>,
     pub cwd: Option<String>,
+    pub window_label: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
@@ -310,8 +402,26 @@ pub struct TerminalSessionInfo {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct ExistingTerminalSessionInput {
+    pub session_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct TerminalSessionOwnershipInput {
+    pub session_ids: Vec<String>,
+    pub window_label: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct TerminalOutputBacklogInput {
+    pub session_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
 pub struct TerminalOutputEvent {
     pub session_id: String,
+    pub sequence: String,
+    pub backlog: bool,
     pub data: String,
 }
 
