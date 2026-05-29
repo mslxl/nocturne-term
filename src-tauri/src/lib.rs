@@ -51,6 +51,8 @@ pub fn run() {
             config::remove_config_key,
             app_shell::show_tab_bar_context_menu,
             app_shell::show_pane_context_menu,
+            app_shell::open_settings_window,
+            app_shell::open_profile_new_dialog,
             app_shell::open_main_window,
             app_shell::refresh_app_menu,
             app_shell::update_terminal_menu_state,
@@ -63,7 +65,11 @@ pub fn run() {
         .export(Typescript::default(), "../src/lib/bindings.ts")
         .expect("failed to export Tauri command bindings");
 
-    tauri::Builder::default()
+    let tauri_builder = tauri::Builder::default().enable_macos_default_menu(false);
+    #[cfg(target_os = "macos")]
+    let tauri_builder = tauri_builder.menu(|app| app_shell::build_bootstrap_menu(app));
+
+    tauri_builder
         .on_menu_event(|app, event| app_shell::handle_menu_event(app, event.id().as_ref()))
         .on_window_event(|window, event| app_shell::handle_window_event(window, event))
         .plugin(tauri_plugin_clipboard_manager::init())
