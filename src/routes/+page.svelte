@@ -11,6 +11,13 @@
   import TerminalPaneTree from "$lib/terminal/components/TerminalPaneTree.svelte";
   import TerminalTabBar from "$lib/terminal/components/TerminalTabBar.svelte";
   import { unwrapCommand } from "$lib/terminal/commands";
+  import {
+    terminalFindSearchKeyChanged,
+    terminalFindSnapshot,
+    type TerminalFindSearchKey,
+    type TerminalFindSnapshot,
+    type TerminalLike,
+  } from "$lib/terminal/find";
   import { eventMatchesBinding, readKeybindingMap, type KeybindingMap, type TerminalCommandId } from "$lib/terminal/keybindings";
   import {
     movePaneIntoSplit,
@@ -201,6 +208,10 @@
   let appTheme: "light" | "dark" = "dark";
   let findVisible = $state(false);
   let findQuery = $state("");
+  let findCaseSensitive = $state(false);
+  let findRegex = $state(false);
+  let findSnapshot = $state<TerminalFindSnapshot>({ activeIndex: 0, error: "", matches: [] });
+  let appliedFindSearchKey: TerminalFindSearchKey | null = null;
   let movedPaneIds = new Set<string>();
   let findInput = $state<HTMLInputElement>();
   let lastFocusedTextInput: TextInputElement | null = null;
@@ -306,7 +317,16 @@
   async function flushTerminalOutputBacklog(paneId: string) {
     if (!hasTauriRuntime()) return;
     const event = await unwrapCommand(commands.takeTerminalOutputBacklog({ session_id: paneId }));
-    if (event) terminalTabs.enqueueOutput(event);
+    if (event) enqueueTerminalOutput(event);
+  }
+
+  function enqueueTerminalOutput(event: TerminalOutputEvent) {
+    terminalTabs.enqueueOutput(event);
+    if (event.session_id !== activePane()?.id || !findVisible) return;
+    window.requestAnimationFrame(() => {
+      updateFindSnapshot();
+      syncTerminalMenuState();
+    });
   }
 
   function activePane(): TerminalPane | null {
@@ -322,6 +342,7 @@
     await tick();
     await mountAndFitTabPanes(tab);
     terminalPaneById(tab, tab.activePaneId)?.term?.focus();
+    refreshFindForActivePane();
     syncTerminalMenuState();
   }
 
@@ -334,6 +355,7 @@
     await mountTerminalWhenReady(paneId);
     terminalTabs.scheduleFit(paneId);
     terminalPaneById(tab, paneId)?.term?.focus();
+    refreshFindForActivePane();
     syncTerminalMenuState();
   }
 
@@ -1178,7 +1200,7 @@
       can_select_all: textInput !== null || hasActivePane,
       can_jump_to_selection: hasSelection,
       find_visible: findVisible,
-      has_find_query: findQuery.trim().length > 0,
+      has_find_query: hasFindQuery() && !findSnapshot.error,
     };
     const serialized = JSON.stringify(state);
     if (serialized === serializedMenuState) return;
@@ -1241,6 +1263,7 @@
     findVisible = true;
     const selection = activePane()?.term?.getSelection() ?? "";
     if (selection) findQuery = selection;
+    runFindNavigation("next", { focusTerminal: false, incremental: true });
     syncTerminalMenuState();
     void focusFindInput();
   }
@@ -1249,21 +1272,52 @@
     findVisible = false;
     activePane()?.search?.clearDecorations?.();
     activePane()?.term?.focus();
+    findSnapshot = { activeIndex: 0, error: "", matches: [] };
+    appliedFindSearchKey = null;
     syncTerminalMenuState();
   }
 
   function findNext({ focusTerminal = true }: { focusTerminal?: boolean } = {}) {
-    const pane = activePane();
-    if (!pane?.search || !findQuery.trim()) return;
-    pane.search.findNext(findQuery, { decorations: searchDecorations() });
-    if (focusTerminal) pane.term?.focus();
+    runFindNavigation("next", { focusTerminal });
   }
 
   function findPrevious({ focusTerminal = true }: { focusTerminal?: boolean } = {}) {
+    runFindNavigation("previous", { focusTerminal });
+  }
+
+  function runFindNavigation(
+    direction: "next" | "previous",
+    { focusTerminal = true, incremental = false }: { focusTerminal?: boolean; incremental?: boolean } = {},
+  ) {
     const pane = activePane();
-    if (!pane?.search || !findQuery.trim()) return;
-    pane.search.findPrevious(findQuery, { decorations: searchDecorations() });
+    updateFindSnapshot();
+    if (!pane?.search || !hasFindQuery() || findSnapshot.error) {
+      pane?.search?.clearDecorations?.();
+      appliedFindSearchKey = null;
+      return;
+    }
+    const searchKey = {
+      caseSensitive: findCaseSensitive,
+      paneId: pane.id,
+      query: findQuery,
+      regex: findRegex,
+    };
+    if (terminalFindSearchKeyChanged(appliedFindSearchKey, searchKey)) {
+      pane.search.clearDecorations?.();
+      appliedFindSearchKey = searchKey;
+    }
+    const options = {
+      caseSensitive: findCaseSensitive,
+      decorations: searchDecorations(),
+      incremental,
+      regex: findRegex,
+    };
+    const found =
+      direction === "next" ? pane.search.findNext(findQuery, options) : pane.search.findPrevious(findQuery, options);
+    if (!found) pane.search.clearActiveDecoration?.();
+    updateFindSnapshot();
     if (focusTerminal) pane.term?.focus();
+    syncTerminalMenuState();
   }
 
   function useSelectionForFind() {
@@ -1271,9 +1325,67 @@
     if (!selection) return;
     findQuery = selection;
     findVisible = true;
-    findNext();
+    runFindNavigation("next");
     syncTerminalMenuState();
     void focusFindInput();
+  }
+
+  async function copyMatchingLine() {
+    if (!canCopyMatchingLine()) return;
+    const match = findSnapshot.matches[findSnapshot.activeIndex - 1];
+    if (!match) throw new Error(`active find match ${findSnapshot.activeIndex} is missing`);
+    const line = match.text.trimEnd();
+    if (hasTauriRuntime()) await writeText(line);
+    else await navigator.clipboard.writeText(line);
+  }
+
+  function updateFindQuery() {
+    runFindNavigation("next", { focusTerminal: false, incremental: true });
+    syncTerminalMenuState();
+  }
+
+  function toggleFindCaseSensitive() {
+    findCaseSensitive = !findCaseSensitive;
+    updateFindQuery();
+    void focusFindInput();
+  }
+
+  function toggleFindRegex() {
+    findRegex = !findRegex;
+    updateFindQuery();
+    void focusFindInput();
+  }
+
+  function updateFindSnapshot() {
+    const term = activePane()?.term;
+    findSnapshot = term
+      ? terminalFindSnapshot(term as unknown as TerminalLike, findQuery, {
+          caseSensitive: findCaseSensitive,
+          regex: findRegex,
+        })
+      : { activeIndex: 0, error: "", matches: [] };
+  }
+
+  function refreshFindForActivePane() {
+    updateFindSnapshot();
+    if (findVisible && hasFindQuery() && !findSnapshot.error) {
+      runFindNavigation("next", { focusTerminal: false });
+    }
+  }
+
+  function hasFindQuery() {
+    return findQuery.length > 0;
+  }
+
+  function canCopyMatchingLine() {
+    return hasFindQuery() && !findSnapshot.error && findSnapshot.activeIndex > 0 && findSnapshot.matches.length > 0;
+  }
+
+  function findCountLabel() {
+    if (!hasFindQuery()) return "";
+    if (findSnapshot.error) return "!";
+    if (findSnapshot.matches.length === 0) return "0";
+    return `${findSnapshot.activeIndex} / ${findSnapshot.matches.length}`;
   }
 
   function jumpToSelection() {
@@ -1455,8 +1567,10 @@
   function searchDecorations() {
     return {
       matchBackground: "#9fb6d8",
+      matchBorder: "#7a91b8",
       matchOverviewRuler: "#7a91b8",
       activeMatchBackground: "#ffd166",
+      activeMatchBorder: "#ffd166",
       activeMatchColorOverviewRuler: "#ffd166",
     };
   }
@@ -1588,10 +1702,32 @@
   }
 
   function handleKeyboard(event: KeyboardEvent) {
+    const findCommand = findCommandForKeyboardEvent(event);
+    if (findCommand) {
+      event.preventDefault();
+      void runTerminalMenuCommand(findCommand).catch((error) => {
+        settingsError = error instanceof Error ? error.message : String(error);
+      });
+      return;
+    }
     const command = commandForKeyboardEvent(event);
     if (!command) return;
     event.preventDefault();
     runTerminalCommand(command);
+  }
+
+  function findCommandForKeyboardEvent(event: KeyboardEvent): TerminalMenuCommand | null {
+    if (!primaryShortcutModifier(event)) return null;
+    if (event.altKey) return null;
+    const key = event.key.toLowerCase();
+    if (key === "f" && !event.shiftKey) return "find";
+    if (key === "g") return event.shiftKey ? "find_previous" : "find_next";
+    return null;
+  }
+
+  function primaryShortcutModifier(event: KeyboardEvent) {
+    const isMac = navigator.platform.toLowerCase().includes("mac");
+    return isMac ? event.metaKey && !event.ctrlKey : event.ctrlKey && !event.metaKey;
   }
 
   function commandForKeyboardEvent(event: KeyboardEvent): TerminalCommandId | null {
@@ -1638,7 +1774,7 @@
       if (hasTauriRuntime()) {
         const windowTarget = { kind: "WebviewWindow" as const, label: currentWindowLabel() };
         const [outputDispose, exitDispose, configDispose, paneMenuDispose, terminalMenuDispose] = await Promise.all([
-          listen<TerminalOutputEvent>("terminal://output", (event) => terminalTabs.enqueueOutput(event.payload)),
+          listen<TerminalOutputEvent>("terminal://output", (event) => enqueueTerminalOutput(event.payload)),
           listen<TerminalExitEvent>("terminal://exit", (event) => terminalTabs.markExited(event.payload)),
           listen("config://changed", () => {
             void loadSettings().catch((error) => {
@@ -1672,7 +1808,7 @@
     })().catch((error) => {
       settingsError = error instanceof Error ? error.message : String(error);
     });
-    window.addEventListener("keydown", handleKeyboard);
+    window.addEventListener("keydown", handleKeyboard, { capture: true });
     window.addEventListener("pointermove", handlePointerMove, { capture: true });
     window.addEventListener("pointerup", handlePointerUp, { capture: true });
     window.addEventListener("pointercancel", handlePointerCancel, { capture: true });
@@ -1687,7 +1823,7 @@
     syncTerminalMenuState();
     return () => {
       mounted = false;
-      window.removeEventListener("keydown", handleKeyboard);
+      window.removeEventListener("keydown", handleKeyboard, { capture: true });
       window.removeEventListener("pointermove", handlePointerMove, { capture: true });
       window.removeEventListener("pointerup", handlePointerUp, { capture: true });
       window.removeEventListener("pointercancel", handlePointerCancel, { capture: true });
@@ -1730,6 +1866,9 @@
     activeId;
     findVisible;
     findQuery;
+    findCaseSensitive;
+    findRegex;
+    findSnapshot;
     void tick().then(syncTerminalMenuState);
   });
 </script>
@@ -1806,23 +1945,59 @@
         findNext();
       }}
     >
-      <input
-        bind:this={findInput}
-        bind:value={findQuery}
-        aria-label={t("find")}
-        placeholder={t("find")}
-        spellcheck="false"
-        oninput={() => {
-          findNext({ focusTerminal: false });
-          syncTerminalMenuState();
-        }}
-        onkeydown={(event) => {
-          if (event.key === "Escape") {
-            event.preventDefault();
-            hideFind();
-          }
-        }}
-      />
+      <div class="find-input-wrap">
+        <input
+          class:error={findSnapshot.error}
+          bind:this={findInput}
+          bind:value={findQuery}
+          aria-label={t("find")}
+          aria-invalid={findSnapshot.error ? "true" : "false"}
+          placeholder={t("find")}
+          spellcheck="false"
+          title={findSnapshot.error}
+          oninput={updateFindQuery}
+          onkeydown={(event) => {
+            if (event.key === "Escape") {
+              event.preventDefault();
+              hideFind();
+            } else if (event.key === "Enter") {
+              event.preventDefault();
+              if (event.shiftKey) findPrevious({ focusTerminal: false });
+              else findNext({ focusTerminal: false });
+            }
+          }}
+        />
+        <span class:error={findSnapshot.error} class="find-count">{findCountLabel()}</span>
+      </div>
+      <button
+        type="button"
+        class:active={findCaseSensitive}
+        aria-label={t("matchCase")}
+        aria-pressed={findCaseSensitive}
+        title={t("matchCase")}
+        onclick={toggleFindCaseSensitive}
+      >
+        Aa
+      </button>
+      <button
+        type="button"
+        class:active={findRegex}
+        aria-label={t("useRegex")}
+        aria-pressed={findRegex}
+        title={t("useRegex")}
+        onclick={toggleFindRegex}
+      >
+        .*
+      </button>
+      <button
+        type="button"
+        aria-label={t("copyMatchingLine")}
+        title={t("copyMatchingLine")}
+        disabled={!canCopyMatchingLine()}
+        onclick={() => void copyMatchingLine()}
+      >
+        ⧉
+      </button>
       <button type="button" aria-label={t("findPrevious")} title={t("findPrevious")} onclick={() => findPrevious()}>
         ↑
       </button>
@@ -1989,7 +2164,7 @@
     right: 14px;
     z-index: 20;
     display: grid;
-    grid-template-columns: minmax(160px, 260px) 30px 30px 30px;
+    grid-template-columns: minmax(190px, 280px) repeat(6, 30px);
     gap: 6px;
     align-items: center;
     padding: 6px;
@@ -2001,13 +2176,18 @@
     backdrop-filter: blur(18px);
   }
 
+  .find-input-wrap {
+    position: relative;
+    min-width: 0;
+  }
+
   .find-bar input {
     width: 100%;
     min-width: 0;
     height: 28px;
     border: 1px solid color-mix(in srgb, var(--app-fg) 14%, transparent);
     border-radius: 6px;
-    padding: 0 9px;
+    padding: 0 58px 0 9px;
     background: color-mix(in srgb, var(--app-bg) 82%, var(--app-fg));
     color: var(--app-fg);
     font: inherit;
@@ -2015,9 +2195,40 @@
     outline: none;
   }
 
+  .find-bar input.error {
+    border-color: var(--app-danger);
+  }
+
   .find-bar input:focus-visible {
     border-color: var(--terminal-selection);
     box-shadow: 0 0 0 2px color-mix(in srgb, var(--terminal-selection) 34%, transparent);
+  }
+
+  .find-bar input.error:focus-visible {
+    border-color: var(--app-danger);
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--app-danger) 28%, transparent);
+  }
+
+  .find-count {
+    position: absolute;
+    top: 50%;
+    right: 9px;
+    max-width: 48px;
+    transform: translateY(-50%);
+    color: color-mix(in srgb, var(--app-fg) 58%, transparent);
+    font-size: 11px;
+    line-height: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    pointer-events: none;
+    user-select: none;
+    -webkit-user-select: none;
+  }
+
+  .find-count.error {
+    color: var(--app-danger);
+    font-weight: 600;
   }
 
   .find-bar button {
@@ -2028,16 +2239,32 @@
     background: transparent;
     color: color-mix(in srgb, var(--app-fg) 82%, transparent);
     font: inherit;
-    font-size: 16px;
+    font-size: 13px;
     line-height: 1;
+    user-select: none;
+    -webkit-user-select: none;
   }
 
   .find-bar button:hover {
     background: color-mix(in srgb, var(--app-fg) 10%, transparent);
   }
 
+  .find-bar button.active {
+    background: color-mix(in srgb, var(--terminal-selection) 36%, transparent);
+    color: var(--app-fg);
+  }
+
   .find-bar button:active {
     background: color-mix(in srgb, var(--app-fg) 16%, transparent);
+  }
+
+  .find-bar button:disabled {
+    color: color-mix(in srgb, var(--app-fg) 28%, transparent);
+  }
+
+  .find-bar button:disabled:hover,
+  .find-bar button:disabled:active {
+    background: transparent;
   }
 
   @media (max-width: 720px) {
@@ -2060,7 +2287,7 @@
     .find-bar {
       left: 10px;
       right: 10px;
-      grid-template-columns: minmax(0, 1fr) 30px 30px 30px;
+      grid-template-columns: minmax(0, 1fr) repeat(6, 30px);
     }
   }
 </style>

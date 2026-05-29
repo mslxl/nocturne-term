@@ -1,5 +1,5 @@
-import type { ConfigValue } from "$lib/bindings";
-import { stringValue } from "$lib/config/document";
+import type { ConfigValue } from "../bindings";
+import { stringValue } from "../config/document";
 
 export type TerminalCommandId =
   | "terminal.newTab"
