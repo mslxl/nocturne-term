@@ -4,9 +4,13 @@
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { ask } from "@tauri-apps/plugin-dialog";
   import { readText, writeText } from "@tauri-apps/plugin-clipboard-manager";
+  import "overlayscrollbars/overlayscrollbars.css";
   import "@xterm/xterm/css/xterm.css";
-  import { commands, type TabBarOrientation, type TerminalSettings } from "$lib/bindings";
-  import { appThemeFromConfig, applyAppPreferences, readValue, resolveTheme } from "$lib/config/document";
+  import { commands, type AppConfigSnapshot, type TabBarOrientation, type TerminalSettings } from "$lib/bindings";
+  import { appLanguageFromConfig, appThemeFromConfig, applyAppPreferences, configString, readValue, resolveTheme, writeValue } from "$lib/config/document";
+  import CommandPalette from "$lib/command-palette/CommandPalette.svelte";
+  import { staticPaletteCommands } from "$lib/command-palette/commands";
+  import { localizeCommand, searchPaletteItems, type PaletteItem, type PaletteSearchResult } from "$lib/command-palette/search";
   import { hasTauriRuntime } from "$lib/tauri/runtime";
   import TerminalPaneTree from "$lib/terminal/components/TerminalPaneTree.svelte";
   import TerminalTabBar from "$lib/terminal/components/TerminalTabBar.svelte";
@@ -43,10 +47,11 @@
   } from "$lib/terminal/tabs";
   import { toTerminalSessionSizeInput } from "$lib/terminal/sizes";
   import { terminalMenuCanRedo, terminalMenuCanUndo } from "$lib/terminal/menu-history";
-  import { t } from "$lib/i18n";
+  import { language, setLanguage, t } from "$lib/i18n";
 
   type TerminalMenuCommand =
     | "new_window"
+    | "open_command_palette"
     | "new_tab"
     | "split_right"
     | "split_left"
@@ -114,11 +119,16 @@
     tree: TerminalTab["tree"];
     panes: StoredPane[];
   };
+  type StoredHotTabs = {
+    activeIndex: number;
+    tabs: StoredTab[];
+  };
 
   const initialCols = 80;
   const initialRows = 24;
   const minPaneWidth = 160;
   const minPaneHeight = 96;
+  const hotTabsStorageKey = "nocturne:dev-hot-tabs";
   type PaneMenuEvent = {
     action:
       | "copy"
@@ -187,6 +197,7 @@
     | ClosePaneAction;
 
   let settings = $state<TerminalSettings | null>(null);
+  let lastConfigSnapshot = $state<AppConfigSnapshot | null>(null);
   let keybindings = $state<KeybindingMap | null>(null);
   let settingsError = $state("");
   let tabs = $state<TerminalTab[]>([]);
@@ -203,6 +214,12 @@
   let findQuery = $state("");
   let movedPaneIds = new Set<string>();
   let findInput = $state<HTMLInputElement>();
+  let commandPaletteOpen = $state(false);
+  let commandPaletteQuery = $state("");
+  let commandPaletteSelected = $state(0);
+  let commandPaletteLastFocus: HTMLElement | null = null;
+  let recentPaletteIds = $state<string[]>([]);
+  let zoomedPane = $state<{ tabId: string; paneId: string; tree: TerminalTab["tree"]; activePaneId: string } | null>(null);
   let lastFocusedTextInput: TextInputElement | null = null;
   let serializedMenuState = "";
   let undoStack: TerminalUndoAction[] = [];
@@ -228,10 +245,17 @@
     active: boolean;
     target: HTMLElement;
   } | null>(null);
+  const isHotModuleReplacement = import.meta.hot !== undefined;
 
   let activeTab = $derived(tabs.find((tab) => tab.id === activeId));
   let isVertical = $derived(tabBarOrientation !== "horizontal");
   let tabsOnLeft = $derived(tabBarOrientation === "vertical_left");
+  let paletteResults = $derived(
+    searchPaletteItems(buildPaletteItems(), commandPaletteQuery, {
+      language: language(),
+      includeDisabledExact: commandPaletteQuery.trim().length > 0,
+    }),
+  );
   const terminalTabs = createTerminalTabController({
     settings: () => settings,
     tabs: () => tabs,
@@ -246,7 +270,9 @@
   async function loadSettings() {
     settingsError = "";
     const snapshot = await unwrapCommand(commands.getConfigSnapshot());
+    lastConfigSnapshot = snapshot;
     applyAppPreferences(snapshot.effective_config.root);
+    setLanguage(appLanguageFromConfig(readValue(snapshot.effective_config.root, ["ui", "language"])));
     appTheme = resolveTheme(appThemeFromConfig(readValue(snapshot.effective_config.root, ["ui", "theme"])));
     keybindings = readKeybindingMap(snapshot.effective_config.root, navigator.platform.toLowerCase().includes("mac"));
     const next = await unwrapCommand(commands.getTerminalSettingsForTheme({ resolved_theme: appTheme }));
@@ -925,7 +951,12 @@
 
   function storeTabHandoff(tab: TerminalTab): string {
     const key = `nocturne:tab-handoff:${crypto.randomUUID()}`;
-    const stored: StoredTab = {
+    localStorage.setItem(key, JSON.stringify(storeTabSnapshot(tab)));
+    return key;
+  }
+
+  function storeTabSnapshot(tab: TerminalTab): StoredTab {
+    return {
       customTitle: tab.customTitle,
       activePaneId: tab.activePaneId,
       tree: clonePaneTree(tab.tree),
@@ -946,8 +977,15 @@
         nextOutputSequence: pane.nextOutputSequence.toString(),
       })),
     };
-    localStorage.setItem(key, JSON.stringify(stored));
-    return key;
+  }
+
+  function storeHotTabsSnapshot() {
+    if (!isHotModuleReplacement || tabs.length === 0) return;
+    const stored: StoredHotTabs = {
+      activeIndex: Math.max(0, tabs.findIndex((tab) => tab.id === activeId)),
+      tabs: tabs.map(storeTabSnapshot),
+    };
+    sessionStorage.setItem(hotTabsStorageKey, JSON.stringify(stored));
   }
 
   async function restoreTabHandoff() {
@@ -957,6 +995,48 @@
     if (!raw) throw new Error(`tab handoff ${key} not found`);
     localStorage.removeItem(key);
     const stored = JSON.parse(raw) as StoredTab;
+    const restoredPanes = await restoreStoredPanes(stored);
+    await unwrapCommand(
+      commands.transferTerminalSessionsToWindow({
+        session_ids: restoredPanes.map((pane) => pane.id),
+        window_label: currentWindowLabel(),
+      }),
+    );
+    const tab = restoreStoredTab(stored, restoredPanes);
+    tabs = [tab];
+    activeId = tab.id;
+    await tick();
+    await mountAndFitTabPanes(tab);
+    terminalPaneById(tab, tab.activePaneId)?.term?.focus();
+    syncTerminalMenuState();
+    return true;
+  }
+
+  async function restoreHotTabs() {
+    if (!isHotModuleReplacement) return false;
+    const raw = sessionStorage.getItem(hotTabsStorageKey);
+    if (!raw) return false;
+    sessionStorage.removeItem(hotTabsStorageKey);
+    const stored = JSON.parse(raw) as StoredHotTabs;
+    if (stored.tabs.length === 0) return false;
+    const restoredTabs: TerminalTab[] = [];
+    for (const storedTab of stored.tabs) {
+      const restoredPanes = await restoreStoredPanes(storedTab);
+      restoredTabs.push(restoreStoredTab(storedTab, restoredPanes));
+    }
+    tabs = restoredTabs;
+    activeId = restoredTabs[Math.min(stored.activeIndex, restoredTabs.length - 1)]?.id ?? restoredTabs[0]?.id ?? "";
+    await tick();
+    for (const tab of restoredTabs) await mountAndFitTabPanes(tab);
+    const focusedTab = tabs.find((tab) => tab.id === activeId);
+    if (focusedTab) {
+      terminalPaneById(focusedTab, focusedTab.activePaneId)?.term?.focus();
+    }
+    syncTerminalMenuState();
+    return restoredTabs.length > 0;
+  }
+
+  async function restoreStoredPanes(stored: StoredTab) {
     const restoredPanes: TerminalPane[] = [];
     for (const pane of stored.panes) {
       const info = await unwrapCommand(commands.existingTerminalSessionInfo({ session_id: pane.id }));
@@ -976,14 +1056,12 @@
       restored.outputQueue = pane.serialized ? [pane.serialized] : [];
       restoredPanes.push(restored);
     }
+    return restoredPanes;
+  }
+
+  function restoreStoredTab(stored: StoredTab, restoredPanes: TerminalPane[]) {
     const firstPane = restoredPanes[0];
     if (!firstPane) throw new Error("tab handoff has no panes");
-    await unwrapCommand(
-      commands.transferTerminalSessionsToWindow({
-        session_ids: restoredPanes.map((pane) => pane.id),
-        window_label: currentWindowLabel(),
-      }),
-    );
     const tab = createTerminalTabFromPane(firstPane);
     tab.customTitle = stored.customTitle;
     tab.activePaneId = stored.activePaneId;
@@ -991,13 +1069,7 @@
     for (const pane of restoredPanes) pane.tabId = tab.id;
     tab.panes = restoredPanes;
     refreshTerminalTabTitle(tab);
-    tabs = [tab];
-    activeId = tab.id;
-    await tick();
-    await mountAndFitTabPanes(tab);
-    terminalPaneById(tab, tab.activePaneId)?.term?.focus();
-    syncTerminalMenuState();
-    return true;
+    return tab;
   }
 
   async function mountAndFitTabPanes(tab: TerminalTab) {
@@ -1516,7 +1588,241 @@
     void mountAndFitTabPanes(tab);
   }
 
+  function buildPaletteItems(): PaletteItem[] {
+    const currentLanguage = language();
+    const hasActivePane = activePane() !== null;
+    const hasMultiplePanes = (activeTab?.panes.length ?? 0) > 1;
+    const staticItems = staticPaletteCommands.map((command) => {
+      const item = localizeCommand(command, currentLanguage);
+      const shortcut = displayShortcut(item.shortcut);
+      return {
+        ...item,
+        shortcut,
+        contextScore: paletteContextScore(item.id, hasActivePane, hasMultiplePanes),
+        recentScore: paletteRecentScore(item.id),
+        disabledReason: paletteDisabledReason(item.id, hasActivePane, hasMultiplePanes),
+      };
+    });
+    return [...staticItems, ...tabPaletteItems(), ...profilePaletteItems()];
+  }
+
+  function tabPaletteItems(): PaletteItem[] {
+    return tabs.map((tab, index) => {
+      const number = index + 1;
+      const active = tab.id === activeId;
+      const pane = terminalPaneById(tab, tab.activePaneId);
+      return {
+        id: `tab.switchTo:${tab.id}`,
+        kind: "tab",
+        title: `${t("switchToTab")}: ${number}  ${tab.title}`,
+        scope: t("tab"),
+        keywords: [
+          tab.title,
+          t("switchToTab"),
+          "switch tab",
+          "switch to tab",
+          "切换标签",
+          "切换到标签",
+          `tab ${number}`,
+          `标签 ${number}`,
+          String(number),
+          pane?.currentDirectory ?? "",
+          pane?.command ?? "",
+          "biaoqian",
+          "bq",
+        ],
+        contextScore: active ? 24 : 0,
+        recentScore: paletteRecentScore(`tab.switchTo:${tab.id}`),
+      };
+    });
+  }
+
+  function profilePaletteItems(): PaletteItem[] {
+    return settingsSnapshotProfiles().map((profile) => {
+      const id = `profile.switch:${profile.name}`;
+      return {
+        id,
+        kind: "profile",
+        title: `${t("switchProfile")}: ${profile.name}`,
+        scope: t("profile"),
+        keywords: [
+          profile.name,
+          t("switchProfile"),
+          "switch profile",
+          "profile",
+          "切换配置档案",
+          "配置档案",
+          "档案",
+          "qiehuan",
+          "qh",
+          "peizhidangan",
+          "pzdangan",
+          "dangan",
+          "da",
+        ],
+        contextScore: profile.name === currentActiveProfile() ? 20 : 0,
+        recentScore: paletteRecentScore(id),
+      };
+    });
+  }
+
+  function settingsSnapshotProfiles() {
+    return lastConfigSnapshot?.profiles ?? [];
+  }
+
+  function currentActiveProfile() {
+    return lastConfigSnapshot?.root.active_profile ?? "";
+  }
+
+  function paletteContextScore(id: string, hasActivePane: boolean, hasMultiplePanes: boolean) {
+    if (id.startsWith("terminal.split") && hasActivePane) return 34;
+    if (id.startsWith("terminal.movePane") && hasMultiplePanes) return 30;
+    if (id === "terminal.togglePaneZoom" && hasMultiplePanes) return 30;
+    if (id.startsWith("ui.theme.")) return 12;
+    return 0;
+  }
+
+  function paletteRecentScore(id: string) {
+    const index = recentPaletteIds.indexOf(id);
+    return index === -1 ? 0 : Math.max(2, 12 - index * 2);
+  }
+
+  function paletteDisabledReason(id: string, hasActivePane: boolean, hasMultiplePanes: boolean) {
+    if (id.startsWith("terminal.split") && !hasActivePane) return t("requiresActivePane");
+    if ((id.startsWith("terminal.movePane") || id === "terminal.togglePaneZoom") && !hasMultiplePanes) return t("requiresMultiplePanes");
+    return undefined;
+  }
+
+  function displayShortcut(shortcut: string | undefined) {
+    if (!shortcut) return undefined;
+    const isMac = navigator.platform.toLowerCase().includes("mac");
+    if (!isMac) return shortcut.replace("Meta", "Ctrl");
+    return shortcut
+      .replaceAll("Meta", "⌘")
+      .replaceAll("Shift", "⇧")
+      .replaceAll("Alt", "⌥")
+      .replaceAll("+", "");
+  }
+
+  function openCommandPalette() {
+    commandPaletteLastFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    commandPaletteQuery = "";
+    commandPaletteSelected = 0;
+    commandPaletteOpen = true;
+  }
+
+  async function closeCommandPalette({ restoreFocus = true }: { restoreFocus?: boolean } = {}) {
+    commandPaletteOpen = false;
+    commandPaletteQuery = "";
+    commandPaletteSelected = 0;
+    await tick();
+    if (!restoreFocus) return;
+    const pane = activePane();
+    if (pane?.term) {
+      pane.term.focus();
+      return;
+    }
+    commandPaletteLastFocus?.focus?.();
+  }
+
+  function updateCommandPaletteQuery(value: string) {
+    commandPaletteQuery = value;
+    commandPaletteSelected = 0;
+  }
+
+  function moveCommandPaletteSelection(delta: number) {
+    if (!paletteResults.length) return;
+    commandPaletteSelected = (commandPaletteSelected + delta + paletteResults.length) % paletteResults.length;
+  }
+
+  async function runPaletteResult(result: PaletteSearchResult) {
+    recentPaletteIds = [result.id, ...recentPaletteIds.filter((id) => id !== result.id)].slice(0, 8);
+    await closeCommandPalette({ restoreFocus: false });
+    await runPaletteCommand(result.id);
+  }
+
+  async function runPaletteCommand(id: string) {
+    if (id.startsWith("tab.switchTo:")) {
+      await activateTab(id.slice("tab.switchTo:".length));
+      return;
+    }
+    if (id.startsWith("profile.switch:")) {
+      await switchActiveProfile(id.slice("profile.switch:".length));
+      return;
+    }
+    if (id.startsWith("ui.theme.")) {
+      await switchAppTheme(id.slice("ui.theme.".length) as "system" | "light" | "dark");
+      return;
+    }
+    if (id === "settings.open") {
+      if (hasTauriRuntime()) await unwrapCommand(commands.openSettingsWindow("main"));
+      return;
+    }
+    if (id === "profile.new") {
+      if (hasTauriRuntime()) await unwrapCommand(commands.openProfileNewDialog());
+      return;
+    }
+    if (id === "terminal.movePaneLeft") return moveActivePane("left");
+    if (id === "terminal.movePaneRight") return moveActivePane("right");
+    if (id === "terminal.movePaneUp") return moveActivePane("up");
+    if (id === "terminal.movePaneDown") return moveActivePane("down");
+    if (id === "terminal.togglePaneZoom") return togglePaneZoom();
+    runTerminalCommand(id as TerminalCommandId);
+  }
+
+  async function switchActiveProfile(name: string) {
+    await unwrapCommand(commands.setActiveProfile(name));
+    await loadSettings();
+    if (activePane()?.term) activePane()?.term?.focus();
+  }
+
+  async function switchAppTheme(theme: "system" | "light" | "dark") {
+    const snapshot = lastConfigSnapshot ?? (await unwrapCommand(commands.getConfigSnapshot()));
+    const next = JSON.parse(JSON.stringify(snapshot.main_config)) as typeof snapshot.main_config;
+    writeValue(next.root, ["ui", "theme"], configString(theme));
+    await unwrapCommand(commands.updateMainConfig(next));
+    await loadSettings();
+    await unwrapCommand(commands.refreshAppMenu());
+    if (activePane()?.term) activePane()?.term?.focus();
+  }
+
+  async function moveActivePane(side: SplitSide) {
+    const tab = activeTab;
+    if (!tab || tab.panes.length < 2) return;
+    const targetPaneId = siblingPane(side);
+    if (!targetPaneId || targetPaneId === tab.activePaneId) return;
+    await movePaneToPane(tab.activePaneId, targetPaneId, side);
+  }
+
+  async function togglePaneZoom() {
+    const tab = activeTab;
+    if (!tab || tab.panes.length < 2) return;
+    if (zoomedPane && zoomedPane.tabId === tab.id) {
+      tab.tree = clonePaneTree(zoomedPane.tree);
+      tab.activePaneId = terminalPaneById(tab, zoomedPane.activePaneId) ? zoomedPane.activePaneId : tab.activePaneId;
+      zoomedPane = null;
+      refreshTerminalTabTitle(tab);
+      await mountAndFitTabPanes(tab);
+      terminalPaneById(tab, tab.activePaneId)?.term?.focus();
+      return;
+    }
+    zoomedPane = {
+      tabId: tab.id,
+      paneId: tab.activePaneId,
+      tree: clonePaneTree(tab.tree),
+      activePaneId: tab.activePaneId,
+    };
+    tab.tree = { kind: "leaf", paneId: tab.activePaneId };
+    refreshTerminalTabTitle(tab);
+    await mountAndFitTabPanes(tab);
+    terminalPaneById(tab, tab.activePaneId)?.term?.focus();
+  }
+
   async function runTerminalMenuCommand(command: TerminalMenuEvent["command"]) {
+    if (command === "open_command_palette") {
+      openCommandPalette();
+      return;
+    }
     if (command === "new_window") {
       if (hasTauriRuntime()) await unwrapCommand(commands.openMainWindow(null));
       return;
@@ -1574,7 +1880,7 @@
     if (command === "show_previous_tab") return showPreviousTab();
     if (command === "show_next_tab") return showNextTab();
     if (command === "move_tab_to_new_window") return moveActiveTabToNewWindow();
-    if (command === "zoom_split") return activePane()?.term?.focus();
+    if (command === "zoom_split") return togglePaneZoom();
     if (command === "select_previous_split") return selectPreviousSplit();
     if (command === "select_next_split") return selectNextSplit();
     if (command === "select_split_left") return selectSplit("left");
@@ -1588,10 +1894,21 @@
   }
 
   function handleKeyboard(event: KeyboardEvent) {
+    if (commandPaletteOpen) return;
+    if (isCommandPaletteShortcut(event)) {
+      event.preventDefault();
+      openCommandPalette();
+      return;
+    }
     const command = commandForKeyboardEvent(event);
     if (!command) return;
     event.preventDefault();
     runTerminalCommand(command);
+  }
+
+  function isCommandPaletteShortcut(event: KeyboardEvent) {
+    const isMac = navigator.platform.toLowerCase().includes("mac");
+    return event.key.toLowerCase() === "p" && event.shiftKey && (isMac ? event.metaKey && !event.ctrlKey : event.ctrlKey && !event.metaKey) && !event.altKey;
   }
 
   function commandForKeyboardEvent(event: KeyboardEvent): TerminalCommandId | null {
@@ -1636,7 +1953,6 @@
     let mounted = true;
     void (async () => {
       if (hasTauriRuntime()) {
-        const windowTarget = { kind: "WebviewWindow" as const, label: currentWindowLabel() };
         const [outputDispose, exitDispose, configDispose, paneMenuDispose, terminalMenuDispose] = await Promise.all([
           listen<TerminalOutputEvent>("terminal://output", (event) => terminalTabs.enqueueOutput(event.payload)),
           listen<TerminalExitEvent>("terminal://exit", (event) => terminalTabs.markExited(event.payload)),
@@ -1645,12 +1961,12 @@
               settingsError = error instanceof Error ? error.message : String(error);
             });
           }),
-          listen<PaneMenuEvent>("terminal://pane-menu", (event) => handlePaneMenu(event.payload), { target: windowTarget }),
+          listen<PaneMenuEvent>("terminal://pane-menu", (event) => handlePaneMenu(event.payload)),
           listen<TerminalMenuEvent>("terminal://menu-command", (event) => {
             void runTerminalMenuCommand(event.payload.command).catch((error) => {
               settingsError = error instanceof Error ? error.message : String(error);
             });
-          }, { target: windowTarget }),
+          }),
         ]);
         if (!mounted) {
           outputDispose();
@@ -1667,7 +1983,7 @@
         terminalMenuUnlisten = terminalMenuDispose;
       }
       await loadSettings();
-      const restored = await restoreTabHandoff();
+      const restored = (await restoreTabHandoff()) || (await restoreHotTabs());
       await ensureStartupSession(restored);
     })().catch((error) => {
       settingsError = error instanceof Error ? error.message : String(error);
@@ -1704,6 +2020,11 @@
       configUnlisten?.();
       paneMenuUnlisten?.();
       terminalMenuUnlisten?.();
+      if (isHotModuleReplacement) {
+        storeHotTabsSnapshot();
+        for (const tab of tabs) disposeTerminalTab(tab);
+        return;
+      }
       for (const tab of tabs) {
         disposeTerminalTab(tab);
         for (const pane of tab.panes) {
@@ -1834,6 +2155,18 @@
       </button>
     </form>
   {/if}
+
+  <CommandPalette
+    open={commandPaletteOpen}
+    query={commandPaletteQuery}
+    results={paletteResults}
+    selectedIndex={commandPaletteSelected}
+    onQuery={updateCommandPaletteQuery}
+    onClose={closeCommandPalette}
+    onMove={moveCommandPaletteSelection}
+    onRun={(item) => void runPaletteResult(item)}
+  />
+
 </main>
 
 <style>
@@ -1942,6 +2275,7 @@
   }
 
   .terminal-mount {
+    position: relative;
     width: 100%;
     height: 100%;
     min-width: 0;
@@ -1961,6 +2295,7 @@
 
   :global(.xterm .xterm-viewport) {
     background-color: var(--terminal-bg);
+    scrollbar-color: transparent transparent;
     scrollbar-width: none;
   }
 
@@ -1968,6 +2303,54 @@
     width: 0;
     height: 0;
     display: none;
+  }
+
+  :global(.os-scrollbar.os-theme-nocturne-terminal) {
+    --os-size: 11px !important;
+    --os-padding-perpendicular: 2px !important;
+    --os-padding-axis: 4px !important;
+    --os-handle-border-radius: 999px !important;
+    --os-handle-bg: rgba(222, 228, 236, 0.68) !important;
+    --os-handle-bg-hover: rgba(222, 228, 236, 0.82) !important;
+    --os-handle-bg-active: rgba(222, 228, 236, 0.92) !important;
+    --os-track-bg: transparent !important;
+    --os-track-bg-hover: transparent !important;
+    --os-track-bg-active: transparent !important;
+    z-index: 8;
+  }
+
+  :global(.os-scrollbar.os-theme-nocturne-terminal.os-scrollbar-horizontal) {
+    display: none;
+  }
+
+  :global(.os-scrollbar.os-theme-nocturne-terminal.os-scrollbar-vertical) {
+    right: 4px;
+    width: 10px;
+  }
+
+  :global(.os-scrollbar.os-theme-nocturne-terminal.os-scrollbar-vertical.os-scrollbar-nocturne-visible) {
+    opacity: 1 !important;
+    visibility: visible !important;
+    pointer-events: auto;
+  }
+
+  :global(.os-scrollbar.os-theme-nocturne-terminal .os-scrollbar-track) {
+    background: transparent !important;
+  }
+
+  :global(.os-scrollbar.os-theme-nocturne-terminal .os-scrollbar-handle) {
+    background: rgba(222, 228, 236, 0.68) !important;
+    border-radius: 999px !important;
+    min-height: 28px;
+    opacity: 1 !important;
+  }
+
+  :global(.os-scrollbar.os-theme-nocturne-terminal:hover .os-scrollbar-handle) {
+    background: rgba(222, 228, 236, 0.82) !important;
+  }
+
+  :global(.os-scrollbar.os-theme-nocturne-terminal:active .os-scrollbar-handle) {
+    background: rgba(222, 228, 236, 0.92) !important;
   }
 
   :global(.xterm .xterm-screen) {
