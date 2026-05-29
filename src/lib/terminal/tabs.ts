@@ -2,10 +2,12 @@ import { FitAddon } from "@xterm/addon-fit";
 import { SearchAddon } from "@xterm/addon-search";
 import { SerializeAddon } from "@xterm/addon-serialize";
 import { Terminal } from "@xterm/xterm";
+import { OverlayScrollbars, type OverlayScrollbars as OverlayScrollbarsInstance } from "overlayscrollbars";
 import { commands, type TerminalSessionInfo, type TerminalSettings } from "$lib/bindings";
 import { unwrapCommand } from "./commands";
 import { orderedTerminalOutputChunks } from "./output";
 import { countPaneLeaves, createPaneLeaf, deriveCustomizableTabTitle, type PaneTree } from "./panes";
+import { terminalScrollbarLineFromPointer, terminalScrollbarState, terminalWheelScrollResult } from "./scrollbar";
 import { xtermOptions } from "./settings";
 import { normalizeTerminalFitSize, normalizeTerminalSessionSize, type TerminalFitSize } from "./sizes";
 
@@ -62,6 +64,8 @@ export type TerminalPane = {
   serialize?: SerializeAddon;
   image?: { dispose: () => void };
   webgl?: WebglTerminalAddon;
+  scrollbar?: OverlayScrollbarsInstance;
+  scrollbarInteraction?: { dispose: () => void };
   container?: HTMLDivElement;
   resizeObserver?: ResizeObserver;
   dataDisposables: Array<{ dispose: () => void }>;
@@ -76,6 +80,7 @@ export type TerminalPane = {
   lastRows: number;
   lastPixelWidth: number;
   lastPixelHeight: number;
+  wheelRemainder: number;
 };
 
 const resizeDelayMs = 24;
@@ -140,6 +145,7 @@ export function createTerminalPane(info: TerminalSessionInfo, tabId: string): Te
     lastRows: size.rows,
     lastPixelWidth: size.pixelWidth,
     lastPixelHeight: size.pixelHeight,
+    wheelRemainder: 0,
   };
 }
 
@@ -223,6 +229,7 @@ export function createTerminalTabController(context: TerminalTabContext) {
       pane.fit = fit;
       pane.search = search;
       pane.serialize = serialize;
+      attachTerminalScrollbar(pane);
       fitTerminal(pane);
 
       if (config.renderer === "webgl") {
@@ -238,6 +245,7 @@ export function createTerminalTabController(context: TerminalTabContext) {
       }
 
       pane.dataDisposables = [
+        attachTerminalScrollSync(pane),
         term.onTitleChange((title) => {
           pane.titleOverride = title;
           refreshPaneTitle(pane);
@@ -394,6 +402,7 @@ function attachMountedTerminal(pane: TerminalPane, container: HTMLDivElement, sc
     pane.resizeObserver = new ResizeObserver(scheduleFit);
     pane.resizeObserver.observe(container);
   }
+  attachTerminalScrollbar(pane);
   fitTerminal(pane);
   pane.term?.refresh(0, Math.max(0, pane.term.rows - 1));
 }
@@ -425,6 +434,9 @@ export function detachTerminalPane(pane: TerminalPane) {
   pane.image = undefined;
   pane.webgl?.dispose();
   pane.webgl = undefined;
+  pane.scrollbarInteraction?.dispose();
+  pane.scrollbarInteraction = undefined;
+  destroyTerminalScrollbar(pane);
   pane.fit?.dispose();
   pane.fit = undefined;
   pane.term?.dispose();
@@ -451,7 +463,235 @@ function fitTerminal(pane: TerminalPane): TerminalFitSize | null {
     pane.fit.fit();
     pane.term.refresh(0, Math.max(0, pane.term.rows - 1));
   }
+  updateTerminalScrollbar(pane);
   return size;
+}
+
+function attachTerminalScrollbar(pane: TerminalPane) {
+  const elements = terminalScrollbarElements(pane);
+  if (!elements) {
+    destroyTerminalScrollbar(pane);
+    return;
+  }
+  if (
+    pane.scrollbar &&
+    OverlayScrollbars.valid(pane.scrollbar) &&
+    pane.scrollbar.elements().target === elements.slot &&
+    pane.scrollbar.elements().viewport === elements.viewport &&
+    pane.scrollbar.elements().content === elements.content &&
+    pane.scrollbar.elements().scrollbarVertical.scrollbar.parentElement === elements.slot
+  ) {
+    updateTerminalScrollbar(pane);
+    return;
+  }
+
+  destroyTerminalScrollbar(pane);
+  pane.scrollbar = OverlayScrollbars(
+    {
+      target: elements.slot,
+      elements: {
+        viewport: elements.viewport,
+        content: elements.content,
+      },
+      scrollbars: {
+        slot: elements.slot,
+      },
+    },
+    {
+      overflow: {
+        x: "hidden",
+        y: "scroll",
+      },
+      scrollbars: {
+        autoHide: "never",
+        autoHideDelay: 900,
+        clickScroll: false,
+        dragScroll: false,
+        visibility: "visible",
+        theme: "os-theme-dark os-theme-nocturne-terminal",
+      },
+    },
+  );
+  pane.scrollbarInteraction = attachTerminalScrollbarInteraction(pane);
+  updateTerminalScrollbar(pane);
+}
+
+function attachTerminalScrollSync(pane: TerminalPane): { dispose: () => void } {
+  const term = pane.term;
+  if (!term) return { dispose: () => {} };
+
+  const update = () => updateTerminalScrollbar(pane);
+  const scrollDisposable = term.onScroll(update);
+  const writeDisposable = term.onWriteParsed(update);
+  const wheelHandler = (event: WheelEvent) => {
+    const result = terminalWheelScrollResult({
+      baseY: term.buffer.active.baseY,
+      viewportY: term.buffer.active.viewportY,
+      deltaY: event.deltaY,
+      deltaMode: event.deltaMode,
+      rows: term.rows,
+      previousRemainder: pane.wheelRemainder,
+      normalBuffer: term.buffer.active.type === "normal",
+      mouseTracking: term.modes.mouseTrackingMode !== "none",
+      defaultPrevented: event.defaultPrevented,
+      shiftKey: event.shiftKey,
+    });
+    pane.wheelRemainder = result.remainder;
+    if (!result.consume) return true;
+
+    event.preventDefault();
+    event.stopPropagation();
+    if (result.target !== null) {
+      term.scrollToLine(result.target);
+      term.refresh(0, Math.max(0, term.rows - 1));
+      update();
+    }
+    return false;
+  };
+  term.attachCustomWheelEventHandler(wheelHandler);
+
+  return {
+    dispose: () => {
+      term.attachCustomWheelEventHandler(() => true);
+      scrollDisposable.dispose();
+      writeDisposable.dispose();
+    },
+  };
+}
+
+function terminalScrollbarElements(
+  pane: TerminalPane,
+): { root: HTMLElement; viewport: HTMLElement; content: HTMLElement; slot: HTMLElement } | null {
+  const root = pane.term?.element;
+  const slot = pane.container;
+  if (!root || !slot) return null;
+  const viewport = root.querySelector<HTMLElement>(".xterm-viewport");
+  if (!viewport) return null;
+  const content = viewport.querySelector<HTMLElement>(".xterm-scroll-area");
+  if (!content) return null;
+  return { root, viewport, content, slot };
+}
+
+function updateTerminalScrollbar(pane: TerminalPane) {
+  const scrollbar = pane.scrollbar;
+  if (!scrollbar || !OverlayScrollbars.valid(scrollbar)) return;
+  requestAnimationFrame(() => {
+    if (!OverlayScrollbars.valid(scrollbar)) return;
+    scrollbar.update(true);
+    syncTerminalScrollbarThumb(pane);
+  });
+}
+
+function destroyTerminalScrollbar(pane: TerminalPane) {
+  pane.scrollbarInteraction?.dispose();
+  pane.scrollbarInteraction = undefined;
+  pane.scrollbar?.destroy();
+  pane.scrollbar = undefined;
+}
+
+function syncTerminalScrollbarThumb(pane: TerminalPane) {
+  const term = pane.term;
+  const scrollbar = pane.scrollbar;
+  if (!term || !scrollbar || !OverlayScrollbars.valid(scrollbar)) return;
+
+  const state = terminalScrollbarState({
+    baseY: term.buffer.active.baseY,
+    viewportY: term.buffer.active.viewportY,
+    rows: term.rows,
+  });
+  const { scrollbar: vertical, track, handle } = scrollbar.elements().scrollbarVertical;
+  vertical.classList.toggle("os-scrollbar-visible", state.visible);
+  vertical.classList.toggle("os-scrollbar-unusable", !state.visible);
+  vertical.classList.toggle("os-scrollbar-nocturne-visible", state.visible);
+  vertical.style.setProperty("--os-viewport-percent", String(state.thumbSizePercent));
+  vertical.style.setProperty("--os-scroll-percent", String(state.scrollPercent));
+  vertical.style.position = "absolute";
+  vertical.style.top = "6px";
+  vertical.style.right = "4px";
+  vertical.style.bottom = "6px";
+  vertical.style.width = "10px";
+  vertical.style.opacity = state.visible ? "1" : "";
+  vertical.style.visibility = state.visible ? "visible" : "";
+  vertical.style.zIndex = state.visible ? "12" : "";
+  track.style.position = "relative";
+  track.style.width = "100%";
+  track.style.height = "100%";
+  handle.style.setProperty("height", `${state.thumbSizePercent * 100}%`);
+  handle.style.position = "absolute";
+  handle.style.top = "auto";
+  handle.style.right = "0";
+  handle.style.width = "100%";
+  handle.style.opacity = state.visible ? "1" : "";
+}
+
+function attachTerminalScrollbarInteraction(pane: TerminalPane): { dispose: () => void } {
+  const term = pane.term;
+  const scrollbar = pane.scrollbar;
+  if (!term || !scrollbar || !OverlayScrollbars.valid(scrollbar)) return { dispose: () => {} };
+
+  const { scrollbar: vertical, track } = scrollbar.elements().scrollbarVertical;
+  let dragging = false;
+  let pointerId: number | null = null;
+
+  const scrollToPointer = (clientY: number) => {
+    if (!pane.term || pane.term !== term) return;
+    const state = terminalScrollbarState({
+      baseY: term.buffer.active.baseY,
+      viewportY: term.buffer.active.viewportY,
+      rows: term.rows,
+    });
+    if (!state.visible) return;
+    const trackRect = track.getBoundingClientRect();
+    const line = terminalScrollbarLineFromPointer({
+      pointerY: clientY,
+      trackTop: trackRect.top,
+      trackHeight: trackRect.height,
+      thumbHeight: trackRect.height * state.thumbSizePercent,
+      scrollbackRows: state.scrollbackRows,
+    });
+    term.scrollToLine(line);
+    term.refresh(0, Math.max(0, term.rows - 1));
+    updateTerminalScrollbar(pane);
+  };
+
+  const pointerDown = (event: PointerEvent) => {
+    if (event.button !== 0 || term.buffer.active.type !== "normal") return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    dragging = true;
+    pointerId = event.pointerId;
+    vertical.setPointerCapture(event.pointerId);
+    scrollToPointer(event.clientY);
+  };
+  const pointerMove = (event: PointerEvent) => {
+    if (!dragging || pointerId !== event.pointerId) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    scrollToPointer(event.clientY);
+  };
+  const pointerEnd = (event: PointerEvent) => {
+    if (pointerId !== event.pointerId) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    dragging = false;
+    pointerId = null;
+    if (vertical.hasPointerCapture(event.pointerId)) vertical.releasePointerCapture(event.pointerId);
+    updateTerminalScrollbar(pane);
+  };
+
+  vertical.addEventListener("pointerdown", pointerDown, { capture: true });
+  vertical.addEventListener("pointermove", pointerMove, { capture: true });
+  vertical.addEventListener("pointerup", pointerEnd, { capture: true });
+  vertical.addEventListener("pointercancel", pointerEnd, { capture: true });
+
+  return {
+    dispose: () => {
+      vertical.removeEventListener("pointerdown", pointerDown, { capture: true });
+      vertical.removeEventListener("pointermove", pointerMove, { capture: true });
+      vertical.removeEventListener("pointerup", pointerEnd, { capture: true });
+      vertical.removeEventListener("pointercancel", pointerEnd, { capture: true });
+    },
+  };
 }
 
 function measureTerminalPixels(container: HTMLElement): { pixelWidth: number; pixelHeight: number } {

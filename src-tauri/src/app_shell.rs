@@ -1,5 +1,7 @@
 use tauri::{
-    menu::{CheckMenuItem, Menu, MenuItem, MenuItemKind, PredefinedMenuItem, Submenu},
+    menu::{
+        AboutMetadata, CheckMenuItem, Menu, MenuItem, MenuItemKind, PredefinedMenuItem, Submenu,
+    },
     AppHandle, Emitter, EventTarget, LogicalPosition, Manager, PhysicalPosition, PhysicalSize,
     Runtime, Size, WebviewUrl, WebviewWindow, WebviewWindowBuilder, Window, WindowEvent,
 };
@@ -23,6 +25,7 @@ const SETTINGS_WINDOW_LABEL: &str = "settings";
 const PROFILE_NEW_DIALOG_LABEL: &str = "dialog-profile-new";
 const PROFILE_DELETE_DIALOG_LABEL: &str = "dialog-profile-delete";
 const MENU_SETTINGS: &str = "file.settings";
+const MENU_COMMAND_PALETTE: &str = "file.command_palette";
 const MENU_PROFILE_NEW: &str = "file.profile.new";
 const MENU_PROFILE_EDIT: &str = "file.profile.edit";
 const MENU_PROFILE_DELETE: &str = "file.profile.delete";
@@ -122,6 +125,7 @@ struct MenuText {
     profile_new: &'static str,
     profile_edit: &'static str,
     profile_delete: &'static str,
+    command_palette: &'static str,
     close: &'static str,
     close_tab: &'static str,
     close_window: &'static str,
@@ -193,6 +197,7 @@ fn menu_text(language: UiLanguage) -> MenuText {
             profile_new: "New...",
             profile_edit: "Edit...",
             profile_delete: "Delete...",
+            command_palette: "Command Palette...",
             close: "Close",
             close_tab: "Close Tab",
             close_window: "Close Window",
@@ -261,6 +266,7 @@ fn menu_text(language: UiLanguage) -> MenuText {
             profile_new: "新建...",
             profile_edit: "编辑...",
             profile_delete: "删除...",
+            command_palette: "命令面板...",
             close: "关闭",
             close_tab: "关闭标签",
             close_window: "关闭窗口",
@@ -352,6 +358,12 @@ pub(crate) fn build_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R
         true,
         Some("CmdOrCtrl+,"),
     )?;
+    let command_palette = terminal_menu_item(
+        app,
+        MENU_COMMAND_PALETTE,
+        labels.command_palette,
+        Some("CmdOrCtrl+Shift+P"),
+    )?;
     let profile_new = MenuItem::with_id(
         app,
         MENU_PROFILE_NEW,
@@ -418,6 +430,7 @@ pub(crate) fn build_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R
             &close_tab,
             &close_window,
             &file_sep3,
+            &command_palette,
             &settings,
             &profile_menu,
         ],
@@ -748,12 +761,124 @@ pub(crate) fn build_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R
         ],
     )?;
 
-    Menu::with_items(app, &[&file, &edit, &view, &window])
+    #[cfg(target_os = "macos")]
+    {
+        let app_menu = macos_application_menu(app)?;
+        Menu::with_items(app, &[&app_menu, &file, &edit, &view, &window])
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Menu::with_items(app, &[&file, &edit, &view, &window])
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn build_bootstrap_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
+    let labels = menu_text(default_ui_language());
+
+    let new_window =
+        terminal_menu_item(app, MENU_NEW_WINDOW, labels.new_window, Some("CmdOrCtrl+N"))?;
+    let new_tab = terminal_menu_item(app, MENU_NEW_TAB, labels.new_tab, Some("CmdOrCtrl+T"))?;
+    let command_palette = terminal_menu_item(
+        app,
+        MENU_COMMAND_PALETTE,
+        labels.command_palette,
+        Some("CmdOrCtrl+Shift+P"),
+    )?;
+    let settings = MenuItem::with_id(
+        app,
+        MENU_SETTINGS,
+        labels.settings,
+        true,
+        Some("CmdOrCtrl+,"),
+    )?;
+    let file_sep = PredefinedMenuItem::separator(app)?;
+    let file = Submenu::with_items(
+        app,
+        labels.file,
+        true,
+        &[
+            &new_window,
+            &new_tab,
+            &file_sep,
+            &command_palette,
+            &settings,
+        ],
+    )?;
+
+    let copy = terminal_menu_item(app, MENU_COPY, labels.copy, Some("CmdOrCtrl+C"))?;
+    let paste = terminal_menu_item(app, MENU_PASTE, labels.paste, Some("CmdOrCtrl+V"))?;
+    let select_all =
+        terminal_menu_item(app, MENU_SELECT_ALL, labels.select_all, Some("CmdOrCtrl+A"))?;
+    let edit = Submenu::with_items(app, labels.edit, true, &[&copy, &paste, &select_all])?;
+
+    let view = Submenu::with_items(app, labels.view, true, &[])?;
+
+    let minimize = terminal_menu_item(app, MENU_MINIMIZE, labels.minimize, Some("CmdOrCtrl+M"))?;
+    let zoom = terminal_menu_item(app, MENU_ZOOM, labels.zoom, None::<&str>)?;
+    let bring_all_to_front = terminal_menu_item(
+        app,
+        MENU_BRING_ALL_TO_FRONT,
+        labels.bring_all_to_front,
+        None::<&str>,
+    )?;
+    let window = Submenu::with_items(
+        app,
+        labels.window,
+        true,
+        &[&minimize, &zoom, &bring_all_to_front],
+    )?;
+
+    let app_menu = macos_application_menu(app)?;
+    Menu::with_items(app, &[&app_menu, &file, &edit, &view, &window])
+}
+
+#[cfg(target_os = "macos")]
+fn macos_application_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Submenu<R>> {
+    let package = app.package_info();
+    let config = app.config();
+    let about = AboutMetadata {
+        name: Some(package.name.clone()),
+        version: Some(package.version.to_string()),
+        copyright: config.bundle.copyright.clone(),
+        authors: config
+            .bundle
+            .publisher
+            .clone()
+            .map(|publisher| vec![publisher]),
+        ..Default::default()
+    };
+    let about = PredefinedMenuItem::about(app, None, Some(about))?;
+    let separator1 = PredefinedMenuItem::separator(app)?;
+    let services = PredefinedMenuItem::services(app, None)?;
+    let separator2 = PredefinedMenuItem::separator(app)?;
+    let hide = PredefinedMenuItem::hide(app, None)?;
+    let hide_others = PredefinedMenuItem::hide_others(app, None)?;
+    let separator3 = PredefinedMenuItem::separator(app)?;
+    let quit = PredefinedMenuItem::quit(app, None)?;
+
+    Submenu::with_items(
+        app,
+        package.name.clone(),
+        true,
+        &[
+            &about,
+            &separator1,
+            &services,
+            &separator2,
+            &hide,
+            &hide_others,
+            &separator3,
+            &quit,
+        ],
+    )
 }
 
 pub(crate) fn handle_menu_event<R: Runtime>(app: &AppHandle<R>, id: &str) {
     let result = if id == MENU_SETTINGS {
         open_settings(app, "main")
+    } else if id == MENU_COMMAND_PALETTE {
+        handle_terminal_menu(app, id)
     } else if id == MENU_PROFILE_EDIT {
         open_settings(app, "profile")
     } else if id == MENU_PROFILE_NEW {
@@ -785,6 +910,21 @@ pub(crate) fn handle_menu_event<R: Runtime>(app: &AppHandle<R>, id: &str) {
     if let Err(error) = result {
         eprintln!("menu action failed: {error}");
     }
+}
+
+#[tauri::command]
+#[specta::specta]
+pub(crate) fn open_settings_window(app: AppHandle, mode: String) -> Result<()> {
+    match mode.as_str() {
+        "main" | "profile" => open_settings(&app, &mode),
+        _ => Err(invalid_error(format!("unsupported settings mode: {mode}"))),
+    }
+}
+
+#[tauri::command]
+#[specta::specta]
+pub(crate) fn open_profile_new_dialog(app: AppHandle) -> Result<()> {
+    open_dialog(&app, DialogKind::ProfileNew)
 }
 
 pub(crate) fn handle_window_event<R: Runtime>(window: &Window<R>, event: &WindowEvent) {
@@ -1152,6 +1292,7 @@ fn tab_bar_orientation_from_menu_id(id: &str) -> Result<TabBarOrientation> {
 fn terminal_command_from_menu_id(id: &str) -> Option<TerminalMenuCommand> {
     match id {
         MENU_NEW_WINDOW => Some(TerminalMenuCommand::NewWindow),
+        MENU_COMMAND_PALETTE => Some(TerminalMenuCommand::OpenCommandPalette),
         MENU_NEW_TAB => Some(TerminalMenuCommand::NewTab),
         MENU_SPLIT_RIGHT => Some(TerminalMenuCommand::SplitRight),
         MENU_SPLIT_LEFT => Some(TerminalMenuCommand::SplitLeft),
@@ -1214,6 +1355,7 @@ fn emit_terminal_menu_event<R: Runtime>(
     command: TerminalMenuCommand,
 ) -> Result<()> {
     let window = focused_or_main_window(app)?;
+    focus_window(&window)?;
     app.emit_to(
         EventTarget::webview_window(window.label()),
         TERMINAL_MENU_EVENT,
