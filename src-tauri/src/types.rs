@@ -253,6 +253,7 @@ pub struct TerminalMenuEvent {
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
 #[serde(rename_all = "snake_case")]
 pub enum TerminalMenuCommand {
+    OpenCommandPalette,
     NewWindow,
     NewTab,
     SplitRight,
