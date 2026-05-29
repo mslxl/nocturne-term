@@ -86,6 +86,9 @@ export const messages = {
     find: "Find",
     findNext: "Find Next",
     findPrevious: "Find Previous",
+    matchCase: "Match Case",
+    useRegex: "Use Regular Expression",
+    copyMatchingLine: "Copy matching line",
     hideFindBar: "Hide Find Bar",
   },
   zh: {
@@ -173,6 +176,9 @@ export const messages = {
     find: "查找",
     findNext: "查找下一个",
     findPrevious: "查找上一个",
+    matchCase: "区分大小写",
+    useRegex: "使用正则表达式",
+    copyMatchingLine: "Copy matching line",
     hideFindBar: "隐藏查找栏",
   },
 } satisfies Record<AppLanguage, Record<string, string>>;
