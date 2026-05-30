@@ -227,8 +227,13 @@
               {/if}
             {:else if setting.kind === "boolean"}
               <SwitchControl checked={Boolean(value)} update={(next) => updateSetting(setting, next)} />
-            {:else if setting.kind === "host-dirs"}
-              <HostDirsControl dirs={value as string[]} update={(next) => updateSetting(setting, next)} />
+            {:else if setting.kind === "path-list"}
+              <HostDirsControl
+                dirs={value as string[]}
+                label={t(setting.label)}
+                mode={setting.key === "openssh_config_files" ? "file" : "directory"}
+                update={(next) => updateSetting(setting, next)}
+              />
             {:else if setting.kind === "keybindings"}
               <KeybindingsControl value={value as never} update={(next) => updateSetting(setting, next)} />
             {:else if setting.kind === "textarea"}

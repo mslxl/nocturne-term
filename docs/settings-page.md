@@ -110,10 +110,26 @@ Settings rows use small reusable Svelte components under `src/lib/settings/compo
 - `SegmentedControl.svelte` is for compact mutually exclusive choices such as theme, renderer, and tab bar placement.
 - Language uses a native select so the control scales better as more locales are added.
 - `SwitchControl.svelte` is for boolean settings.
-- `HostDirsControl.svelte` is for the host directory list, with `+` opening the native directory picker and `-` removing the selected row.
+- `HostDirsControl.svelte` is for editable path lists, with `+` opening the native file/directory picker and `-` removing the selected row. It is used for host directories and OpenSSH config files.
 - `TerminalColorSchemeManager.svelte` manages terminal palette schemes, previews, and light/dark theme mapping.
 
 Keep these controls visually restrained. They should feel like compact desktop settings controls, not web cards. Add focus-visible states for keyboard users and keep pressed/selected states distinct.
+
+## Connection Hosts
+
+The Hosts category manages connection hosts. See `docs/connection-hosts.md` for the full storage, security, and protocol contract.
+
+Connection host CRUD is not part of the settings window. The settings Hosts category only manages host-directory, OpenSSH config file, session click behavior, and display preferences. Default host selection belongs in Host Manager as a per-host switch backed by the single `default_host` config value.
+
+OpenSSH and editable Nocturne host entries are managed in the dedicated Host Manager window. The Host Manager should explain that configured OpenSSH files are shared by other tools and are therefore read-only in Nocturne. It should offer a copy action that creates an editable Nocturne host in a selected writable host directory.
+
+The OpenSSH config file list defaults to `~/.ssh/config`. Users may add or remove files in settings. These files are read-only inputs; Nocturne never rewrites them.
+
+Duplicate UUIDs are configuration errors; show them persistently in Host Manager and disable connection until repaired. Settings may also surface a terse warning when host directories contain blocking diagnostics.
+
+The Host Manager can be opened from the command palette and from the host picker used when creating a new session.
+
+Host Manager's left side is a TreeView over virtual host folders, not grouped sections. Host rows should show only the display name and connection address subtitle; storage path/source details belong in the inspector or diagnostics, not the list row.
 
 ## Terminal Tab Bar
 

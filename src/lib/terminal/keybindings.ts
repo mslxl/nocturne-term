@@ -3,7 +3,7 @@ import { stringValue } from "../config/document";
 
 export type TerminalCommandId =
   | "terminal.openCommandPalette"
-  | "terminal.newTab"
+  | "terminal.newSession"
   | "terminal.closeTab"
   | "terminal.splitLeft"
   | "terminal.splitRight"
@@ -29,8 +29,8 @@ export const terminalKeybindings: KeybindingDefinition[] = [
     default: "Ctrl+Shift+P",
   },
   {
-    command: "terminal.newTab",
-    label: "New Tab",
+    command: "terminal.newSession",
+    label: "New Session",
     macDefault: "Meta+T",
     default: "Ctrl+Shift+T",
   },

@@ -1,24 +1,28 @@
 use std::{
     collections::BTreeMap,
-    fs,
+    env, fs,
     io::Write,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     sync::{Arc, Mutex, OnceLock},
 };
 
-use hex::ToHex;
+use keyring_core::Entry as KeyringEntry;
 use notify::{Config as NotifyConfig, RecommendedWatcher, RecursiveMode, Watcher};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Emitter, Manager, Runtime};
+use tauri_plugin_notification::NotificationExt;
+use uuid::Uuid;
 
 use crate::{
     error::{invalid_error, io_error, missing_error, parse_error, Result},
+    ssh_trust::SshTrustStore,
     types::{
         AppConfigSnapshot, ConfigDocumentTarget, ConfigKeyPathInput, ConfigRootInfo, ConfigTable,
-        ConfigValue, EffectiveConfigDocument, HostConfigDocument, HostDirsInput, HostDocumentInput,
-        HostEntry, MainConfigDocument, ProfileConfigDocument, ProfileDocumentInput, ProfileEntry,
-        TabBarOrientation,
+        ConfigValue, ConnectionDiagnosticSeverity, ConnectionHostDiagnostic,
+        ConnectionHostDocument, ConnectionHostDocumentInput, ConnectionHostEntry,
+        ConnectionHostSource, EffectiveConfigDocument, HostDirsInput, LocalConnectionConfig,
+        MainConfigDocument, ProfileConfigDocument, ProfileDocumentInput, ProfileEntry,
+        SshConnectionConfig, TabBarOrientation,
     },
 };
 
@@ -31,6 +35,9 @@ const TERMINAL_COLOR_SCHEMES_DIR: &str = "terminal-color-schemes";
 const DEFAULT_PROFILE_FILE: &str = "default.toml";
 const DEFAULT_HOSTS_DIR: &str = "hosts";
 const DEFAULT_PROFILE_NAME: &str = "default";
+const KNOWN_HOSTS_FILE: &str = "known-hosts.toml";
+const OPENSSH_INCLUDE_LIMIT: usize = 16;
+pub(crate) const DEFAULT_LOCAL_HOST_ID: &str = "00000000-0000-0000-0000-000000000001";
 
 #[derive(Default)]
 struct WatchState {
@@ -49,12 +56,15 @@ fn watch_state() -> Arc<Mutex<WatchState>> {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct AppStateFile {
     active_profile: String,
+    #[serde(default)]
+    default_local_host_removed: bool,
 }
 
 impl Default for AppStateFile {
     fn default() -> Self {
         Self {
             active_profile: DEFAULT_PROFILE_NAME.to_string(),
+            default_local_host_removed: false,
         }
     }
 }
@@ -76,7 +86,7 @@ pub(crate) fn root_paths(app: &AppHandle<impl Runtime>) -> Result<ConfigRootInfo
     } else {
         state.active_profile
     };
-    let host_dirs = load_application_host_dirs(&root, &active_profile)?;
+    let config = load_application_connection_config(&root, &active_profile)?;
     Ok(ConfigRootInfo {
         main_config_path: root.join(MAIN_CONFIG_FILE).to_string_lossy().into_owned(),
         profile_config_path: root
@@ -87,10 +97,17 @@ pub(crate) fn root_paths(app: &AppHandle<impl Runtime>) -> Result<ConfigRootInfo
         state_path: root.join(STATE_FILE).to_string_lossy().into_owned(),
         root_dir: root.to_string_lossy().into_owned(),
         active_profile,
-        host_dirs: host_dirs
+        host_dirs: config
+            .host_dirs
             .into_iter()
             .map(|dir| dir.to_string_lossy().into_owned())
             .collect(),
+        openssh_config_files: config
+            .openssh_config_files
+            .into_iter()
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect(),
+        default_host: config.default_host,
     })
 }
 
@@ -140,17 +157,21 @@ fn resolve_root_relative(root: &Path, dir: &str) -> PathBuf {
 pub(crate) fn ensure_layout(app: &AppHandle<impl Runtime>) -> Result<ConfigRootInfo> {
     let root = root_dir(app)?;
     fs::create_dir_all(&root).map_err(io_error)?;
-    let profiles_dir = root.join(PROFILES_DIR);
-    let hosts_dir = root.join(DEFAULT_HOSTS_DIR);
     let terminal_color_schemes_dir = root.join(TERMINAL_COLOR_SCHEMES_DIR);
-    fs::create_dir_all(&profiles_dir).map_err(io_error)?;
-    fs::create_dir_all(&hosts_dir).map_err(io_error)?;
-    fs::create_dir_all(&terminal_color_schemes_dir).map_err(io_error)?;
-
     let state_path = root.join(STATE_FILE);
     if !state_path.exists() {
         save_state(&state_path, &AppStateFile::default())?;
     }
+
+    let state = load_state(&state_path)?;
+    let active_profile = if state.active_profile.is_empty() {
+        DEFAULT_PROFILE_NAME.to_string()
+    } else {
+        state.active_profile.clone()
+    };
+    let profiles_dir = root.join(PROFILES_DIR);
+    fs::create_dir_all(&profiles_dir).map_err(io_error)?;
+    fs::create_dir_all(&terminal_color_schemes_dir).map_err(io_error)?;
 
     let main_config = root.join(MAIN_CONFIG_FILE);
     if !main_config.exists() {
@@ -161,8 +182,34 @@ pub(crate) fn ensure_layout(app: &AppHandle<impl Runtime>) -> Result<ConfigRootI
     if !default_profile.exists() {
         write_atomic(&default_profile, "")?;
     }
+    for host_dir in host_dirs(&root, &active_profile)? {
+        fs::create_dir_all(&host_dir).map_err(io_error)?;
+    }
+    let root_info = root_paths(app)?;
+    notify_connection_diagnostics(app, &root)?;
+    Ok(root_info)
+}
 
-    root_paths(app)
+fn notify_connection_diagnostics(app: &AppHandle<impl Runtime>, root: &Path) -> Result<()> {
+    let state = load_state(&root.join(STATE_FILE))?;
+    let hosts = load_connection_host_entries(root, &state)?;
+    let error_count = hosts
+        .iter()
+        .flat_map(|host| host.diagnostics.iter())
+        .filter(|diagnostic| diagnostic.severity == ConnectionDiagnosticSeverity::Error)
+        .count();
+    if error_count == 0 {
+        return Ok(());
+    }
+    let _ = app
+        .notification()
+        .builder()
+        .title("Nocturne host configuration needs attention")
+        .body(format!(
+            "{error_count} connection host issue(s) need repair."
+        ))
+        .show();
+    Ok(())
 }
 
 fn read_text(path: &Path) -> Result<String> {
@@ -269,16 +316,16 @@ pub(crate) fn config_table_to_toml(table: &ConfigTable) -> Result<toml::Value> {
     ))
 }
 
-fn string_array_from_toml(value: &toml::Value) -> Result<Vec<String>> {
+fn string_array_from_toml(value: &toml::Value, name: &str) -> Result<Vec<String>> {
     match value {
         toml::Value::Array(values) => values
             .iter()
             .map(|value| match value {
                 toml::Value::String(value) => Ok(value.clone()),
-                _ => Err(invalid_error("host_dirs must be an array of strings")),
+                _ => Err(invalid_error(format!("{name} must be an array of strings"))),
             })
             .collect(),
-        _ => Err(invalid_error("host_dirs must be an array of strings")),
+        _ => Err(invalid_error(format!("{name} must be an array of strings"))),
     }
 }
 
@@ -295,39 +342,6 @@ fn write_document(path: &Path, table: &ConfigTable) -> Result<()> {
     let value = config_table_to_toml(table)?;
     let text = toml::to_string_pretty(&value).map_err(parse_error)?;
     write_atomic(path, &text)
-}
-
-fn normalize_toml(value: &toml::Value) -> toml::Value {
-    match value {
-        toml::Value::Table(table) => {
-            let mut normalized = toml::map::Map::new();
-            let mut entries: Vec<_> = table.iter().collect();
-            entries.sort_by(|(a, _), (b, _)| a.cmp(b));
-            for (key, value) in entries {
-                normalized.insert(key.clone(), normalize_toml(value));
-            }
-            toml::Value::Table(normalized)
-        }
-        toml::Value::Array(values) => {
-            toml::Value::Array(values.iter().map(normalize_toml).collect())
-        }
-        _ => value.clone(),
-    }
-}
-
-fn hash_toml(text: &str) -> Result<String> {
-    let value = parse_toml(text)?;
-    hash_toml_value(&value)
-}
-
-fn hash_toml_value(value: &toml::Value) -> Result<String> {
-    let normalized = normalize_toml(value);
-    let serialized = if matches!(normalized, toml::Value::Table(ref table) if table.is_empty()) {
-        String::new()
-    } else {
-        toml::to_string(&normalized).map_err(parse_error)?
-    };
-    Ok(Sha256::digest(serialized.as_bytes()).encode_hex::<String>())
 }
 
 pub(crate) fn deep_merge(base: &toml::Value, overlay: &toml::Value) -> toml::Value {
@@ -410,6 +424,10 @@ fn write_config_path(table: &mut ConfigTable, path: &[&str], value: ConfigValue)
     Ok(())
 }
 
+fn write_string_config_path(table: &mut ConfigTable, path: &[&str], value: String) -> Result<()> {
+    write_config_path(table, path, ConfigValue::String(value))
+}
+
 fn tab_bar_orientation_value(orientation: TabBarOrientation) -> &'static str {
     match orientation {
         TabBarOrientation::Horizontal => "horizontal",
@@ -466,87 +484,937 @@ pub(crate) fn set_effective_tab_bar_orientation(
     Ok(())
 }
 
-fn load_application_host_dirs(root: &Path, active_profile: &str) -> Result<Vec<PathBuf>> {
+struct ApplicationConnectionConfig {
+    host_dirs: Vec<PathBuf>,
+    openssh_config_files: Vec<PathBuf>,
+    default_host: String,
+}
+
+fn default_openssh_config_file() -> Option<PathBuf> {
+    dirs::home_dir().map(|home| home.join(".ssh").join("config"))
+}
+
+fn resolve_user_path(root: &Path, path: &str) -> PathBuf {
+    if path == "~" {
+        return dirs::home_dir().unwrap_or_else(|| root.join(path));
+    }
+    if let Some(rest) = path.strip_prefix("~/") {
+        if let Some(home) = dirs::home_dir() {
+            return home.join(rest);
+        }
+    }
+    resolve_root_relative(root, path)
+}
+
+fn load_application_connection_config(
+    root: &Path,
+    active_profile: &str,
+) -> Result<ApplicationConnectionConfig> {
     let main = read_main_config_from_path(&root.join(MAIN_CONFIG_FILE))?;
     let profile = read_profile_document_from_path(&profile_path(root, active_profile))?;
     let merged = deep_merge(
         &config_table_to_toml(&main.root)?,
         &config_table_to_toml(&profile.root)?,
     );
-    let dirs = match merged {
-        toml::Value::Table(ref table) => match table.get("host_dirs") {
-            Some(value) => string_array_from_toml(value)?,
-            None => Vec::new(),
-        },
+    let (dirs, openssh_config_files, default_host) = match merged {
+        toml::Value::Table(ref table) => {
+            let dirs = match table.get("host_dirs") {
+                Some(value) => string_array_from_toml(value, "host_dirs")?,
+                None => Vec::new(),
+            };
+            let openssh_config_files = match table.get("openssh_config_files") {
+                Some(value) => string_array_from_toml(value, "openssh_config_files")?,
+                None => Vec::new(),
+            };
+            let default_host = match table.get("default_host") {
+                Some(toml::Value::String(value)) if !value.trim().is_empty() => value.clone(),
+                Some(toml::Value::String(_)) => DEFAULT_LOCAL_HOST_ID.to_string(),
+                Some(_) => return Err(invalid_error("default_host must be a string")),
+                None => DEFAULT_LOCAL_HOST_ID.to_string(),
+            };
+            (dirs, openssh_config_files, default_host)
+        }
         _ => return Err(invalid_error("effective config must be a TOML table")),
     };
-    let resolved = if dirs.is_empty() {
+    let host_dirs = if dirs.is_empty() {
         vec![root.join(DEFAULT_HOSTS_DIR)]
     } else {
         dirs.into_iter()
-            .map(|dir| resolve_root_relative(root, &dir))
+            .map(|dir| resolve_user_path(root, &dir))
             .collect()
     };
-    Ok(resolved)
+    let openssh_config_files = if openssh_config_files.is_empty() {
+        default_openssh_config_file().into_iter().collect()
+    } else {
+        openssh_config_files
+            .into_iter()
+            .map(|path| resolve_user_path(root, &path))
+            .collect()
+    };
+    Ok(ApplicationConnectionConfig {
+        host_dirs,
+        openssh_config_files,
+        default_host,
+    })
+}
+
+fn load_application_host_dirs(root: &Path, active_profile: &str) -> Result<Vec<PathBuf>> {
+    Ok(load_application_connection_config(root, active_profile)?.host_dirs)
 }
 
 fn host_dirs(root: &Path, active_profile: &str) -> Result<Vec<PathBuf>> {
     load_application_host_dirs(root, active_profile)
 }
 
-fn host_path_from_id(root: &Path, active_profile: &str, id: &str) -> Result<PathBuf> {
+fn connection_host_path_from_id(root: &Path, active_profile: &str, id: &str) -> Result<PathBuf> {
+    validate_uuid(id)?;
+    let expected_file = format!("{id}.toml");
     for dir in host_dirs(root, active_profile)? {
         if !dir.exists() {
             continue;
         }
-        for entry in fs::read_dir(&dir).map_err(io_error)? {
-            let entry = entry.map_err(io_error)?;
-            let path = entry.path();
-            if path.extension().and_then(|s| s.to_str()) != Some("toml") {
-                continue;
+        for path in collect_host_toml_files(&dir)? {
+            if path.file_name().and_then(|name| name.to_str()) == Some(expected_file.as_str()) {
+                return Ok(path);
             }
-            let content = read_text(&path)?;
-            if hash_toml(&content)? == id {
+            let document = read_connection_host_document_from_path(&path)?;
+            if document.id == id {
                 return Ok(path);
             }
         }
     }
-    Err(missing_error(format!("host {id} not found")))
+    Err(missing_error(format!("connection host {id} not found")))
 }
 
-fn load_host_entries(root: &Path, state: &AppStateFile) -> Result<Vec<HostEntry>> {
+fn collect_host_toml_files(dir: &Path) -> Result<Vec<PathBuf>> {
+    let mut paths = Vec::new();
+    collect_host_toml_files_into(dir, &mut paths)?;
+    paths.sort();
+    Ok(paths)
+}
+
+fn collect_host_toml_files_into(dir: &Path, paths: &mut Vec<PathBuf>) -> Result<()> {
+    if !dir.exists() {
+        return Ok(());
+    }
+    for entry in fs::read_dir(dir).map_err(io_error)? {
+        let entry = entry.map_err(io_error)?;
+        let path = entry.path();
+        if path.is_dir() {
+            collect_host_toml_files_into(&path, paths)?;
+        } else if path.extension().and_then(|s| s.to_str()) == Some("toml") {
+            paths.push(path);
+        }
+    }
+    Ok(())
+}
+
+fn connection_host_folder_from_path(base: &Path, path: &Path) -> Option<String> {
+    let parent = path.parent()?;
+    let relative = parent.strip_prefix(base).ok()?;
+    folder_from_relative_path(relative)
+}
+
+fn connection_host_base_dir_for_path(
+    root: &Path,
+    active_profile: &str,
+    path: &Path,
+) -> Result<PathBuf> {
+    for dir in host_dirs(root, active_profile)? {
+        if path.strip_prefix(&dir).is_ok() {
+            return Ok(dir);
+        }
+    }
+    Err(invalid_error(format!(
+        "connection host path is outside configured host directories: {}",
+        path.display()
+    )))
+}
+
+fn connection_host_file_path(base: &Path, folder: Option<PathBuf>, id: &str) -> PathBuf {
+    let dir = folder.map_or_else(|| base.to_path_buf(), |folder| base.join(folder));
+    dir.join(format!("{id}.toml"))
+}
+
+fn remove_empty_host_dirs(base: &Path, start: &Path) {
+    let mut current = start.to_path_buf();
+    while current != base {
+        match fs::remove_dir(&current) {
+            Ok(()) => {
+                let Some(parent) = current.parent() else {
+                    break;
+                };
+                current = parent.to_path_buf();
+            }
+            Err(_) => break,
+        }
+    }
+}
+
+fn folder_from_relative_path(path: &Path) -> Option<String> {
+    let parts = path
+        .components()
+        .filter_map(|component| match component {
+            Component::Normal(part) => part.to_str().map(ToOwned::to_owned),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("/"))
+    }
+}
+
+fn validate_connection_host_folder(folder: Option<&str>) -> Result<Option<PathBuf>> {
+    let Some(folder) = folder.map(str::trim).filter(|folder| !folder.is_empty()) else {
+        return Ok(None);
+    };
+    let relative = Path::new(folder);
+    if relative.is_absolute() {
+        return Err(invalid_error("connection host folder must be relative"));
+    }
+    let mut path = PathBuf::new();
+    for component in relative.components() {
+        match component {
+            Component::Normal(part) => {
+                let Some(text) = part.to_str() else {
+                    return Err(invalid_error("connection host folder must be UTF-8"));
+                };
+                if text.is_empty() {
+                    return Err(invalid_error(
+                        "connection host folder cannot contain empty segments",
+                    ));
+                }
+                path.push(part);
+            }
+            Component::CurDir => {}
+            Component::ParentDir => {
+                return Err(invalid_error("connection host folder cannot contain '..'"));
+            }
+            Component::RootDir | Component::Prefix(_) => {
+                return Err(invalid_error("connection host folder must be relative"));
+            }
+        }
+    }
+    if path.as_os_str().is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(path))
+    }
+}
+
+fn validate_uuid(id: &str) -> Result<()> {
+    Uuid::parse_str(id)
+        .map(|_| ())
+        .map_err(|_| invalid_error(format!("connection host id must be a UUID: {id}")))
+}
+
+fn next_connection_host_id() -> String {
+    Uuid::new_v4().to_string()
+}
+
+fn read_connection_host_document_from_path(path: &Path) -> Result<ConnectionHostDocument> {
+    let text = read_text(path)?;
+    if text.trim().is_empty() {
+        return Err(invalid_error(format!(
+            "connection host file cannot be empty: {}",
+            path.display()
+        )));
+    }
+    toml::from_str(&text).map_err(parse_error)
+}
+
+fn write_connection_host_document(path: &Path, document: &ConnectionHostDocument) -> Result<()> {
+    validate_connection_host_document(document)?;
+    let mut disk_document = document.clone();
+    disk_document.folder = None;
+    let text = toml::to_string_pretty(&disk_document).map_err(parse_error)?;
+    write_atomic(path, &text)
+}
+
+fn connection_host_entry_from_path(
+    base: &Path,
+    path: PathBuf,
+    mut document: ConnectionHostDocument,
+) -> ConnectionHostEntry {
+    document.folder = connection_host_folder_from_path(base, &path);
+    ConnectionHostEntry {
+        id: document.id.clone(),
+        path: Some(path.to_string_lossy().into_owned()),
+        source: ConnectionHostSource::User,
+        read_only: false,
+        document,
+        diagnostics: Vec::new(),
+    }
+}
+
+fn default_local_host_document() -> ConnectionHostDocument {
+    ConnectionHostDocument {
+        version: 1,
+        id: DEFAULT_LOCAL_HOST_ID.to_string(),
+        name: "Local Shell".to_string(),
+        folder: None,
+        icon_pack: Some("shell".to_string()),
+        protocol: crate::types::ConnectionProtocol::Local,
+        local: Some(LocalConnectionConfig::default()),
+        ssh: None,
+        telnet: None,
+    }
+}
+
+fn virtual_default_local_host() -> ConnectionHostEntry {
+    let document = default_local_host_document();
+    ConnectionHostEntry {
+        id: document.id.clone(),
+        path: None,
+        source: ConnectionHostSource::Virtual,
+        read_only: true,
+        document,
+        diagnostics: Vec::new(),
+    }
+}
+
+fn validate_connection_host_document(document: &ConnectionHostDocument) -> Result<()> {
+    if document.version != 1 {
+        return Err(invalid_error(format!(
+            "unsupported connection host version: {}",
+            document.version
+        )));
+    }
+    validate_uuid(&document.id)?;
+    if document.name.trim().is_empty() {
+        return Err(invalid_error("connection host name cannot be empty"));
+    }
+    if matches!(document.icon_pack.as_deref(), Some(icon_pack) if icon_pack.trim().is_empty()) {
+        return Err(invalid_error("connection host icon pack cannot be empty"));
+    }
+    match document.protocol {
+        crate::types::ConnectionProtocol::Local => {
+            let Some(local) = &document.local else {
+                return Err(invalid_error(
+                    "local connection host requires [local] config",
+                ));
+            };
+            validate_local_config(local)
+        }
+        crate::types::ConnectionProtocol::Ssh => {
+            let Some(ssh) = &document.ssh else {
+                return Err(invalid_error("ssh connection host requires [ssh] config"));
+            };
+            validate_ssh_config(ssh)
+        }
+        crate::types::ConnectionProtocol::Telnet => {
+            let Some(telnet) = &document.telnet else {
+                return Err(invalid_error(
+                    "telnet connection host requires [telnet] config",
+                ));
+            };
+            if telnet.hostname.trim().is_empty() {
+                return Err(invalid_error("telnet hostname cannot be empty"));
+            }
+            if telnet.port == 0 {
+                return Err(invalid_error("telnet port must be greater than 0"));
+            }
+            Ok(())
+        }
+    }
+}
+
+fn validate_local_config(config: &LocalConnectionConfig) -> Result<()> {
+    if matches!(config.command.as_deref(), Some(command) if command.trim().is_empty()) {
+        return Err(invalid_error("local command cannot be empty"));
+    }
+    if config.command.is_none() && !config.args.is_empty() {
+        return Err(invalid_error(
+            "local args require local command because default system commands cannot accept configured args",
+        ));
+    }
+    if matches!(config.cwd.as_deref(), Some(cwd) if cwd.trim().is_empty()) {
+        return Err(invalid_error("local cwd cannot be empty"));
+    }
+    for key in config.env.keys() {
+        if key.trim().is_empty() {
+            return Err(invalid_error("local env keys cannot be empty"));
+        }
+    }
+    Ok(())
+}
+
+fn validate_ssh_config(config: &SshConnectionConfig) -> Result<()> {
+    if config.hostname.trim().is_empty() {
+        return Err(invalid_error("ssh hostname cannot be empty"));
+    }
+    if config.port == 0 {
+        return Err(invalid_error("ssh port must be greater than 0"));
+    }
+    Ok(())
+}
+
+fn host_filename_id(path: &Path) -> Option<String> {
+    path.file_stem()
+        .and_then(|stem| stem.to_str())
+        .map(ToOwned::to_owned)
+}
+
+fn connection_diagnostic(
+    severity: ConnectionDiagnosticSeverity,
+    code: &str,
+    message: impl Into<String>,
+) -> ConnectionHostDiagnostic {
+    ConnectionHostDiagnostic {
+        severity,
+        code: code.to_string(),
+        message: message.into(),
+    }
+}
+
+fn load_connection_host_entries(
+    root: &Path,
+    state: &AppStateFile,
+) -> Result<Vec<ConnectionHostEntry>> {
     let mut hosts = Vec::new();
+    if !state.default_local_host_removed {
+        hosts.push(virtual_default_local_host());
+    }
     for dir in host_dirs(root, &state.active_profile)? {
         if !dir.exists() {
             continue;
         }
-        for entry in fs::read_dir(&dir).map_err(io_error)? {
-            let entry = entry.map_err(io_error)?;
-            let path = entry.path();
-            if path.extension().and_then(|s| s.to_str()) != Some("toml") {
-                continue;
-            }
-            let toml = read_text(&path)?;
-            let id = hash_toml(&toml)?;
-            let document = if toml.trim().is_empty() {
-                HostConfigDocument::default()
-            } else {
-                match parse_toml(&toml)? {
-                    toml::Value::Table(table) => HostConfigDocument {
-                        root: table_to_config_table(&table),
-                    },
-                    _ => return Err(invalid_error("host config must be a TOML table")),
+        for path in collect_host_toml_files(&dir)? {
+            let mut diagnostics = Vec::new();
+            let mut document = match read_connection_host_document_from_path(&path) {
+                Ok(document) => document,
+                Err(error) => {
+                    diagnostics.push(connection_diagnostic(
+                        ConnectionDiagnosticSeverity::Error,
+                        "malformed_toml",
+                        error.to_string(),
+                    ));
+                    ConnectionHostDocument {
+                        id: next_connection_host_id(),
+                        name: path
+                            .file_stem()
+                            .and_then(|stem| stem.to_str())
+                            .unwrap_or("Invalid Host")
+                            .to_string(),
+                        ..ConnectionHostDocument::default()
+                    }
                 }
             };
-            hosts.push(HostEntry {
-                id,
-                path: path.to_string_lossy().into_owned(),
+            document.folder = connection_host_folder_from_path(&dir, &path);
+            if let Err(error) = validate_connection_host_document(&document) {
+                diagnostics.push(connection_diagnostic(
+                    ConnectionDiagnosticSeverity::Error,
+                    "invalid_host",
+                    error.to_string(),
+                ));
+            }
+            if let Some(filename_id) = host_filename_id(&path) {
+                if filename_id != document.id {
+                    diagnostics.push(connection_diagnostic(
+                        ConnectionDiagnosticSeverity::Warning,
+                        "filename_id_mismatch",
+                        format!(
+                            "file name id {filename_id} does not match document id {}",
+                            document.id
+                        ),
+                    ));
+                }
+            }
+            hosts.push(ConnectionHostEntry {
+                id: document.id.clone(),
+                path: Some(path.to_string_lossy().into_owned()),
+                source: ConnectionHostSource::User,
+                read_only: false,
                 document,
+                diagnostics,
             });
         }
     }
-    hosts.sort_by(|a, b| a.path.cmp(&b.path));
+    let config = load_application_connection_config(root, &state.active_profile)?;
+    hosts.extend(load_openssh_connection_hosts(&config.openssh_config_files)?);
+    mark_duplicate_connection_ids(&mut hosts);
+    hosts.sort_by(|a, b| {
+        a.document
+            .name
+            .cmp(&b.document.name)
+            .then_with(|| a.id.cmp(&b.id))
+    });
     Ok(hosts)
+}
+
+#[derive(Debug, Clone, Default)]
+struct OpenSshHostBlock {
+    patterns: Vec<String>,
+    settings: BTreeMap<String, Vec<String>>,
+    diagnostics: Vec<ConnectionHostDiagnostic>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct OpenSshMatchBlock {
+    criteria: Vec<(String, String)>,
+    unsupported: bool,
+    settings: BTreeMap<String, Vec<String>>,
+    diagnostics: Vec<ConnectionHostDiagnostic>,
+}
+
+fn load_openssh_connection_hosts(paths: &[PathBuf]) -> Result<Vec<ConnectionHostEntry>> {
+    let mut hosts = Vec::new();
+    for path in paths {
+        if !path.exists() {
+            continue;
+        }
+        let parsed = parse_openssh_config(path)?;
+        hosts.extend(parsed_to_openssh_hosts(parsed, path));
+    }
+    Ok(hosts)
+}
+
+#[derive(Debug, Clone, Default)]
+struct ParsedOpenSshConfig {
+    hosts: Vec<OpenSshHostBlock>,
+    matches: Vec<OpenSshMatchBlock>,
+    diagnostics: Vec<ConnectionHostDiagnostic>,
+}
+
+fn parse_openssh_config(path: &Path) -> Result<ParsedOpenSshConfig> {
+    let mut parsed = ParsedOpenSshConfig::default();
+    let mut visited = Vec::new();
+    parse_openssh_config_file(path, 0, &mut visited, &mut parsed)?;
+    Ok(parsed)
+}
+
+fn parse_openssh_config_file(
+    path: &Path,
+    depth: usize,
+    visited: &mut Vec<PathBuf>,
+    parsed: &mut ParsedOpenSshConfig,
+) -> Result<()> {
+    if depth > OPENSSH_INCLUDE_LIMIT {
+        parsed.diagnostics.push(connection_diagnostic(
+            ConnectionDiagnosticSeverity::Warning,
+            "include_depth",
+            format!("OpenSSH Include depth exceeded at {}", path.display()),
+        ));
+        return Ok(());
+    }
+    let canonical = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    if visited.iter().any(|item| item == &canonical) {
+        parsed.diagnostics.push(connection_diagnostic(
+            ConnectionDiagnosticSeverity::Warning,
+            "include_cycle",
+            format!("OpenSSH Include cycle at {}", path.display()),
+        ));
+        return Ok(());
+    }
+    if !path.exists() {
+        parsed.diagnostics.push(connection_diagnostic(
+            ConnectionDiagnosticSeverity::Warning,
+            "missing_include",
+            format!("OpenSSH Include file not found: {}", path.display()),
+        ));
+        return Ok(());
+    }
+    visited.push(canonical);
+    let content = read_text(path)?;
+    let base_dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let mut current: Option<OpenSshSection> = None;
+    for raw_line in content.lines() {
+        let line = strip_openssh_comment(raw_line).trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Some((key, rest)) = split_openssh_directive(line) else {
+            continue;
+        };
+        let key_lower = key.to_ascii_lowercase();
+        if key_lower == "include" {
+            for include in split_openssh_words(rest) {
+                for include_path in expand_openssh_include(base_dir, &include) {
+                    parse_openssh_config_file(&include_path, depth + 1, visited, parsed)?;
+                }
+            }
+            continue;
+        }
+        if key_lower == "host" {
+            flush_openssh_section(&mut current, parsed);
+            current = Some(OpenSshSection::Host(OpenSshHostBlock {
+                patterns: split_openssh_words(rest),
+                ..OpenSshHostBlock::default()
+            }));
+            continue;
+        }
+        if key_lower == "match" {
+            flush_openssh_section(&mut current, parsed);
+            current = Some(OpenSshSection::Match(parse_openssh_match(rest)));
+            continue;
+        }
+        match &mut current {
+            Some(OpenSshSection::Host(block)) => {
+                block
+                    .settings
+                    .entry(key_lower)
+                    .or_default()
+                    .push(rest.trim().to_string());
+            }
+            Some(OpenSshSection::Match(block)) => {
+                block
+                    .settings
+                    .entry(key_lower)
+                    .or_default()
+                    .push(rest.trim().to_string());
+            }
+            None => {
+                let mut block = OpenSshHostBlock {
+                    patterns: vec!["*".to_string()],
+                    ..OpenSshHostBlock::default()
+                };
+                block
+                    .settings
+                    .entry(key_lower)
+                    .or_default()
+                    .push(rest.trim().to_string());
+                current = Some(OpenSshSection::Host(block));
+            }
+        }
+    }
+    flush_openssh_section(&mut current, parsed);
+    visited.pop();
+    Ok(())
+}
+
+enum OpenSshSection {
+    Host(OpenSshHostBlock),
+    Match(OpenSshMatchBlock),
+}
+
+fn flush_openssh_section(section: &mut Option<OpenSshSection>, parsed: &mut ParsedOpenSshConfig) {
+    match section.take() {
+        Some(OpenSshSection::Host(block)) => parsed.hosts.push(block),
+        Some(OpenSshSection::Match(block)) => parsed.matches.push(block),
+        None => {}
+    }
+}
+
+fn strip_openssh_comment(line: &str) -> &str {
+    let mut escaped = false;
+    for (index, character) in line.char_indices() {
+        if character == '\\' && !escaped {
+            escaped = true;
+            continue;
+        }
+        if character == '#' && !escaped {
+            return &line[..index];
+        }
+        escaped = false;
+    }
+    line
+}
+
+fn split_openssh_directive(line: &str) -> Option<(&str, &str)> {
+    let mut parts = line.splitn(2, char::is_whitespace);
+    let key = parts.next()?.trim();
+    let rest = parts.next().unwrap_or("").trim();
+    (!key.is_empty()).then_some((key, rest))
+}
+
+fn split_openssh_words(value: &str) -> Vec<String> {
+    value
+        .split_whitespace()
+        .map(|word| word.trim_matches('"').trim_matches('\'').to_string())
+        .filter(|word| !word.is_empty())
+        .collect()
+}
+
+fn expand_openssh_include(base_dir: &Path, include: &str) -> Vec<PathBuf> {
+    let expanded = expand_home(include);
+    let path = PathBuf::from(expanded);
+    let path = if path.is_absolute() {
+        path
+    } else {
+        base_dir.join(path)
+    };
+    let pattern = path.to_string_lossy().into_owned();
+    if pattern.contains('*') || pattern.contains('?') || pattern.contains('[') {
+        match glob::glob(&pattern) {
+            Ok(paths) => paths.filter_map(std::result::Result::ok).collect(),
+            Err(_) => vec![path],
+        }
+    } else {
+        vec![path]
+    }
+}
+
+fn expand_home(value: &str) -> String {
+    if value == "~" {
+        return dirs::home_dir()
+            .map(|path| path.to_string_lossy().into_owned())
+            .unwrap_or_else(|| value.to_string());
+    }
+    if let Some(rest) = value.strip_prefix("~/") {
+        if let Some(home) = dirs::home_dir() {
+            return home.join(rest).to_string_lossy().into_owned();
+        }
+    }
+    value.to_string()
+}
+
+fn parse_openssh_match(rest: &str) -> OpenSshMatchBlock {
+    let words = split_openssh_words(rest);
+    if words.len() == 1 && words[0].eq_ignore_ascii_case("all") {
+        return OpenSshMatchBlock {
+            criteria: vec![("all".to_string(), String::new())],
+            ..OpenSshMatchBlock::default()
+        };
+    }
+    let mut criteria = Vec::new();
+    let mut unsupported = false;
+    let mut diagnostics = Vec::new();
+    let mut index = 0;
+    while index < words.len() {
+        let keyword = words[index].to_ascii_lowercase();
+        if keyword == "exec" {
+            unsupported = true;
+            diagnostics.push(connection_diagnostic(
+                ConnectionDiagnosticSeverity::Warning,
+                "unsupported_match_exec",
+                "OpenSSH Match exec is not executed by Nocturne",
+            ));
+            index += 2;
+            continue;
+        }
+        if matches!(
+            keyword.as_str(),
+            "host" | "originalhost" | "user" | "localuser"
+        ) {
+            if let Some(pattern) = words.get(index + 1) {
+                criteria.push((keyword, pattern.clone()));
+            }
+            index += 2;
+            continue;
+        }
+        unsupported = true;
+        diagnostics.push(connection_diagnostic(
+            ConnectionDiagnosticSeverity::Warning,
+            "unsupported_match",
+            format!("unsupported OpenSSH Match criterion: {keyword}"),
+        ));
+        index += 1;
+    }
+    OpenSshMatchBlock {
+        criteria,
+        unsupported,
+        settings: BTreeMap::new(),
+        diagnostics,
+    }
+}
+
+fn openssh_entry_id(path: &Path, alias: &str) -> String {
+    let source = path.to_string_lossy();
+    let namespace = Uuid::new_v5(&Uuid::NAMESPACE_URL, source.as_bytes());
+    Uuid::new_v5(&namespace, alias.as_bytes()).to_string()
+}
+
+fn openssh_folder_name(path: &Path) -> String {
+    path.file_stem()
+        .or_else(|| path.file_name())
+        .and_then(|name| name.to_str())
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .unwrap_or("OpenSSH")
+        .to_string()
+}
+
+fn parsed_to_openssh_hosts(parsed: ParsedOpenSshConfig, path: &Path) -> Vec<ConnectionHostEntry> {
+    let mut entries = Vec::new();
+    let folder = openssh_folder_name(path);
+    for host in parsed.hosts.iter() {
+        for pattern in concrete_openssh_patterns(&host.patterns) {
+            let effective = effective_openssh_settings(&parsed, &pattern);
+            let hostname = setting_first(&effective, "hostname").unwrap_or_else(|| pattern.clone());
+            let port = setting_first(&effective, "port")
+                .and_then(|value| value.parse::<u16>().ok())
+                .unwrap_or(22);
+            let username = setting_first(&effective, "user");
+            let identity_file =
+                setting_first(&effective, "identityfile").map(|value| expand_home(&value));
+            let proxy_jump = setting_first(&effective, "proxyjump");
+            let forward_agent = setting_first(&effective, "forwardagent")
+                .map(|value| matches!(value.to_ascii_lowercase().as_str(), "yes" | "true"))
+                .unwrap_or(false);
+            let server_alive_interval = setting_first(&effective, "serveraliveinterval")
+                .and_then(|value| value.parse().ok());
+            let mut diagnostics = host.diagnostics.clone();
+            diagnostics.extend(parsed.diagnostics.clone());
+            for match_block in parsed.matches.iter().filter(|block| block.unsupported) {
+                diagnostics.extend(match_block.diagnostics.clone());
+            }
+            let id = openssh_entry_id(path, &pattern);
+            entries.push(ConnectionHostEntry {
+                id: id.clone(),
+                path: Some(path.to_string_lossy().into_owned()),
+                source: ConnectionHostSource::OpenSshConfig,
+                read_only: true,
+                document: ConnectionHostDocument {
+                    version: 1,
+                    id,
+                    name: pattern,
+                    folder: Some(folder.clone()),
+                    icon_pack: Some("ssh".to_string()),
+                    protocol: crate::types::ConnectionProtocol::Ssh,
+                    local: None,
+                    ssh: Some(SshConnectionConfig {
+                        hostname,
+                        port,
+                        username,
+                        identity_file,
+                        proxy_jump,
+                        forward_agent,
+                        server_alive_interval,
+                    }),
+                    telnet: None,
+                },
+                diagnostics,
+            });
+        }
+    }
+    entries
+}
+
+fn concrete_openssh_patterns(patterns: &[String]) -> Vec<String> {
+    patterns
+        .iter()
+        .filter(|pattern| {
+            !pattern.starts_with('!')
+                && !pattern.contains('*')
+                && !pattern.contains('?')
+                && !pattern.contains('[')
+        })
+        .cloned()
+        .collect()
+}
+
+fn effective_openssh_settings(
+    parsed: &ParsedOpenSshConfig,
+    alias: &str,
+) -> BTreeMap<String, Vec<String>> {
+    let mut effective = BTreeMap::new();
+    for host in &parsed.hosts {
+        if host
+            .patterns
+            .iter()
+            .any(|pattern| openssh_pattern_matches(pattern, alias))
+        {
+            merge_openssh_first_value_wins(&mut effective, &host.settings);
+        }
+    }
+    for match_block in &parsed.matches {
+        if openssh_match_block_matches(match_block, alias, &effective) {
+            merge_openssh_first_value_wins(&mut effective, &match_block.settings);
+        }
+    }
+    effective
+}
+
+fn merge_openssh_first_value_wins(
+    effective: &mut BTreeMap<String, Vec<String>>,
+    next: &BTreeMap<String, Vec<String>>,
+) {
+    for (key, values) in next {
+        effective
+            .entry(key.clone())
+            .or_insert_with(|| values.clone());
+    }
+}
+
+fn openssh_match_block_matches(
+    block: &OpenSshMatchBlock,
+    alias: &str,
+    effective: &BTreeMap<String, Vec<String>>,
+) -> bool {
+    if block.unsupported {
+        return false;
+    }
+    if block.criteria.iter().any(|(key, _)| key == "all") {
+        return true;
+    }
+    block
+        .criteria
+        .iter()
+        .all(|(key, pattern)| match key.as_str() {
+            "host" | "originalhost" => openssh_pattern_matches(pattern, alias),
+            "user" => setting_first(effective, "user")
+                .map(|user| openssh_pattern_matches(pattern, &user))
+                .unwrap_or(false),
+            "localuser" => env::var("USER")
+                .or_else(|_| env::var("USERNAME"))
+                .map(|user| openssh_pattern_matches(pattern, &user))
+                .unwrap_or(false),
+            _ => false,
+        })
+}
+
+fn setting_first(settings: &BTreeMap<String, Vec<String>>, key: &str) -> Option<String> {
+    settings.get(key).and_then(|values| values.first()).cloned()
+}
+
+fn openssh_pattern_matches(patterns: &str, value: &str) -> bool {
+    let mut matched = false;
+    for raw_pattern in patterns
+        .split(',')
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+    {
+        if let Some(pattern) = raw_pattern.strip_prefix('!') {
+            if wildcard_match(pattern, value) {
+                return false;
+            }
+        } else if wildcard_match(raw_pattern, value) {
+            matched = true;
+        }
+    }
+    matched
+}
+
+fn wildcard_match(pattern: &str, value: &str) -> bool {
+    wildcard_match_bytes(pattern.as_bytes(), value.as_bytes())
+}
+
+fn wildcard_match_bytes(pattern: &[u8], value: &[u8]) -> bool {
+    if pattern.is_empty() {
+        return value.is_empty();
+    }
+    if pattern[0] == b'*' {
+        return wildcard_match_bytes(&pattern[1..], value)
+            || (!value.is_empty() && wildcard_match_bytes(pattern, &value[1..]));
+    }
+    if !value.is_empty() && (pattern[0] == b'?' || pattern[0] == value[0]) {
+        return wildcard_match_bytes(&pattern[1..], &value[1..]);
+    }
+    false
+}
+
+fn mark_duplicate_connection_ids(hosts: &mut [ConnectionHostEntry]) {
+    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+    for host in hosts
+        .iter()
+        .filter(|host| host.source == ConnectionHostSource::User)
+    {
+        *counts.entry(host.id.clone()).or_default() += 1;
+    }
+    for host in hosts.iter_mut() {
+        if host.source != ConnectionHostSource::User {
+            continue;
+        }
+        if counts.get(&host.id).copied().unwrap_or(0) > 1 {
+            host.diagnostics.push(connection_diagnostic(
+                ConnectionDiagnosticSeverity::Error,
+                "duplicate_id",
+                format!("duplicate connection host id {}", host.id),
+            ));
+        }
+    }
 }
 
 fn watch_config(app: AppHandle, paths: Vec<PathBuf>) -> Result<()> {
@@ -620,8 +1488,10 @@ pub(crate) fn set_active_profile_impl(
         return Err(missing_error(format!("profile {name} not found")));
     }
     let state_path = Path::new(&root.state_path);
+    let previous = load_state(state_path)?;
     let next = AppStateFile {
         active_profile: name.clone(),
+        default_local_host_removed: previous.default_local_host_removed,
     };
     save_state(state_path, &next)?;
     emit_change(app);
@@ -673,7 +1543,7 @@ pub(crate) fn get_config_snapshot(app: AppHandle) -> Result<AppConfigSnapshot> {
         profile_config,
         effective_config,
         profiles: list_profiles_impl(&root_path)?,
-        hosts: load_host_entries(&root_path, &state)?,
+        hosts: load_connection_host_entries(&root_path, &state)?,
     })
 }
 
@@ -748,7 +1618,13 @@ pub(crate) fn delete_profile(app: AppHandle, name: String) -> Result<()> {
     let state_path = Path::new(&root.state_path);
     let state = load_state(state_path)?;
     if state.active_profile == name {
-        save_state(state_path, &AppStateFile::default())?;
+        save_state(
+            state_path,
+            &AppStateFile {
+                active_profile: DEFAULT_PROFILE_NAME.to_string(),
+                default_local_host_removed: state.default_local_host_removed,
+            },
+        )?;
     }
     emit_change(&app);
     let _ = crate::app_shell::refresh_menu(&app);
@@ -822,99 +1698,189 @@ pub(crate) fn update_main_config(
 
 #[tauri::command]
 #[specta::specta]
-pub(crate) fn read_host(app: AppHandle, id: String) -> Result<HostEntry> {
+pub(crate) fn read_connection_host(app: AppHandle, id: String) -> Result<ConnectionHostEntry> {
     let root = ensure_layout(&app)?;
     let state = load_state(Path::new(&root.state_path))?;
-    let path = host_path_from_id(Path::new(&root.root_dir), &state.active_profile, &id)?;
-    let toml = read_text(&path)?;
-    let document = if toml.trim().is_empty() {
-        HostConfigDocument::default()
-    } else {
-        match parse_toml(&toml)? {
-            toml::Value::Table(table) => HostConfigDocument {
-                root: table_to_config_table(&table),
-            },
-            _ => return Err(invalid_error("host config must be a TOML table")),
+    let root_path = Path::new(&root.root_dir);
+    let path = connection_host_path_from_id(root_path, &state.active_profile, &id)?;
+    let base = connection_host_base_dir_for_path(root_path, &state.active_profile, &path)?;
+    let document = read_connection_host_document_from_path(&path)?;
+    Ok(connection_host_entry_from_path(&base, path, document))
+}
+
+#[tauri::command]
+#[specta::specta]
+pub(crate) fn list_connection_hosts(app: AppHandle) -> Result<Vec<ConnectionHostEntry>> {
+    let root = ensure_layout(&app)?;
+    let state = load_state(Path::new(&root.state_path))?;
+    load_connection_host_entries(Path::new(&root.root_dir), &state)
+}
+
+#[tauri::command]
+#[specta::specta]
+pub(crate) fn create_connection_host(
+    app: AppHandle,
+    input: ConnectionHostDocumentInput,
+) -> Result<ConnectionHostEntry> {
+    let root = ensure_layout(&app)?;
+    let state = load_state(Path::new(&root.state_path))?;
+    let mut document = input.document;
+    if document.id.trim().is_empty() {
+        document.id = next_connection_host_id();
+    }
+    validate_connection_host_document(&document)?;
+    let folder = validate_connection_host_folder(input.folder.as_deref())?;
+    let dirs = host_dirs(Path::new(&root.root_dir), &state.active_profile)?;
+    let dir = if let Some(directory) = input.directory {
+        let selected = PathBuf::from(directory);
+        if !dirs.iter().any(|dir| dir == &selected) {
+            return Err(invalid_error("connection host directory is not configured"));
         }
+        selected
+    } else {
+        dirs.into_iter()
+            .next()
+            .ok_or_else(|| missing_error("connection host directory is not configured"))?
     };
-    Ok(HostEntry {
-        id,
-        path: path.to_string_lossy().into_owned(),
-        document,
-    })
-}
-
-#[tauri::command]
-#[specta::specta]
-pub(crate) fn list_hosts(app: AppHandle) -> Result<Vec<HostEntry>> {
-    let root = ensure_layout(&app)?;
-    let state = load_state(Path::new(&root.state_path))?;
-    load_host_entries(Path::new(&root.root_dir), &state)
-}
-
-#[tauri::command]
-#[specta::specta]
-pub(crate) fn create_host(app: AppHandle, document: HostConfigDocument) -> Result<HostEntry> {
-    let root = ensure_layout(&app)?;
-    let state = load_state(Path::new(&root.state_path))?;
-    let value = config_table_to_toml(&document.root)?;
-    let id = hash_toml_value(&value)?;
-    let dir = host_dirs(Path::new(&root.root_dir), &state.active_profile)?
-        .into_iter()
-        .next()
-        .ok_or_else(|| missing_error("host directory is not configured"))?;
-    fs::create_dir_all(&dir).map_err(io_error)?;
-    let path = dir.join(format!("{id}.toml"));
-    write_document(&path, &document.root)?;
+    let path = connection_host_file_path(&dir, folder, &document.id);
+    if path.exists() {
+        return Err(invalid_error(format!(
+            "connection host {} already exists",
+            document.id
+        )));
+    }
+    ensure_parent(&path)?;
+    write_connection_host_document(&path, &document)?;
     emit_change(&app);
-    Ok(HostEntry {
-        id,
-        path: path.to_string_lossy().into_owned(),
-        document,
-    })
+    Ok(connection_host_entry_from_path(&dir, path, document))
 }
 
 #[tauri::command]
 #[specta::specta]
-pub(crate) fn update_host(app: AppHandle, input: HostDocumentInput) -> Result<HostEntry> {
+pub(crate) fn update_connection_host(
+    app: AppHandle,
+    input: ConnectionHostDocumentInput,
+) -> Result<ConnectionHostEntry> {
     let root = ensure_layout(&app)?;
     let state = load_state(Path::new(&root.state_path))?;
     let old_path = if let Some(id) = input.id.clone() {
-        host_path_from_id(Path::new(&root.root_dir), &state.active_profile, &id)?
+        connection_host_path_from_id(Path::new(&root.root_dir), &state.active_profile, &id)?
     } else {
-        return Err(invalid_error("host id is required for update"));
+        return Err(invalid_error("connection host id is required for update"));
     };
-    let value = config_table_to_toml(&input.document.root)?;
-    let new_id = hash_toml_value(&value)?;
-    let new_path = old_path
-        .parent()
-        .ok_or_else(|| invalid_error("invalid host path"))?
-        .join(format!("{new_id}.toml"));
+    validate_connection_host_document(&input.document)?;
+    let root_path = Path::new(&root.root_dir);
+    let base = connection_host_base_dir_for_path(root_path, &state.active_profile, &old_path)?;
+    let folder = validate_connection_host_folder(input.folder.as_deref())?;
+    let new_path = connection_host_file_path(&base, folder, &input.document.id);
     if old_path != new_path {
         if new_path.exists() {
-            fs::remove_file(&old_path).map_err(io_error)?;
+            return Err(invalid_error(format!(
+                "connection host {} already exists",
+                input.document.id
+            )));
         } else {
+            ensure_parent(&new_path)?;
             fs::rename(&old_path, &new_path).map_err(io_error)?;
         }
     }
-    write_document(&new_path, &input.document.root)?;
+    write_connection_host_document(&new_path, &input.document)?;
+    if let Some(parent) = old_path.parent() {
+        remove_empty_host_dirs(&base, parent);
+    }
     emit_change(&app);
-    Ok(HostEntry {
-        id: new_id,
-        path: new_path.to_string_lossy().into_owned(),
-        document: input.document,
-    })
+    Ok(connection_host_entry_from_path(
+        &base,
+        new_path,
+        input.document,
+    ))
 }
 
 #[tauri::command]
 #[specta::specta]
-pub(crate) fn delete_host(app: AppHandle, id: String) -> Result<()> {
+pub(crate) fn delete_connection_host(app: AppHandle, id: String) -> Result<()> {
     let root = ensure_layout(&app)?;
     let state = load_state(Path::new(&root.state_path))?;
-    let path = host_path_from_id(Path::new(&root.root_dir), &state.active_profile, &id)?;
-    fs::remove_file(path).map_err(io_error)?;
+    if id == DEFAULT_LOCAL_HOST_ID {
+        let mut next_state = state.clone();
+        next_state.default_local_host_removed = true;
+        save_state(Path::new(&root.state_path), &next_state)?;
+    } else {
+        let path =
+            connection_host_path_from_id(Path::new(&root.root_dir), &state.active_profile, &id)?;
+        let root_path = Path::new(&root.root_dir);
+        let base = connection_host_base_dir_for_path(root_path, &state.active_profile, &path)?;
+        let parent = path.parent().map(Path::to_path_buf);
+        fs::remove_file(path).map_err(io_error)?;
+        if let Some(parent) = parent {
+            remove_empty_host_dirs(&base, &parent);
+        }
+    }
+    if root.default_host == id {
+        let setting_path = vec!["default_host".to_string()];
+        let profile_path = profile_path(Path::new(&root.root_dir), &root.active_profile);
+        let mut profile = read_profile_document_from_path(&profile_path)?;
+        if remove_config_path(&mut profile.root, &setting_path)? {
+            write_document(&profile_path, &profile.root)?;
+        } else {
+            let main_path = Path::new(&root.main_config_path);
+            let mut document = read_main_config_from_path(main_path)?;
+            remove_config_path(&mut document.root, &setting_path)?;
+            write_document(main_path, &document.root)?;
+        }
+    }
+    delete_keyring_entries_for_connection_host(&id);
     emit_change(&app);
     Ok(())
+}
+
+#[tauri::command]
+#[specta::specta]
+pub(crate) fn repair_connection_host_id(app: AppHandle, id: String) -> Result<ConnectionHostEntry> {
+    let root = ensure_layout(&app)?;
+    let state = load_state(Path::new(&root.state_path))?;
+    let root_path = Path::new(&root.root_dir);
+    let path = connection_host_path_from_id(root_path, &state.active_profile, &id)?;
+    let base = connection_host_base_dir_for_path(root_path, &state.active_profile, &path)?;
+    let mut document = read_connection_host_document_from_path(&path)?;
+    let old_id = document.id.clone();
+    document.id = next_connection_host_id();
+    let new_path = path
+        .parent()
+        .ok_or_else(|| invalid_error("invalid connection host path"))?
+        .join(format!("{}.toml", document.id));
+    write_connection_host_document(&new_path, &document)?;
+    if path != new_path {
+        fs::remove_file(path).map_err(io_error)?;
+    }
+    delete_keyring_entries_for_connection_host(&old_id);
+    emit_change(&app);
+    Ok(connection_host_entry_from_path(&base, new_path, document))
+}
+
+fn delete_keyring_entries_for_connection_host(id: &str) {
+    let _ = keyring::use_native_store(true);
+    for account in [
+        format!("connection-host:{id}:password"),
+        format!("connection-host:{id}:key_passphrase"),
+    ] {
+        if let Ok(entry) = KeyringEntry::new("nocturne", &account) {
+            let _ = entry.delete_credential();
+        }
+    }
+    let mut spec = std::collections::HashMap::new();
+    spec.insert("service", "nocturne");
+    if let Ok(entries) = KeyringEntry::search(&spec) {
+        let prefix = format!("connection-host:{id}:");
+        for entry in entries {
+            let Some((service, account)) = entry.get_specifiers() else {
+                continue;
+            };
+            if service == "nocturne" && account.starts_with(&prefix) {
+                let _ = entry.delete_credential();
+            }
+        }
+    }
 }
 
 #[tauri::command]
@@ -938,6 +1904,63 @@ pub(crate) fn set_host_dirs_command(
 
 #[tauri::command]
 #[specta::specta]
+pub(crate) fn set_openssh_config_files_command(
+    app: AppHandle,
+    input: HostDirsInput,
+) -> Result<ConfigRootInfo> {
+    let root = ensure_layout(&app)?;
+    let path = Path::new(&root.main_config_path);
+    let mut document = read_main_config_from_path(path)?;
+    document.root.values.insert(
+        "openssh_config_files".to_string(),
+        ConfigValue::Array(input.dirs.into_iter().map(ConfigValue::String).collect()),
+    );
+    write_document(path, &document.root)?;
+    emit_change(&app);
+    watch_config_command(app.clone())?;
+    root_paths(&app)
+}
+
+#[tauri::command]
+#[specta::specta]
+pub(crate) fn set_default_host_command(app: AppHandle, host_id: String) -> Result<ConfigRootInfo> {
+    let root = ensure_layout(&app)?;
+    if host_id == DEFAULT_LOCAL_HOST_ID {
+        let mut state = load_state(Path::new(&root.state_path))?;
+        if state.default_local_host_removed {
+            state.default_local_host_removed = false;
+            save_state(Path::new(&root.state_path), &state)?;
+        }
+    }
+    let host = connection_host_by_id(&app, &host_id)?;
+    if host
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.severity == ConnectionDiagnosticSeverity::Error)
+    {
+        return Err(invalid_error(
+            "default host cannot have blocking diagnostics",
+        ));
+    }
+    let setting_path = ["default_host"];
+    let root_path = Path::new(&root.root_dir);
+    let profile_path = profile_path(root_path, &root.active_profile);
+    let mut profile = read_profile_document_from_path(&profile_path)?;
+    if has_config_path(&profile.root, &setting_path) {
+        write_string_config_path(&mut profile.root, &setting_path, host_id)?;
+        write_document(&profile_path, &profile.root)?;
+    } else {
+        let path = Path::new(&root.main_config_path);
+        let mut main = read_main_config_from_path(path)?;
+        write_string_config_path(&mut main.root, &setting_path, host_id)?;
+        write_document(path, &main.root)?;
+    }
+    emit_change(&app);
+    root_paths(&app)
+}
+
+#[tauri::command]
+#[specta::specta]
 pub(crate) fn watch_config_command(app: AppHandle) -> Result<()> {
     let root = ensure_layout(&app)?;
     let state = load_state(Path::new(&root.state_path))?;
@@ -948,13 +1971,58 @@ pub(crate) fn watch_config_command(app: AppHandle) -> Result<()> {
         Path::new(&root.root_dir).join(TERMINAL_COLOR_SCHEMES_DIR),
     ];
     paths.extend(host_dirs(Path::new(&root.root_dir), &state.active_profile)?);
+    paths.extend(
+        load_application_connection_config(Path::new(&root.root_dir), &state.active_profile)?
+            .openssh_config_files,
+    );
+    paths.push(Path::new(&root.root_dir).join(KNOWN_HOSTS_FILE));
     watch_config(app, paths)
+}
+
+#[tauri::command]
+#[specta::specta]
+pub(crate) fn list_ssh_known_hosts(app: AppHandle) -> Result<Vec<String>> {
+    let root = ensure_layout(&app)?;
+    let path = Path::new(&root.root_dir).join(KNOWN_HOSTS_FILE);
+    let store = SshTrustStore::load(&path)?;
+    Ok(store.ssh.into_iter().map(|entry| entry.target).collect())
+}
+
+pub(crate) fn ssh_known_hosts_path(app: &AppHandle<impl Runtime>) -> Result<PathBuf> {
+    let root = ensure_layout(app)?;
+    Ok(Path::new(&root.root_dir).join(KNOWN_HOSTS_FILE))
+}
+
+pub(crate) fn connection_host_by_id(
+    app: &AppHandle<impl Runtime>,
+    id: &str,
+) -> Result<ConnectionHostEntry> {
+    let root = ensure_layout(app)?;
+    let state = load_state(Path::new(&root.state_path))?;
+    let entries = load_connection_host_entries(Path::new(&root.root_dir), &state)?;
+    entries
+        .into_iter()
+        .find(|entry| entry.id == id)
+        .ok_or_else(|| missing_error(format!("connection host {id} not found")))
+}
+
+pub(crate) fn default_connection_host_id(app: &AppHandle<impl Runtime>) -> Result<String> {
+    let root = root_paths(app)?;
+    let configured = root.default_host;
+    if connection_host_by_id(app, &configured).is_ok() {
+        return Ok(configured);
+    }
+    Err(missing_error(format!(
+        "default connection host {configured} not found"
+    )))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::error::ConfigError;
+    use crate::types::{ConnectionProtocol, TelnetConnectionConfig};
+    use tempfile::tempdir;
 
     #[test]
     fn converts_toml_integer_to_decimal_string_for_ipc_contract() {
@@ -982,5 +2050,335 @@ mod tests {
         let error = config_value_to_toml(&value).expect_err("integer should not serialize");
 
         assert!(matches!(error, ConfigError::Invalid { .. }));
+    }
+
+    #[test]
+    fn connection_host_round_trips_with_stable_uuid_identity() {
+        let dir = tempdir().expect("temp dir");
+        let id = "018f6eb3-6f91-7410-bc43-f927b2236d94";
+        let path = dir.path().join(format!("{id}.toml"));
+        let document = ConnectionHostDocument {
+            version: 1,
+            id: id.to_string(),
+            name: "Production API".to_string(),
+            folder: Some("Production".to_string()),
+            icon_pack: Some("server".to_string()),
+            protocol: ConnectionProtocol::Ssh,
+            local: None,
+            ssh: Some(SshConnectionConfig {
+                hostname: "prod.example.com".to_string(),
+                port: 22,
+                username: Some("deploy".to_string()),
+                identity_file: Some("~/.ssh/id_ed25519".to_string()),
+                proxy_jump: Some("bastion".to_string()),
+                forward_agent: true,
+                server_alive_interval: Some(30),
+            }),
+            telnet: None,
+        };
+
+        write_connection_host_document(&path, &document).expect("write host");
+        let read = read_connection_host_document_from_path(&path).expect("read host");
+        let text = fs::read_to_string(&path).expect("host toml");
+
+        assert_eq!(read.id, id);
+        assert_eq!(read.name, "Production API");
+        assert_eq!(read.folder, None);
+        assert!(!text.contains("folder"));
+        assert_eq!(read.icon_pack.as_deref(), Some("server"));
+        assert_eq!(read.ssh.expect("ssh").hostname, "prod.example.com");
+    }
+
+    #[test]
+    fn connection_host_entries_derive_nested_folder_from_file_path() {
+        let root = tempdir().expect("temp dir");
+        let hosts_dir = root.path().join(DEFAULT_HOSTS_DIR);
+        fs::create_dir_all(root.path().join(PROFILES_DIR)).expect("profiles dir");
+        write_atomic(&root.path().join(MAIN_CONFIG_FILE), "").expect("main config");
+        write_atomic(
+            &root.path().join(PROFILES_DIR).join(DEFAULT_PROFILE_FILE),
+            "",
+        )
+        .expect("default profile");
+        fs::create_dir_all(hosts_dir.join("path").join("to")).expect("nested hosts dir");
+        let id = "018f6eb3-6f91-7410-bc43-f927b2236d94";
+        let document = ConnectionHostDocument {
+            version: 1,
+            id: id.to_string(),
+            name: "Nested".to_string(),
+            folder: Some("ignored".to_string()),
+            icon_pack: Some("server".to_string()),
+            protocol: ConnectionProtocol::Ssh,
+            local: None,
+            ssh: Some(SshConnectionConfig {
+                hostname: "nested.example.com".to_string(),
+                port: 22,
+                username: None,
+                identity_file: None,
+                proxy_jump: None,
+                forward_agent: false,
+                server_alive_interval: None,
+            }),
+            telnet: None,
+        };
+        write_connection_host_document(
+            &hosts_dir.join("path").join("to").join(format!("{id}.toml")),
+            &document,
+        )
+        .expect("write nested host");
+
+        let entries = load_connection_host_entries(root.path(), &AppStateFile::default())
+            .expect("list hosts");
+        let entry = entries
+            .iter()
+            .find(|entry| entry.id == id)
+            .expect("nested host entry");
+
+        assert_eq!(entry.document.folder.as_deref(), Some("path/to"));
+    }
+
+    #[test]
+    fn validate_connection_host_folder_rejects_absolute_and_parent_paths() {
+        assert!(validate_connection_host_folder(Some("team/prod"))
+            .expect("valid")
+            .is_some());
+        assert!(matches!(
+            validate_connection_host_folder(Some("../prod")),
+            Err(ConfigError::Invalid { .. })
+        ));
+        assert!(matches!(
+            validate_connection_host_folder(Some("/prod")),
+            Err(ConfigError::Invalid { .. })
+        ));
+    }
+
+    #[test]
+    fn connection_host_validation_rejects_missing_protocol_config() {
+        let document = ConnectionHostDocument {
+            version: 1,
+            id: "018f6eb3-6f91-7410-bc43-f927b2236d94".to_string(),
+            name: "Router".to_string(),
+            folder: None,
+            icon_pack: None,
+            protocol: ConnectionProtocol::Telnet,
+            local: None,
+            ssh: None,
+            telnet: None,
+        };
+
+        let error =
+            validate_connection_host_document(&document).expect_err("missing telnet config");
+
+        assert!(format!("{error}").contains("telnet connection host requires"));
+    }
+
+    #[test]
+    fn connection_host_entries_report_duplicate_uuids_and_filename_mismatch() {
+        let root = tempdir().expect("temp dir");
+        let hosts_dir = root.path().join(DEFAULT_HOSTS_DIR);
+        fs::create_dir_all(root.path().join(PROFILES_DIR)).expect("profiles dir");
+        write_atomic(&root.path().join(MAIN_CONFIG_FILE), "").expect("main config");
+        write_atomic(
+            &root.path().join(PROFILES_DIR).join(DEFAULT_PROFILE_FILE),
+            "",
+        )
+        .expect("default profile");
+        fs::create_dir_all(&hosts_dir).expect("hosts dir");
+        let id = "018f6eb3-6f91-7410-bc43-f927b2236d94";
+        let first = ConnectionHostDocument {
+            version: 1,
+            id: id.to_string(),
+            name: "A".to_string(),
+            folder: Some("Team A".to_string()),
+            icon_pack: Some("server".to_string()),
+            protocol: ConnectionProtocol::Ssh,
+            local: None,
+            ssh: Some(SshConnectionConfig {
+                hostname: "a.example.com".to_string(),
+                port: 22,
+                username: None,
+                identity_file: None,
+                proxy_jump: None,
+                forward_agent: false,
+                server_alive_interval: None,
+            }),
+            telnet: None,
+        };
+        let second = ConnectionHostDocument {
+            version: 1,
+            id: id.to_string(),
+            name: "B".to_string(),
+            folder: Some("Routers".to_string()),
+            icon_pack: Some("network".to_string()),
+            protocol: ConnectionProtocol::Telnet,
+            local: None,
+            ssh: None,
+            telnet: Some(TelnetConnectionConfig {
+                hostname: "192.0.2.1".to_string(),
+                port: 23,
+            }),
+        };
+        write_connection_host_document(&hosts_dir.join(format!("{id}.toml")), &first)
+            .expect("write first");
+        write_connection_host_document(&hosts_dir.join("different-name.toml"), &second)
+            .expect("write second");
+
+        let state = AppStateFile::default();
+        let entries = load_connection_host_entries(root.path(), &state).expect("list hosts");
+        let user_entries = entries
+            .iter()
+            .filter(|entry| entry.source == ConnectionHostSource::User)
+            .collect::<Vec<_>>();
+
+        assert_eq!(user_entries.len(), 2);
+        assert!(user_entries.iter().all(|entry| {
+            entry
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "duplicate_id")
+        }));
+        assert!(user_entries.iter().any(|entry| {
+            entry
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "filename_id_mismatch")
+        }));
+    }
+
+    #[test]
+    fn openssh_parser_resolves_include_and_match_with_wildcards() {
+        let root = tempdir().expect("temp dir");
+        let include = root.path().join("included.conf");
+        write_atomic(
+            &include,
+            r#"
+            Host prod-*
+              User deploy
+
+            Match host prod-api
+              Port 2200
+            "#,
+        )
+        .expect("include");
+        let config = root.path().join("config");
+        write_atomic(
+            &config,
+            &format!(
+                r#"
+                Include {}
+
+                Host prod-api
+                  HostName prod.example.com
+                  IdentityFile ~/.ssh/prod
+
+                Host *
+                  ForwardAgent yes
+                "#,
+                include.display()
+            ),
+        )
+        .expect("config");
+
+        let parsed = parse_openssh_config(&config).expect("parse openssh config");
+        let hosts = parsed_to_openssh_hosts(parsed, &config);
+        let prod = hosts
+            .iter()
+            .find(|host| host.document.name == "prod-api")
+            .expect("prod-api host");
+        let ssh = prod.document.ssh.as_ref().expect("ssh config");
+
+        assert_eq!(ssh.hostname, "prod.example.com");
+        assert_eq!(ssh.username.as_deref(), Some("deploy"));
+        assert_eq!(ssh.port, 2200);
+        assert_eq!(prod.document.folder.as_deref(), Some("config"));
+        assert_eq!(prod.document.icon_pack.as_deref(), Some("ssh"));
+        let expected_identity = expand_home("~/.ssh/prod");
+        assert_eq!(
+            ssh.identity_file.as_deref(),
+            Some(expected_identity.as_str())
+        );
+        assert!(ssh.forward_agent);
+    }
+
+    #[test]
+    fn openssh_hosts_use_config_file_stem_as_read_only_folder() {
+        let root = tempdir().expect("temp dir");
+        let config = root.path().join("work.toml");
+        write_atomic(
+            &config,
+            r#"
+            Host db
+              HostName db.example.com
+            "#,
+        )
+        .expect("config");
+
+        let hosts = parsed_to_openssh_hosts(parse_openssh_config(&config).expect("parse"), &config);
+        let host = hosts.first().expect("host");
+
+        assert_eq!(host.source, ConnectionHostSource::OpenSshConfig);
+        assert!(host.read_only);
+        assert_eq!(host.document.folder.as_deref(), Some("work"));
+    }
+
+    #[test]
+    fn openssh_parser_does_not_show_wildcard_host_entries() {
+        let root = tempdir().expect("temp dir");
+        let config = root.path().join("config");
+        write_atomic(
+            &config,
+            r#"
+            Host *
+              User deploy
+
+            Host db
+              HostName db.example.com
+            "#,
+        )
+        .expect("config");
+
+        let hosts = parsed_to_openssh_hosts(parse_openssh_config(&config).expect("parse"), &config);
+
+        assert_eq!(hosts.len(), 1);
+        assert_eq!(hosts[0].document.name, "db");
+        assert_eq!(
+            hosts[0]
+                .document
+                .ssh
+                .as_ref()
+                .expect("ssh")
+                .username
+                .as_deref(),
+            Some("deploy")
+        );
+    }
+
+    #[test]
+    fn openssh_match_exec_is_reported_but_not_applied() {
+        let root = tempdir().expect("temp dir");
+        let config = root.path().join("config");
+        write_atomic(
+            &config,
+            r#"
+            Host prod
+              HostName prod.example.com
+
+            Match exec "echo unsafe"
+              User root
+            "#,
+        )
+        .expect("config");
+
+        let hosts = parsed_to_openssh_hosts(parse_openssh_config(&config).expect("parse"), &config);
+        let prod = hosts.first().expect("host");
+
+        assert_eq!(
+            prod.document.ssh.as_ref().expect("ssh").username.as_deref(),
+            None
+        );
+        assert!(prod
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "unsupported_match_exec"));
     }
 }

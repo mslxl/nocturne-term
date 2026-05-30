@@ -34,3 +34,13 @@ specta = "=2.0.0-rc.25"
 tauri-specta = { version = "=2.0.0-rc.25", features = ["typescript"] }
 specta-typescript = "0.0.12"
 tauri-plugin-clipboard-manager = "2"
+ssh2 = "0.9.5"
+keyring = "4.0.1"
+tauri-plugin-notification = "2.3.3"
+uuid = { version = "1.23.2", features = ["v4", "serde"] }
+dirs = "6.0.0"
+glob = "0.3.3"
+keyring-core = "1.0.0"
+
+[dev-dependencies]
+tempfile = "3.27.0"

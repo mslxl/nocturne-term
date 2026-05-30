@@ -1,6 +1,6 @@
 import type { AppLanguage } from "$lib/config/document";
 
-export type PaletteItemKind = "command" | "tab" | "profile" | "theme";
+export type PaletteItemKind = "command" | "tab" | "profile" | "theme" | "connection-host";
 
 export type PaletteItem = {
   id: string;
@@ -134,6 +134,7 @@ function orderedFuzzyScore(text: string, query: string): number {
 }
 
 function kindBoost(kind: PaletteItemKind): number {
+  if (kind === "connection-host") return 18;
   if (kind === "command") return 12;
   if (kind === "theme") return 8;
   return 0;

@@ -1,47 +1,83 @@
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, VecDeque},
     env,
     io::{Read, Write},
+    net::{TcpListener, TcpStream},
+    path::{Path, PathBuf},
     sync::{
         atomic::{AtomicU64, Ordering},
+        mpsc::{self, Receiver, Sender},
         Arc, Mutex, OnceLock,
     },
     thread,
+    time::Duration,
 };
 
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
+use keyring_core::Entry as KeyringEntry;
 use portable_pty::{native_pty_system, Child, ChildKiller, CommandBuilder, MasterPty, PtySize};
+use ssh2::{Channel, HashType, HostKeyType, Session};
 use tauri::{AppHandle, Emitter};
 
 use crate::{
-    config::effective_application_config,
+    config::{
+        connection_host_by_id, default_connection_host_id, effective_application_config,
+        ssh_known_hosts_path,
+    },
     error::{invalid_error, missing_error, terminal_error, Result},
+    ssh_trust::{ssh_trust_target, SshTrustStore},
     terminal_schemes::{
         builtin_dark_scheme, builtin_light_scheme, scheme_to_terminal_theme,
         terminal_color_scheme_by_id,
     },
     types::{
-        CreateTerminalSessionInput, ExistingTerminalSessionInput, TabBarOrientation,
+        ConnectionDiagnosticSeverity, ConnectionHostEntry, ConnectionProtocol,
+        CreateHostTerminalSessionInput, ExistingTerminalSessionInput, LocalConnectionConfig,
+        SshConnectionConfig, SshCredentialInput, SshCredentialKind, TabBarOrientation,
         TerminalColorSchemeVariant, TerminalCursorStyle, TerminalExitEvent, TerminalInput,
         TerminalOutputBacklogInput, TerminalOutputEvent, TerminalPadding, TerminalRenderer,
         TerminalSessionInfo, TerminalSessionOwnershipInput, TerminalSettings,
-        TerminalSettingsInput, TerminalSizeInput, TerminalTheme,
+        TerminalSettingsInput, TerminalSizeInput, TerminalTheme, TerminalTransportKind,
+        TerminalTransportState, TerminalTransportStateEvent,
     },
 };
 
 const TERMINAL_OUTPUT_EVENT: &str = "terminal://output";
 const TERMINAL_EXIT_EVENT: &str = "terminal://exit";
+const TERMINAL_TRANSPORT_STATE_EVENT: &str = "terminal://transport-state";
 const OUTPUT_BACKLOG_LIMIT: usize = 512 * 1024;
+const SSH_PENDING_WRITE_LIMIT: usize = 1024 * 1024;
+const SSH_WRITE_CHUNK_LIMIT: usize = 8192;
 
 struct TerminalSession {
-    master: Mutex<Box<dyn MasterPty + Send>>,
-    writer: Mutex<Box<dyn Write + Send>>,
-    killer: Mutex<Box<dyn ChildKiller + Send + Sync>>,
+    backend: Mutex<TerminalBackend>,
     info: Mutex<TerminalSessionInfo>,
     window_label: Mutex<String>,
     output_backlog: Mutex<Vec<u8>>,
     output_sequence: Mutex<u64>,
     output_backlog_start_sequence: Mutex<u64>,
+}
+
+enum TerminalBackend {
+    Local {
+        master: Box<dyn MasterPty + Send>,
+        writer: Box<dyn Write + Send>,
+        killer: Box<dyn ChildKiller + Send + Sync>,
+    },
+    Ssh {
+        commands: Sender<SshWorkerCommand>,
+    },
+}
+
+enum SshWorkerCommand {
+    Write(Vec<u8>),
+    Resize(PtySize),
+    Close,
+}
+
+enum SshPumpAction {
+    Continue,
+    Closed,
 }
 
 #[derive(Default)]
@@ -505,6 +541,16 @@ fn terminal_env_from_config(config: &toml::Value) -> Result<BTreeMap<String, Str
     optional_string_map(table, "env").map(Option::unwrap_or_default)
 }
 
+fn apply_local_host_config(settings: &mut TerminalSettings, local: &LocalConnectionConfig) {
+    if let Some(command) = &local.command {
+        settings.command = Some(command.clone());
+        settings.args = local.args.clone();
+    }
+    if let Some(cwd) = &local.cwd {
+        settings.cwd = Some(expand_terminal_home(cwd));
+    }
+}
+
 fn validated_pty_size(
     cols: u16,
     rows: u16,
@@ -574,8 +620,13 @@ fn remove_terminal_session(id: &str) {
 }
 
 fn kill_terminal_session(session: Arc<TerminalSession>) -> Result<()> {
-    let mut killer = session.killer.lock().unwrap();
-    killer.kill().map_err(terminal_error)
+    let mut backend = session.backend.lock().unwrap();
+    match &mut *backend {
+        TerminalBackend::Local { killer, .. } => killer.kill().map_err(terminal_error),
+        TerminalBackend::Ssh { commands } => commands
+            .send(SshWorkerCommand::Close)
+            .map_err(|error| terminal_error(format!("failed to close ssh session: {error}"))),
+    }
 }
 
 pub(crate) fn close_terminal_sessions_for_window(window_label: &str) {
@@ -610,6 +661,12 @@ fn session_by_id(id: &str) -> Result<Arc<TerminalSession>> {
         .get(id)
         .cloned()
         .ok_or_else(|| missing_error(format!("terminal session {id} not found")))
+}
+
+fn terminal_session_missing_error(id: &str) -> crate::error::ConfigError {
+    terminal_error(format!(
+        "terminal session {id} is no longer active; press any key to reconnect"
+    ))
 }
 
 fn push_output_backlog(session_id: &str, bytes: &[u8]) -> u64 {
@@ -674,6 +731,724 @@ fn spawn_terminal_waiter(app: AppHandle, session_id: String, mut child: Box<dyn 
     });
 }
 
+fn update_terminal_transport_state(
+    app: &AppHandle,
+    session_id: &str,
+    state: TerminalTransportState,
+) {
+    let Ok(session) = session_by_id(session_id) else {
+        return;
+    };
+    if let Ok(mut info) = session.info.lock() {
+        info.transport_state = state.clone();
+    };
+    let _ = app.emit(
+        TERMINAL_TRANSPORT_STATE_EVENT,
+        TerminalTransportStateEvent {
+            session_id: session_id.to_string(),
+            state,
+        },
+    );
+}
+
+fn emit_terminal_exit(
+    app: &AppHandle,
+    session_id: String,
+    exit_code: Option<u32>,
+    signal: Option<String>,
+) {
+    remove_terminal_session(&session_id);
+    let _ = app.emit(
+        TERMINAL_EXIT_EVENT,
+        TerminalExitEvent {
+            session_id,
+            exit_code,
+            signal,
+        },
+    );
+}
+
+struct SshWorkerInput {
+    app: AppHandle,
+    session_id: String,
+    display_name: String,
+    host_id: String,
+    ssh: SshConnectionConfig,
+    username: String,
+    size: PtySize,
+    trust_path: PathBuf,
+    accept_new_host_key: bool,
+    update_changed_host_key: bool,
+    credential: Option<SshCredentialInput>,
+    save_credential: bool,
+}
+
+struct PreparedSshSession {
+    channel: Channel,
+    jump_guards: Vec<thread::JoinHandle<()>>,
+}
+
+struct ProxyJumpChain {
+    stream: TcpStream,
+    guards: Vec<thread::JoinHandle<()>>,
+}
+
+fn spawn_ssh_worker(
+    app: AppHandle,
+    session_id: String,
+    input: SshWorkerInput,
+    receiver: Receiver<SshWorkerCommand>,
+) {
+    thread::spawn(move || {
+        update_terminal_transport_state(&app, &session_id, TerminalTransportState::Connecting);
+        let prepared = match prepare_ssh_session(&input) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                update_terminal_transport_state(&app, &session_id, TerminalTransportState::Failed);
+                emit_terminal_exit(&app, session_id, None, Some(error.to_string()));
+                return;
+            }
+        };
+        let mut channel = prepared.channel;
+        let result = run_ssh_worker(&app, &session_id, &mut channel, receiver);
+        if let Err(error) = result {
+            update_terminal_transport_state(&app, &session_id, TerminalTransportState::Failed);
+            emit_terminal_exit(&app, session_id, None, Some(error.to_string()));
+        }
+        drop(prepared.jump_guards);
+    });
+}
+
+fn run_ssh_worker(
+    app: &AppHandle,
+    session_id: &str,
+    channel: &mut Channel,
+    receiver: Receiver<SshWorkerCommand>,
+) -> Result<()> {
+    let signal = pump_ssh_channel(app, session_id, channel, receiver)?;
+    update_terminal_transport_state(app, session_id, TerminalTransportState::Disconnected);
+    emit_terminal_exit(app, session_id.to_string(), Some(0), signal);
+    Ok(())
+}
+
+fn prepare_ssh_session(input: &SshWorkerInput) -> Result<PreparedSshSession> {
+    let mut jump_guards = Vec::new();
+    let tcp = if let Some(proxy_jump) = input.ssh.proxy_jump.as_deref() {
+        let chain = connect_proxy_jump_chain(input, proxy_jump)?;
+        jump_guards = chain.guards;
+        chain.stream
+    } else {
+        TcpStream::connect((input.ssh.hostname.as_str(), input.ssh.port)).map_err(terminal_error)?
+    };
+    tcp.set_nodelay(true).map_err(terminal_error)?;
+    let tcp_mode = tcp.try_clone().map_err(terminal_error)?;
+
+    let mut session = Session::new().map_err(terminal_error)?;
+    session.set_tcp_stream(tcp);
+    session.handshake().map_err(terminal_error)?;
+    update_terminal_transport_state(
+        &input.app,
+        &input.session_id,
+        TerminalTransportState::VerifyingHostKey,
+    );
+    verify_ssh_host_key(&session, &input)?;
+    authenticate_ssh_session(&session, input)?;
+    update_terminal_transport_state(
+        &input.app,
+        &input.session_id,
+        TerminalTransportState::Connected,
+    );
+
+    let mut channel = session.channel_session().map_err(terminal_error)?;
+    channel
+        .request_pty(
+            "xterm-256color",
+            None,
+            Some((
+                input.size.cols as u32,
+                input.size.rows as u32,
+                input.size.pixel_width as u32,
+                input.size.pixel_height as u32,
+            )),
+        )
+        .map_err(terminal_error)?;
+    channel.shell().map_err(terminal_error)?;
+    tcp_mode.set_nonblocking(true).map_err(terminal_error)?;
+    session.set_blocking(false);
+    Ok(PreparedSshSession {
+        channel,
+        jump_guards,
+    })
+}
+
+struct ProxyBridge {
+    stream: TcpStream,
+    guard: thread::JoinHandle<()>,
+}
+
+fn connect_proxy_jump_chain(input: &SshWorkerInput, proxy_jump: &str) -> Result<ProxyJumpChain> {
+    let jumps = parse_proxy_jump_chain(proxy_jump)?;
+    let mut guards = Vec::new();
+    let mut current_stream: Option<TcpStream> = None;
+    for (index, jump) in jumps.iter().enumerate() {
+        let jump_stream = if index == 0 {
+            TcpStream::connect((jump.hostname.as_str(), jump.port)).map_err(terminal_error)?
+        } else {
+            current_stream
+                .take()
+                .ok_or_else(|| terminal_error("proxy jump bridge is missing"))?
+        };
+        let target = jumps.get(index + 1).unwrap_or(&input.ssh);
+        let bridge = connect_proxy_jump_hop(input, jump, jump_stream, target)?;
+        guards.push(bridge.guard);
+        current_stream = Some(bridge.stream);
+    }
+    let final_stream = current_stream
+        .take()
+        .ok_or_else(|| invalid_error("ProxyJump cannot be empty"))?;
+    Ok(ProxyJumpChain {
+        stream: final_stream,
+        guards,
+    })
+}
+
+fn connect_proxy_jump_hop(
+    input: &SshWorkerInput,
+    jump: &SshConnectionConfig,
+    jump_tcp: TcpStream,
+    target: &SshConnectionConfig,
+) -> Result<ProxyBridge> {
+    jump_tcp.set_nodelay(true).map_err(terminal_error)?;
+    let jump_tcp_mode = jump_tcp.try_clone().map_err(terminal_error)?;
+    let mut jump_session = Session::new().map_err(terminal_error)?;
+    jump_session.set_tcp_stream(jump_tcp);
+    jump_session.handshake().map_err(terminal_error)?;
+    let jump_input = SshWorkerInput {
+        app: input.app.clone(),
+        session_id: input.session_id.clone(),
+        display_name: format!("{} via {}", input.display_name, jump.hostname),
+        host_id: format!("proxy-jump:{}", ssh_trust_target(&jump.hostname, jump.port)),
+        ssh: jump.clone(),
+        username: jump
+            .username
+            .clone()
+            .unwrap_or_else(|| input.username.clone()),
+        size: input.size,
+        trust_path: input.trust_path.clone(),
+        accept_new_host_key: input.accept_new_host_key,
+        update_changed_host_key: input.update_changed_host_key,
+        credential: input.credential.clone(),
+        save_credential: input.save_credential,
+    };
+    verify_ssh_host_key(&jump_session, &jump_input)?;
+    authenticate_ssh_session(&jump_session, &jump_input)?;
+    jump_session.set_blocking(false);
+    let remote = jump_session
+        .channel_direct_tcpip(&target.hostname, target.port, None)
+        .map_err(terminal_error)?;
+    jump_tcp_mode
+        .set_nonblocking(true)
+        .map_err(terminal_error)?;
+    let listener = TcpListener::bind(("127.0.0.1", 0)).map_err(terminal_error)?;
+    let local_addr = listener.local_addr().map_err(terminal_error)?;
+    let session_id = input.session_id.clone();
+    let guard = thread::spawn(move || {
+        if let Ok((local, _)) = listener.accept() {
+            bridge_proxy_channel(local, remote);
+        }
+        drop(jump_session);
+        let _ = session_id;
+    });
+    let stream = TcpStream::connect(local_addr).map_err(terminal_error)?;
+    Ok(ProxyBridge { stream, guard })
+}
+
+fn bridge_proxy_channel(mut local: TcpStream, mut remote: Channel) {
+    let _ = local.set_nonblocking(true);
+    let mut local_buffer = [0_u8; 8192];
+    let mut remote_buffer = [0_u8; 8192];
+    let mut pending_remote_writes = VecDeque::new();
+    let mut pending_local_writes = VecDeque::new();
+    loop {
+        let mut progressed = false;
+        match drain_ssh_pending_writes(&mut remote, &mut pending_remote_writes) {
+            Ok(true) => progressed = true,
+            Ok(false) => {}
+            Err(_) => break,
+        }
+        match drain_tcp_pending_writes(&mut local, &mut pending_local_writes) {
+            Ok(true) => progressed = true,
+            Ok(false) => {}
+            Err(_) => break,
+        }
+        match local.read(&mut local_buffer) {
+            Ok(0) => break,
+            Ok(size) => {
+                progressed = true;
+                if queue_pending_bytes(&mut pending_remote_writes, &local_buffer[..size]).is_err() {
+                    break;
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(_) => break,
+        }
+        match remote.read(&mut remote_buffer) {
+            Ok(0) => {
+                if remote.eof() {
+                    break;
+                }
+            }
+            Ok(size) => {
+                progressed = true;
+                if queue_pending_bytes(&mut pending_local_writes, &remote_buffer[..size]).is_err() {
+                    break;
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(_) => break,
+        }
+        if !progressed {
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+    let _ = remote.close();
+}
+
+fn parse_proxy_jump_chain(value: &str) -> Result<Vec<SshConnectionConfig>> {
+    let jumps = value
+        .split(',')
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .map(parse_proxy_jump_hop)
+        .collect::<Result<Vec<_>>>()?;
+    if jumps.is_empty() {
+        return Err(invalid_error("ProxyJump cannot be empty"));
+    }
+    Ok(jumps)
+}
+
+fn parse_proxy_jump_hop(value: &str) -> Result<SshConnectionConfig> {
+    let (username, host_port) = match value.rsplit_once('@') {
+        Some((user, host)) if !user.trim().is_empty() => (Some(user.to_string()), host),
+        _ => (None, value),
+    };
+    let (hostname, port) = parse_host_port(host_port, 22)?;
+    Ok(SshConnectionConfig {
+        hostname,
+        port,
+        username,
+        identity_file: None,
+        proxy_jump: None,
+        forward_agent: false,
+        server_alive_interval: None,
+    })
+}
+
+fn parse_host_port(value: &str, default_port: u16) -> Result<(String, u16)> {
+    if let Some(rest) = value.strip_prefix('[') {
+        let (host, port_text) = rest
+            .split_once("]:")
+            .ok_or_else(|| invalid_error("invalid bracketed host:port"))?;
+        let port = port_text
+            .parse::<u16>()
+            .map_err(|_| invalid_error("invalid ProxyJump port"))?;
+        return Ok((host.to_string(), port));
+    }
+    if let Some((host, port_text)) = value.rsplit_once(':') {
+        if !host.contains(':') {
+            let port = port_text
+                .parse::<u16>()
+                .map_err(|_| invalid_error("invalid ProxyJump port"))?;
+            return Ok((host.to_string(), port));
+        }
+    }
+    Ok((value.to_string(), default_port))
+}
+
+fn pump_ssh_channel(
+    app: &AppHandle,
+    session_id: &str,
+    channel: &mut Channel,
+    receiver: Receiver<SshWorkerCommand>,
+) -> Result<Option<String>> {
+    let mut buffer = [0_u8; 8192];
+    let mut pending_writes = VecDeque::new();
+    loop {
+        for _ in 0..16 {
+            match receiver.try_recv() {
+                Ok(command) => {
+                    if matches!(
+                        handle_ssh_worker_command(channel, &mut pending_writes, command)?,
+                        SshPumpAction::Closed
+                    ) {
+                        return Ok(Some("closed".to_string()));
+                    }
+                }
+                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    let _ = channel.close();
+                    return Ok(Some("closed".to_string()));
+                }
+            }
+        }
+        let wrote = drain_ssh_pending_writes(channel, &mut pending_writes)?;
+        match channel.read(&mut buffer) {
+            Ok(0) => {
+                if channel.eof() {
+                    return Ok(None);
+                }
+            }
+            Ok(size) => {
+                let sequence = push_output_backlog(session_id, &buffer[..size]);
+                app.emit(
+                    TERMINAL_OUTPUT_EVENT,
+                    TerminalOutputEvent {
+                        session_id: session_id.to_string(),
+                        sequence: sequence.to_string(),
+                        backlog: false,
+                        data: BASE64_STANDARD.encode(&buffer[..size]),
+                    },
+                )
+                .map_err(terminal_error)?;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                if wrote {
+                    continue;
+                }
+                thread::sleep(Duration::from_millis(12));
+            }
+            Err(error) => return Err(terminal_error(error)),
+        }
+    }
+}
+
+fn handle_ssh_worker_command(
+    channel: &mut Channel,
+    pending_writes: &mut VecDeque<u8>,
+    command: SshWorkerCommand,
+) -> Result<SshPumpAction> {
+    match command {
+        SshWorkerCommand::Write(bytes) => {
+            queue_pending_bytes(pending_writes, &bytes)?;
+            drain_ssh_pending_writes(channel, pending_writes)?;
+            Ok(SshPumpAction::Continue)
+        }
+        SshWorkerCommand::Resize(size) => {
+            channel
+                .request_pty_size(
+                    size.cols as u32,
+                    size.rows as u32,
+                    Some(size.pixel_width as u32),
+                    Some(size.pixel_height as u32),
+                )
+                .map_err(terminal_error)?;
+            Ok(SshPumpAction::Continue)
+        }
+        SshWorkerCommand::Close => {
+            let _ = channel.close();
+            Ok(SshPumpAction::Closed)
+        }
+    }
+}
+
+fn queue_pending_bytes(pending: &mut VecDeque<u8>, bytes: &[u8]) -> Result<()> {
+    if pending.len().saturating_add(bytes.len()) > SSH_PENDING_WRITE_LIMIT {
+        return Err(terminal_error(format!(
+            "ssh input buffer exceeded {} bytes",
+            SSH_PENDING_WRITE_LIMIT
+        )));
+    }
+    pending.extend(bytes);
+    Ok(())
+}
+
+fn drain_ssh_pending_writes(channel: &mut Channel, pending: &mut VecDeque<u8>) -> Result<bool> {
+    let mut progressed = false;
+    for _ in 0..16 {
+        if pending.is_empty() {
+            break;
+        }
+        let write_len = pending.len().min(SSH_WRITE_CHUNK_LIMIT);
+        let written = {
+            let contiguous = pending.make_contiguous();
+            match channel.write(&contiguous[..write_len]) {
+                Ok(0) => break,
+                Ok(size) => size,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(error) => return Err(terminal_error(error)),
+            }
+        };
+        pending.drain(..written);
+        progressed = true;
+    }
+    Ok(progressed)
+}
+
+fn drain_tcp_pending_writes(
+    stream: &mut TcpStream,
+    pending: &mut VecDeque<u8>,
+) -> std::io::Result<bool> {
+    let mut progressed = false;
+    for _ in 0..16 {
+        if pending.is_empty() {
+            break;
+        }
+        let write_len = pending.len().min(SSH_WRITE_CHUNK_LIMIT);
+        let written = {
+            let contiguous = pending.make_contiguous();
+            match stream.write(&contiguous[..write_len]) {
+                Ok(0) => break,
+                Ok(size) => size,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(error) => return Err(error),
+            }
+        };
+        pending.drain(..written);
+        progressed = true;
+    }
+    Ok(progressed)
+}
+
+fn authenticate_ssh_session(session: &Session, input: &SshWorkerInput) -> Result<()> {
+    let username = &input.username;
+    if session.userauth_agent(username).is_ok() && session.authenticated() {
+        return Ok(());
+    }
+    if let Some(identity_file) = input.ssh.identity_file.as_deref() {
+        let expanded = expand_terminal_home(identity_file);
+        let path = Path::new(&expanded);
+        if session
+            .userauth_pubkey_file(username, None, path, None)
+            .is_ok()
+            && session.authenticated()
+        {
+            return Ok(());
+        }
+        if let Some(passphrase) = read_ssh_secret_from_keyring(
+            &input.host_id,
+            username,
+            SshCredentialKind::KeyPassphrase,
+            input.ssh.identity_file.as_deref(),
+        ) {
+            if session
+                .userauth_pubkey_file(username, None, path, Some(&passphrase))
+                .is_ok()
+                && session.authenticated()
+            {
+                return Ok(());
+            }
+        }
+        if matches!(
+            input.credential.as_ref().map(|credential| &credential.kind),
+            Some(SshCredentialKind::KeyPassphrase)
+        ) {
+            let passphrase = input
+                .credential
+                .as_ref()
+                .ok_or_else(|| terminal_error("missing ssh key passphrase"))?
+                .value
+                .as_str();
+            if session
+                .userauth_pubkey_file(username, None, path, Some(passphrase))
+                .is_ok()
+                && session.authenticated()
+            {
+                if input.save_credential {
+                    write_ssh_secret_to_keyring(
+                        &input.host_id,
+                        username,
+                        SshCredentialKind::KeyPassphrase,
+                        input.ssh.identity_file.as_deref(),
+                        passphrase,
+                    )?;
+                }
+                return Ok(());
+            }
+        }
+    }
+
+    if let Some(password) =
+        read_ssh_secret_from_keyring(&input.host_id, username, SshCredentialKind::Password, None)
+    {
+        if session.userauth_password(username, &password).is_ok() && session.authenticated() {
+            return Ok(());
+        }
+    }
+    if matches!(
+        input.credential.as_ref().map(|credential| &credential.kind),
+        Some(SshCredentialKind::Password)
+    ) {
+        let password = input
+            .credential
+            .as_ref()
+            .ok_or_else(|| terminal_error("missing ssh password"))?
+            .value
+            .as_str();
+        if session.userauth_password(username, password).is_ok() && session.authenticated() {
+            if input.save_credential {
+                write_ssh_secret_to_keyring(
+                    &input.host_id,
+                    username,
+                    SshCredentialKind::Password,
+                    None,
+                    password,
+                )?;
+            }
+            return Ok(());
+        }
+    }
+
+    let methods = session.auth_methods(username).unwrap_or("");
+    if input.ssh.identity_file.is_some() && methods.contains("publickey") {
+        return Err(terminal_error("ssh credential required: key_passphrase"));
+    }
+    if methods.contains("password") || methods.contains("keyboard-interactive") {
+        return Err(terminal_error("ssh credential required: password"));
+    }
+    Err(terminal_error(format!(
+        "ssh authentication failed; supported methods: {methods}"
+    )))
+}
+
+fn verify_ssh_host_key(session: &Session, input: &SshWorkerInput) -> Result<()> {
+    let (algorithm, fingerprint) = ssh_host_key_fingerprint(session)?;
+    let key = format!("{algorithm} {fingerprint}");
+    let target = ssh_trust_target(&input.ssh.hostname, input.ssh.port);
+    let mut store = SshTrustStore::load(&input.trust_path)?;
+    store.normalize();
+    if store.contains_key(&target, &key) {
+        return Ok(());
+    }
+    if store.has_target_algorithm(&target, &algorithm) && !input.update_changed_host_key {
+        return Err(terminal_error(format!(
+            "ssh host key changed for {} ({target}); blocked until you choose Update Trust Record for {algorithm} {fingerprint}",
+            input.display_name
+        )));
+    }
+    if !store.has_target_algorithm(&target, &algorithm) && !input.accept_new_host_key {
+        return Err(terminal_error(format!(
+            "ssh host key is not trusted for {} ({target}); confirm {algorithm} {fingerprint} to continue",
+            input.display_name
+        )));
+    }
+    store.upsert_key(target, key);
+    store.save(&input.trust_path)
+}
+
+fn ssh_host_key_fingerprint(session: &Session) -> Result<(String, String)> {
+    let (_, kind) = session
+        .host_key()
+        .ok_or_else(|| terminal_error("ssh host key is unavailable"))?;
+    let algorithm = ssh_host_key_algorithm(kind);
+    let hash = session
+        .host_key_hash(HashType::Sha256)
+        .ok_or_else(|| terminal_error("ssh host key SHA256 fingerprint is unavailable"))?;
+    Ok((
+        algorithm.to_string(),
+        format!(
+            "SHA256:{}",
+            BASE64_STANDARD.encode(hash).trim_end_matches('=')
+        ),
+    ))
+}
+
+fn ssh_host_key_algorithm(kind: HostKeyType) -> &'static str {
+    match kind {
+        HostKeyType::Rsa => "ssh-rsa",
+        HostKeyType::Dss => "ssh-dss",
+        HostKeyType::Ecdsa256 => "ecdsa-sha2-nistp256",
+        HostKeyType::Ecdsa384 => "ecdsa-sha2-nistp384",
+        HostKeyType::Ecdsa521 => "ecdsa-sha2-nistp521",
+        HostKeyType::Ed25519 => "ssh-ed25519",
+        HostKeyType::Unknown => "unknown",
+    }
+}
+
+fn ssh_keyring_account(
+    host_id: &str,
+    username: &str,
+    kind: SshCredentialKind,
+    identity_file: Option<&str>,
+) -> String {
+    match kind {
+        SshCredentialKind::Password => format!("connection-host:{host_id}:password:{username}"),
+        SshCredentialKind::KeyPassphrase => format!(
+            "connection-host:{host_id}:key_passphrase:{username}:{}",
+            identity_file.unwrap_or("")
+        ),
+    }
+}
+
+fn read_ssh_secret_from_keyring(
+    host_id: &str,
+    username: &str,
+    kind: SshCredentialKind,
+    identity_file: Option<&str>,
+) -> Option<String> {
+    let _ = keyring::use_native_store(true);
+    let account = ssh_keyring_account(host_id, username, kind, identity_file);
+    KeyringEntry::new("nocturne", &account)
+        .and_then(|entry| entry.get_password())
+        .ok()
+}
+
+fn write_ssh_secret_to_keyring(
+    host_id: &str,
+    username: &str,
+    kind: SshCredentialKind,
+    identity_file: Option<&str>,
+    value: &str,
+) -> Result<()> {
+    keyring::use_native_store(true).map_err(terminal_error)?;
+    let account = ssh_keyring_account(host_id, username, kind, identity_file);
+    let entry = KeyringEntry::new("nocturne", &account).map_err(terminal_error)?;
+    entry.set_password(value).map_err(terminal_error)
+}
+
+fn default_ssh_username(config: &SshConnectionConfig) -> Result<String> {
+    let username = config.username.clone().unwrap_or_else(|| {
+        env::var("USER")
+            .or_else(|_| env::var("USERNAME"))
+            .unwrap_or_default()
+    });
+    if username.trim().is_empty() {
+        return Err(invalid_error("ssh username is required"));
+    }
+    Ok(username)
+}
+
+fn ssh_command_label(username: &str, config: &SshConnectionConfig) -> String {
+    format!(
+        "ssh {username}@{}",
+        ssh_trust_target(&config.hostname, config.port)
+    )
+}
+
+fn validate_connection_host_for_terminal(host: &ConnectionHostEntry) -> Result<()> {
+    if host
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.severity == ConnectionDiagnosticSeverity::Error)
+    {
+        return Err(invalid_error("connection host has blocking diagnostics"));
+    }
+    Ok(())
+}
+
+fn expand_terminal_home(value: &str) -> String {
+    if value == "~" {
+        return dirs::home_dir()
+            .map(|path| path.to_string_lossy().into_owned())
+            .unwrap_or_else(|| value.to_string());
+    }
+    if let Some(rest) = value.strip_prefix("~/") {
+        if let Some(home) = dirs::home_dir() {
+            return home.join(rest).to_string_lossy().into_owned();
+        }
+    }
+    value.to_string()
+}
+
 #[tauri::command]
 #[specta::specta]
 pub(crate) fn get_terminal_settings(app: AppHandle) -> Result<TerminalSettings> {
@@ -693,9 +1468,9 @@ pub(crate) fn get_terminal_settings_for_theme(
 
 #[tauri::command]
 #[specta::specta]
-pub(crate) fn create_terminal_session(
+pub(crate) fn create_host_terminal_session(
     app: AppHandle,
-    input: CreateTerminalSessionInput,
+    input: CreateHostTerminalSessionInput,
 ) -> Result<TerminalSessionInfo> {
     let size = validated_pty_size(
         input.cols,
@@ -703,9 +1478,36 @@ pub(crate) fn create_terminal_session(
         input.pixel_width,
         input.pixel_height,
     )?;
+    let host_id = if input.connection_host_id.trim().is_empty() {
+        default_connection_host_id(&app)?
+    } else {
+        input.connection_host_id.clone()
+    };
+    let host = connection_host_by_id(&app, &host_id)?;
+    validate_connection_host_for_terminal(&host)?;
+    match host.document.protocol {
+        ConnectionProtocol::Local => create_local_host_terminal_session(app, input, host, size),
+        ConnectionProtocol::Ssh => create_ssh_host_terminal_session(app, input, host, size),
+        ConnectionProtocol::Telnet => Err(invalid_error("telnet sessions are not implemented yet")),
+    }
+}
+
+fn create_local_host_terminal_session(
+    app: AppHandle,
+    input: CreateHostTerminalSessionInput,
+    host: ConnectionHostEntry,
+    size: PtySize,
+) -> Result<TerminalSessionInfo> {
     let config = effective_application_config(&app)?;
-    let settings = terminal_settings_from_config(&app, &config, input.resolved_theme)?;
-    let env_overrides = terminal_env_from_config(&config)?;
+    let mut settings = terminal_settings_from_config(&app, &config, input.resolved_theme)?;
+    let mut env_overrides = terminal_env_from_config(&config)?;
+    let local = host
+        .document
+        .local
+        .clone()
+        .ok_or_else(|| invalid_error("local connection host requires local config"))?;
+    apply_local_host_config(&mut settings, &local);
+    env_overrides.extend(local.env);
     let command_label = terminal_command_label(&settings);
     let command = build_terminal_command(&settings, input.cwd.as_deref(), &env_overrides);
     let pty_system = native_pty_system();
@@ -719,9 +1521,11 @@ pub(crate) fn create_terminal_session(
     let session_number = state.next_id.fetch_add(1, Ordering::Relaxed) + 1;
     let id = format!("term-{session_number}");
     let session = Arc::new(TerminalSession {
-        master: Mutex::new(pair.master),
-        writer: Mutex::new(writer),
-        killer: Mutex::new(killer),
+        backend: Mutex::new(TerminalBackend::Local {
+            master: pair.master,
+            writer,
+            killer,
+        }),
         info: Mutex::new(TerminalSessionInfo {
             id: id.clone(),
             title: format!("Session {session_number}"),
@@ -732,6 +1536,8 @@ pub(crate) fn create_terminal_session(
             pixel_width: input.pixel_width,
             pixel_height: input.pixel_height,
             process_id,
+            transport: TerminalTransportKind::Local,
+            transport_state: TerminalTransportState::Connected,
         }),
         window_label: Mutex::new(input.window_label),
         output_backlog: Mutex::new(Vec::new()),
@@ -746,6 +1552,68 @@ pub(crate) fn create_terminal_session(
     spawn_terminal_reader(app.clone(), id.clone(), reader);
     spawn_terminal_waiter(app, id.clone(), child);
 
+    let info = session.info.lock().unwrap().clone();
+    Ok(info)
+}
+
+fn create_ssh_host_terminal_session(
+    app: AppHandle,
+    input: CreateHostTerminalSessionInput,
+    host: ConnectionHostEntry,
+    size: PtySize,
+) -> Result<TerminalSessionInfo> {
+    let ssh = host
+        .document
+        .ssh
+        .clone()
+        .ok_or_else(|| invalid_error("ssh connection host requires ssh config"))?;
+    let username = default_ssh_username(&ssh)?;
+    let trust_path = ssh_known_hosts_path(&app)?;
+    let state = terminal_state();
+    let session_number = state.next_id.fetch_add(1, Ordering::Relaxed) + 1;
+    let id = format!("term-{session_number}");
+    let worker = SshWorkerInput {
+        app: app.clone(),
+        session_id: id.clone(),
+        display_name: host.document.name.clone(),
+        host_id: host.id.clone(),
+        ssh: ssh.clone(),
+        username: username.clone(),
+        size,
+        trust_path,
+        accept_new_host_key: input.accept_new_host_key,
+        update_changed_host_key: input.update_changed_host_key,
+        credential: input.credential,
+        save_credential: input.save_credential,
+    };
+    let (command_tx, command_rx) = mpsc::channel();
+    let session = Arc::new(TerminalSession {
+        backend: Mutex::new(TerminalBackend::Ssh {
+            commands: command_tx,
+        }),
+        info: Mutex::new(TerminalSessionInfo {
+            id: id.clone(),
+            title: host.document.name.clone(),
+            command: ssh_command_label(&username, &ssh),
+            cwd: None,
+            cols: input.cols,
+            rows: input.rows,
+            pixel_width: input.pixel_width,
+            pixel_height: input.pixel_height,
+            process_id: None,
+            transport: TerminalTransportKind::Ssh,
+            transport_state: TerminalTransportState::Resolving,
+        }),
+        window_label: Mutex::new(input.window_label),
+        output_backlog: Mutex::new(Vec::new()),
+        output_sequence: Mutex::new(0),
+        output_backlog_start_sequence: Mutex::new(0),
+    });
+    {
+        let mut sessions = state.sessions.lock().unwrap();
+        sessions.insert(id.clone(), session.clone());
+    }
+    spawn_ssh_worker(app, id.clone(), worker, command_rx);
     let info = session.info.lock().unwrap().clone();
     Ok(info)
 }
@@ -778,7 +1646,10 @@ pub(crate) fn transfer_terminal_sessions_to_window(
 pub(crate) fn take_terminal_output_backlog(
     input: TerminalOutputBacklogInput,
 ) -> Result<Option<TerminalOutputEvent>> {
-    let session = session_by_id(&input.session_id)?;
+    let session = match session_by_id(&input.session_id) {
+        Ok(session) => session,
+        Err(_) => return Ok(None),
+    };
     let backlog = session.output_backlog.lock().unwrap();
     if backlog.is_empty() {
         return Ok(None);
@@ -796,12 +1667,20 @@ pub(crate) fn take_terminal_output_backlog(
 #[tauri::command]
 #[specta::specta]
 pub(crate) fn write_terminal(input: TerminalInput) -> Result<()> {
-    let session = session_by_id(&input.session_id)?;
-    let mut writer = session.writer.lock().unwrap();
-    writer
-        .write_all(input.data.as_bytes())
-        .map_err(terminal_error)?;
-    writer.flush().map_err(terminal_error)
+    let session = session_by_id(&input.session_id)
+        .map_err(|_| terminal_session_missing_error(&input.session_id))?;
+    let mut backend = session.backend.lock().unwrap();
+    match &mut *backend {
+        TerminalBackend::Local { writer, .. } => {
+            writer
+                .write_all(input.data.as_bytes())
+                .map_err(terminal_error)?;
+            writer.flush().map_err(terminal_error)
+        }
+        TerminalBackend::Ssh { commands } => commands
+            .send(SshWorkerCommand::Write(input.data.into_bytes()))
+            .map_err(|error| terminal_error(format!("failed to write ssh session: {error}"))),
+    }
 }
 
 #[tauri::command]
@@ -813,8 +1692,8 @@ pub(crate) fn resize_terminal(input: TerminalSizeInput) -> Result<()> {
         input.pixel_width,
         input.pixel_height,
     )?;
-    let session = session_by_id(&input.session_id)?;
-    let master = session.master.lock().unwrap();
+    let session = session_by_id(&input.session_id)
+        .map_err(|_| terminal_session_missing_error(&input.session_id))?;
     {
         let mut info = session.info.lock().unwrap();
         info.cols = input.cols;
@@ -822,13 +1701,22 @@ pub(crate) fn resize_terminal(input: TerminalSizeInput) -> Result<()> {
         info.pixel_width = input.pixel_width;
         info.pixel_height = input.pixel_height;
     }
-    master.resize(size).map_err(terminal_error)
+    let mut backend = session.backend.lock().unwrap();
+    match &mut *backend {
+        TerminalBackend::Local { master, .. } => master.resize(size).map_err(terminal_error),
+        TerminalBackend::Ssh { commands } => commands
+            .send(SshWorkerCommand::Resize(size))
+            .map_err(|error| terminal_error(format!("failed to resize ssh session: {error}"))),
+    }
 }
 
 #[tauri::command]
 #[specta::specta]
 pub(crate) fn close_terminal_session(session_id: String) -> Result<()> {
-    let session = session_by_id(&session_id)?;
+    let session = match session_by_id(&session_id) {
+        Ok(session) => session,
+        Err(_) => return Ok(()),
+    };
     kill_terminal_session(session)?;
     remove_terminal_session(&session_id);
     Ok(())
@@ -946,5 +1834,58 @@ mod tests {
             command.get_cwd().and_then(|value| value.to_str()),
             Some("/runtime")
         );
+    }
+
+    #[test]
+    fn missing_session_backlog_is_empty() {
+        let event = take_terminal_output_backlog(TerminalOutputBacklogInput {
+            session_id: "missing-session".to_string(),
+        })
+        .expect("missing sessions have no backlog");
+
+        assert!(event.is_none());
+    }
+
+    #[test]
+    fn parses_proxy_jump_user_host_and_port() {
+        let config = parse_proxy_jump_hop("deploy@bastion.example.com:2200").expect("valid jump");
+
+        assert_eq!(config.username.as_deref(), Some("deploy"));
+        assert_eq!(config.hostname, "bastion.example.com");
+        assert_eq!(config.port, 2200);
+    }
+
+    #[test]
+    fn parses_proxy_jump_ipv6_bracket_host() {
+        let config = parse_proxy_jump_hop("ops@[2001:db8::10]:2222").expect("valid ipv6 jump");
+
+        assert_eq!(config.username.as_deref(), Some("ops"));
+        assert_eq!(config.hostname, "2001:db8::10");
+        assert_eq!(config.port, 2222);
+    }
+
+    #[test]
+    fn parses_proxy_jump_chain_in_order() {
+        let config = parse_proxy_jump_chain("first.example.com,ops@second.example.com:2200")
+            .expect("valid jump");
+
+        assert_eq!(config.len(), 2);
+        assert_eq!(config[0].hostname, "first.example.com");
+        assert_eq!(config[0].port, 22);
+        assert_eq!(config[1].username.as_deref(), Some("ops"));
+        assert_eq!(config[1].hostname, "second.example.com");
+        assert_eq!(config[1].port, 2200);
+    }
+
+    #[test]
+    fn ssh_pending_write_queue_rejects_unbounded_input() {
+        let mut pending = VecDeque::new();
+        queue_pending_bytes(&mut pending, &vec![b'a'; SSH_PENDING_WRITE_LIMIT])
+            .expect("limit-sized input is accepted");
+
+        let error = queue_pending_bytes(&mut pending, b"a").expect_err("overflow is rejected");
+
+        assert!(format!("{error:?}").contains("ssh input buffer exceeded"));
+        assert_eq!(pending.len(), SSH_PENDING_WRITE_LIMIT);
     }
 }

@@ -3,15 +3,17 @@
 
   type Props = {
     dirs: string[];
+    label?: string;
+    mode?: "directory" | "file";
     update: (dirs: string[]) => void | Promise<void>;
   };
 
-  let { dirs, update }: Props = $props();
+  let { dirs, label = "Paths", mode = "directory", update }: Props = $props();
   let selected = $state("");
 
-  async function addDirs() {
+  async function addPaths() {
     const chosen = await open({
-      directory: true,
+      directory: mode === "directory",
       multiple: true,
     });
     if (chosen === null) return;
@@ -38,7 +40,7 @@
 </script>
 
 <div class="host-dirs">
-  <div class="host-dir-list" role="listbox" aria-label="Host directories" tabindex="0">
+  <div class="host-dir-list" role="listbox" aria-label={label} tabindex="0">
     {#each dirs as dir}
       <button
         class:selected={selected === dir}
@@ -53,7 +55,7 @@
   </div>
 
   <div class="host-dir-actions">
-    <button type="button" aria-label="Add host directory" title="Add host directory" onclick={addDirs}>+</button>
+    <button type="button" aria-label={`Add ${label}`} title={`Add ${label}`} onclick={addPaths}>+</button>
     <button
       type="button"
       aria-label="Remove selected host directory"

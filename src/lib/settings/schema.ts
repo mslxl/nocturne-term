@@ -19,7 +19,7 @@ import type { MessageKey } from "$lib/i18n/messages";
 import { defaultKeybindingMap, terminalKeybindings, type KeybindingMap } from "$lib/terminal/keybindings";
 
 export type SettingCategoryId = "appearance" | "terminal" | "keybindings" | "profiles" | "hosts";
-export type SettingValueKind = "text" | "number" | "integer" | "boolean" | "select" | "textarea" | "host-dirs" | "color" | "keybindings";
+export type SettingValueKind = "text" | "number" | "integer" | "boolean" | "select" | "textarea" | "path-list" | "color" | "keybindings";
 
 export type SettingDefinition<T = unknown> = {
   key: string;
@@ -270,7 +270,7 @@ export const settingsSchema: SettingDefinition[] = [
     category: "hosts",
     label: "hostDirs",
     path: ["host_dirs"],
-    kind: "host-dirs",
+    kind: "path-list",
     defaultValue: ["hosts"],
     get: (root) => stringArrayValue(valueAt(root, ["host_dirs"])) ?? ["hosts"],
     toConfigValue: (value) => {
@@ -282,5 +282,34 @@ export const settingsSchema: SettingDefinition[] = [
         .filter(Boolean);
       return configStringArray(items.length ? items : ["hosts"]);
     },
+  },
+  {
+    key: "openssh_config_files",
+    category: "hosts",
+    label: "opensshConfigFiles",
+    path: ["openssh_config_files"],
+    kind: "path-list",
+    defaultValue: ["~/.ssh/config"],
+    get: (root) => stringArrayValue(valueAt(root, ["openssh_config_files"])) ?? ["~/.ssh/config"],
+    toConfigValue: (value) => {
+      if (!Array.isArray(value)) {
+        throw new Error("OpenSSH config files must be a string array");
+      }
+      const items = value
+        .map((item) => item.trim())
+        .filter(Boolean);
+      return configStringArray(items.length ? items : ["~/.ssh/config"]);
+    },
+  },
+  {
+    key: "session.secondary_click_opens_default",
+    category: "hosts",
+    label: "sessionClickBehavior",
+    path: ["session", "secondary_click_opens_default"],
+    kind: "boolean",
+    defaultValue: false,
+    help: "sessionClickBehaviorHelp",
+    get: (root) => booleanValue(valueAt(root, ["session", "secondary_click_opens_default"])) ?? false,
+    toConfigValue: (value) => configBoolean(Boolean(value)),
   },
 ];

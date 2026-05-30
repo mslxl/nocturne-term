@@ -2,8 +2,9 @@ import { FitAddon } from "@xterm/addon-fit";
 import { SearchAddon } from "@xterm/addon-search";
 import { SerializeAddon } from "@xterm/addon-serialize";
 import { Terminal } from "@xterm/xterm";
-import { commands, type TerminalSessionInfo, type TerminalSettings } from "$lib/bindings";
+import { commands, type TerminalSessionInfo, type TerminalSettings, type TerminalTransportState } from "$lib/bindings";
 import { unwrapCommand } from "./commands";
+import { isTerminalSessionInactiveMessage } from "./errors";
 import { orderedTerminalOutputChunks } from "./output";
 import { countPaneLeaves, createPaneLeaf, deriveCustomizableTabTitle, type PaneTree } from "./panes";
 import { terminalScrollbarLineFromPointer, terminalScrollbarState, terminalWheelScrollResult } from "./scrollbar";
@@ -22,8 +23,12 @@ export type TerminalExitEvent = {
   exit_code: number | null;
   signal: string | null;
 };
+export type TerminalTransportStateEvent = {
+  session_id: string;
+  state: TerminalTransportState;
+};
 
-export type TerminalStatus = "starting" | "running" | "exited" | "error";
+export type TerminalStatus = "starting" | "running" | "exited" | "error" | "disconnected";
 type WebglTerminalAddon = { clearTextureAtlas?: () => void; dispose: () => void };
 export type TerminalSearchAddon = SearchAddon & { clearDecorations?: () => void };
 type WebglRenderService = {
@@ -60,6 +65,13 @@ export type TerminalPane = {
   titleOverride: string;
   status: TerminalStatus;
   readOnly: boolean;
+  reconnectPending: boolean;
+  everConnected: boolean;
+  connectionHostId: string;
+  reconnectTrust: {
+    acceptNewHostKey?: boolean;
+    updateChangedHostKey?: boolean;
+  };
   exitText: string;
   error: string;
   term?: Terminal;
@@ -95,6 +107,7 @@ type TerminalTabContext = {
   tabs: () => TerminalTab[];
   setGlobalError: (message: string) => void;
   notifySelectionChange?: () => void;
+  requestReconnect?: (paneId: string) => void;
 };
 
 export function createTerminalTab(info: TerminalSessionInfo): TerminalTab {
@@ -125,6 +138,7 @@ export function createTerminalTabFromPane(pane: TerminalPane): TerminalTab {
 
 export function createTerminalPane(info: TerminalSessionInfo, tabId: string): TerminalPane {
   const size = normalizeTerminalSessionSize(info);
+  const initialOutput = initialTransportOutput(info);
   return {
     id: info.id,
     tabId,
@@ -133,13 +147,17 @@ export function createTerminalPane(info: TerminalSessionInfo, tabId: string): Te
     command: info.command,
     currentDirectory: info.cwd ?? "",
     titleOverride: "",
-    status: "running",
+    status: info.transport_state === "connected" ? "running" : "starting",
     readOnly: false,
+    reconnectPending: false,
+    everConnected: info.transport_state === "connected",
+    connectionHostId: "",
+    reconnectTrust: {},
     exitText: "",
     error: "",
     dataDisposables: [],
     decoder: new TextDecoder(),
-    outputQueue: [],
+    outputQueue: initialOutput ? [initialOutput] : [],
     outputFrame: null,
     nextOutputSequence: 0n,
     pendingOutput: new Map(),
@@ -151,6 +169,71 @@ export function createTerminalPane(info: TerminalSessionInfo, tabId: string): Te
     lastPixelHeight: size.pixelHeight,
     wheelRemainder: 0,
   };
+}
+
+export function retargetTerminalPaneSession(pane: TerminalPane, info: TerminalSessionInfo) {
+  const size = normalizeTerminalSessionSize(info);
+  const initialOutput = initialTransportOutput(info);
+  if (pane.resizeTimer !== null) {
+    window.clearTimeout(pane.resizeTimer);
+  }
+  if (pane.outputFrame !== null) {
+    window.cancelAnimationFrame(pane.outputFrame);
+  }
+  pane.id = info.id;
+  pane.title = info.cwd ?? info.title;
+  pane.baseTitle = info.cwd ?? info.title;
+  pane.command = info.command;
+  pane.currentDirectory = info.cwd ?? "";
+  pane.titleOverride = "";
+  pane.status = info.transport_state === "connected" ? "running" : "starting";
+  pane.readOnly = false;
+  pane.reconnectPending = false;
+  pane.everConnected = info.transport_state === "connected";
+  pane.reconnectTrust = {};
+  pane.exitText = "";
+  pane.error = "";
+  pane.decoder = new TextDecoder();
+  pane.outputQueue = [];
+  pane.outputFrame = null;
+  pane.nextOutputSequence = 0n;
+  pane.pendingOutput = new Map();
+  pane.resizeTimer = null;
+  pane.mountPromise = null;
+  pane.lastCols = size.cols;
+  pane.lastRows = size.rows;
+  pane.lastPixelWidth = size.pixelWidth;
+  pane.lastPixelHeight = size.pixelHeight;
+  pane.wheelRemainder = 0;
+  if (initialOutput) {
+    if (pane.term) {
+      pane.term.write(`\r\n${initialOutput}`);
+    } else {
+      pane.outputQueue.push(initialOutput);
+    }
+  }
+}
+
+function initialTransportOutput(info: TerminalSessionInfo): string {
+  if (info.transport_state === "connected") return "";
+  return `[${transportStateLabel(info.transport_state)}: ${info.command}]\r\n`;
+}
+
+function transportStateLabel(state: TerminalTransportState): string {
+  if (state === "resolving") return "Resolving";
+  if (state === "connecting") return "Connecting";
+  if (state === "verifying_host_key") return "Verifying host key";
+  if (state === "authenticating") return "Authenticating";
+  if (state === "connected") return "Connected";
+  if (state === "disconnected") return "Disconnected";
+  if (state === "failed") return "Failed";
+  return state;
+}
+
+function disconnectMessage(message: string): string {
+  if (message.includes("terminal error: transport read")) return "transport read";
+  if (message.includes("terminal error: ")) return message.replace("terminal error: ", "");
+  return message;
 }
 
 export function refreshTerminalTabTitle(tab: TerminalTab) {
@@ -261,8 +344,13 @@ export function createTerminalTabController(context: TerminalTabContext) {
         }),
         term.onData((data) => {
           if (pane.readOnly) return;
+          if (pane.reconnectPending) {
+            markReconnectRequested(pane.id);
+            context.requestReconnect?.(pane.id);
+            return;
+          }
           void unwrapCommand(commands.writeTerminal({ session_id: pane.id, data })).catch((error) => {
-            markPaneError(pane.id, error instanceof Error ? error.message : String(error));
+            markWriteFailure(pane.id, error instanceof Error ? error.message : String(error));
           });
         }),
         term.onResize(() => {
@@ -344,7 +432,7 @@ export function createTerminalTabController(context: TerminalTabContext) {
           pixel_width: pane.lastPixelWidth,
           pixel_height: pane.lastPixelHeight,
         }),
-      ).catch((error) => markPaneError(id, error instanceof Error ? error.message : String(error)));
+      ).catch((error) => markWriteFailure(id, error instanceof Error ? error.message : String(error)));
     }, resizeDelayMs);
   }
 
@@ -360,22 +448,134 @@ export function createTerminalTabController(context: TerminalTabContext) {
   function markExited(event: TerminalExitEvent) {
     const pane = paneById(event.session_id);
     if (!pane) return;
+    if (pane.everConnected && event.signal && event.signal !== "closed") {
+      markDisconnected(pane, disconnectMessage(event.signal));
+      return;
+    }
+    if (pane.status === "starting" && event.signal) {
+      pane.status = "error";
+      pane.error = event.signal;
+      pane.term?.write(`\r\n[Connection stopped: ${event.signal}]\r\n`);
+      return;
+    }
+    if (pane.status === "running" && event.signal && event.signal !== "closed") {
+      markDisconnected(pane, event.signal);
+      return;
+    }
+    if (pane.status === "error") {
+      pane.error = event.signal ?? pane.error;
+      pane.term?.write(`\r\n[Terminal error: ${pane.error || "connection failed"}]\r\n`);
+      return;
+    }
     pane.status = "exited";
+    pane.reconnectPending = false;
     pane.exitText = event.signal ? `Signal: ${event.signal}` : `Exit ${event.exit_code ?? "unknown"}`;
     pane.titleOverride = "";
     refreshPaneTitle(pane);
     pane.term?.write(`\r\n[Process completed: ${pane.exitText}]\r\n`);
   }
 
+  function markTransportState(event: TerminalTransportStateEvent) {
+    const pane = paneById(event.session_id);
+    if (!pane) return;
+    const line = `[${transportStateLabel(event.state)}]\r\n`;
+    if (pane.term) {
+      pane.term.write(line);
+    } else {
+      pane.outputQueue.push(line);
+    }
+    if (event.state === "failed") {
+      if (pane.everConnected) {
+        return;
+      }
+      pane.status = "error";
+      pane.reconnectPending = false;
+      return;
+    }
+    if (event.state === "connected") {
+      pane.status = "running";
+      pane.reconnectPending = false;
+      pane.everConnected = true;
+    }
+  }
+
   function markPaneError(id: string, message: string) {
     const pane = paneById(id);
     if (!pane) {
-      context.setGlobalError(message);
+      return;
+    }
+    if (isTerminalSessionInactiveMessage(message)) {
+      markDisconnected(pane, "connection is no longer active");
       return;
     }
     pane.status = "error";
+    pane.reconnectPending = false;
     pane.error = message;
     pane.term?.write(`\r\n[Terminal error: ${message}]\r\n`);
+  }
+
+  function markWriteFailure(id: string, message: string) {
+    const pane = paneById(id);
+    if (!pane) {
+      return;
+    }
+    if (isTerminalSessionInactiveMessage(message)) {
+      markDisconnected(pane, "connection is no longer active");
+      return;
+    }
+    markPaneError(id, message);
+  }
+
+  function markDisconnected(pane: TerminalPane, message: string) {
+    if (pane.reconnectPending) return;
+    pane.status = "disconnected";
+    pane.reconnectPending = true;
+    pane.exitText = message;
+    pane.error = "";
+    pane.term?.write(`\r\n[Connection disconnected: ${message}]\r\n[Press any key to reconnect]\r\n`);
+  }
+
+  function markReconnectUnavailable(id: string, message: string) {
+    const pane = paneById(id);
+    if (!pane) return;
+    pane.status = "error";
+    pane.reconnectPending = false;
+    pane.error = message;
+    pane.term?.write(`\r\n[Reconnect failed: ${message}]\r\n`);
+  }
+
+  function markReconnectRequested(id: string) {
+    const pane = paneById(id);
+    if (!pane || !pane.reconnectPending) return;
+    pane.status = "starting";
+    pane.reconnectPending = false;
+    pane.exitText = "Reconnecting";
+    pane.error = "";
+    pane.term?.write("\r\n[Reconnecting]\r\n");
+  }
+
+  function markConnectionError(id: string, message: string) {
+    markPaneError(id, message);
+  }
+
+  function markConnectionPrompt(id: string, message: string) {
+    const pane = paneById(id);
+    if (!pane) return;
+    pane.status = "exited";
+    pane.reconnectPending = false;
+    pane.exitText = message;
+    pane.error = "";
+    pane.term?.write(`\r\n[Connection paused: ${message}]\r\n`);
+  }
+
+  function markConnectionCancelled(id: string, message: string) {
+    const pane = paneById(id);
+    if (!pane) return;
+    pane.status = "error";
+    pane.reconnectPending = false;
+    pane.error = message;
+    pane.exitText = message;
+    pane.term?.write(`\r\n[Connection canceled: ${message}]\r\n`);
   }
 
   function refreshPaneTitle(pane: TerminalPane) {
@@ -397,7 +597,12 @@ export function createTerminalTabController(context: TerminalTabContext) {
 
   return {
     enqueueOutput,
+    markConnectionCancelled,
+    markConnectionError,
+    markConnectionPrompt,
     markExited,
+    markReconnectUnavailable,
+    markTransportState,
     mountTerminal,
     refreshPanePresentation,
     scheduleFit,

@@ -1,6 +1,7 @@
 mod app_shell;
 mod config;
 mod error;
+mod ssh_trust;
 mod terminal;
 mod terminal_schemes;
 mod types;
@@ -20,7 +21,7 @@ pub fn run() {
             config::get_config_snapshot,
             terminal::get_terminal_settings,
             terminal::get_terminal_settings_for_theme,
-            terminal::create_terminal_session,
+            terminal::create_host_terminal_session,
             terminal::existing_terminal_session_info,
             terminal::transfer_terminal_sessions_to_window,
             terminal::take_terminal_output_backlog,
@@ -42,16 +43,21 @@ pub fn run() {
             config::set_active_profile,
             config::read_main_config,
             config::update_main_config,
-            config::read_host,
-            config::list_hosts,
-            config::create_host,
-            config::update_host,
-            config::delete_host,
+            config::read_connection_host,
+            config::list_connection_hosts,
+            config::create_connection_host,
+            config::update_connection_host,
+            config::delete_connection_host,
+            config::repair_connection_host_id,
+            config::list_ssh_known_hosts,
             config::set_host_dirs_command,
+            config::set_openssh_config_files_command,
+            config::set_default_host_command,
             config::remove_config_key,
             app_shell::show_tab_bar_context_menu,
             app_shell::show_pane_context_menu,
             app_shell::open_settings_window,
+            app_shell::open_host_manager_window,
             app_shell::open_profile_new_dialog,
             app_shell::open_main_window,
             app_shell::refresh_app_menu,
@@ -74,6 +80,7 @@ pub fn run() {
         .on_window_event(|window, event| app_shell::handle_window_event(window, event))
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(builder.invoke_handler())
         .setup(|app| {

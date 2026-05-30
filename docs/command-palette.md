@@ -50,6 +50,7 @@ The palette returns both static commands and dynamic objects:
 - `tab`: a concrete terminal tab
 - `profile`: a concrete profile
 - `theme`: a concrete app theme choice
+- `connection-host`: a concrete local, SSH, or future protocol host
 
 Dynamic results should be first-class items, not second-level menus. A user can type a profile name and switch directly to that profile, or type a tab title and jump directly to that tab. Dynamic object results must include the action in the visible title so they read as commands, not bare objects.
 
@@ -67,6 +68,14 @@ Profile results follow the same pattern:
 Switch Profile: default              Profile
 ```
 
+Connection host results follow the same pattern and must include the action in the title:
+
+```text
+Connect: Local Shell                 Local
+Connect SSH: Production API          SSH
+Connect SSH: prod                    ~/.ssh/config
+```
+
 ## Command IDs
 
 Menu items, keyboard shortcuts, and palette results should converge on stable command IDs. Do not create palette-only action logic when an existing command path can be reused.
@@ -77,12 +86,13 @@ Initial IDs:
 app.openCommandPalette
 terminal.openCommandPalette
 settings.open
+hosts.openManager
 profile.new
 profile.switch:<profileName>
 ui.theme.system
 ui.theme.light
 ui.theme.dark
-terminal.newTab
+terminal.newSession
 terminal.splitLeft
 terminal.splitRight
 terminal.splitUp
@@ -93,6 +103,7 @@ terminal.movePaneUp
 terminal.movePaneDown
 terminal.togglePaneZoom
 tab.switchTo:<tabId>
+connection.connect:<connectionHostId>
 ```
 
 `terminal.togglePaneZoom` is a real toggle. Running it while a pane is zoomed restores the previous split layout. Running it while no pane is zoomed zooms the active pane.
@@ -109,12 +120,15 @@ Search is language-wide, not only current-language:
 - Chinese pinyin initials
 - dynamic tab title, current directory, command, and tab number
 - dynamic profile name
+- dynamic connection host display name, configured hostname, username, protocol, folder path, and tags when available
 
 Examples:
 
 - `split`, `拆分`, `chaifen`, and `cf` can find split commands
 - `dark` can find dark theme while the UI is Chinese
 - `2` and `tab 2` can find the second tab
+- `prod`, `deploy`, and `ssh` can find an SSH connection host when those values are part of its metadata
+- `local`, `shell`, and configured command names can find local hosts
 
 The search index can be hand-authored for the small command set. It does not need a general Chinese segmentation engine.
 
@@ -129,6 +143,8 @@ Ranking should be stable enough for muscle memory:
 - small recent-use boost
 
 Static command results must not be permanently buried by dynamic tab/profile results. Preserve flows like `Meta+Shift+P`, `spl`, `Enter`.
+
+Connection host result IDs must use stable connection host UUIDs for user hosts. OpenSSH config results should use a stable derived source key from the config path and host alias. Connection host scopes should include folder metadata; Nocturne user host folders come from host file paths, while OpenSSH folders come from the read-only config file stem. Visible host subtitles should stay to the connection address shape defined in `docs/connection-hosts.md`, not storage paths or source labels.
 
 Unavailable actions are hidden by default. If the user searches for a very specific unavailable action, it may appear disabled with a short reason. Keep disabled reasons terse.
 

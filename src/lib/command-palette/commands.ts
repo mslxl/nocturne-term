@@ -23,14 +23,24 @@ export const staticPaletteCommands: StaticPaletteCommand[] = [
     },
   },
   {
-    id: "terminal.newTab",
-    title: { en: "New Tab", zh: "新建标签" },
-    scope: { en: "Tab", zh: "标签" },
+    id: "hosts.openManager",
+    title: { en: "Open Host Manager", zh: "打开主机管理" },
+    scope: { en: "Hosts", zh: "主机" },
+    keywords: {
+      en: ["hosts", "host manager", "ssh hosts", "connections"],
+      zh: ["主机", "主机管理", "连接", "ssh"],
+      pinyin: ["zhuji", "zj", "zhuji guanli", "zjgl", "lianjie", "lj"],
+    },
+  },
+  {
+    id: "terminal.newSession",
+    title: { en: "New Session", zh: "新建 Session" },
+    scope: { en: "Session", zh: "Session" },
     shortcut: "Meta+T",
     keywords: {
-      en: ["tab", "new tab", "terminal"],
-      zh: ["新建标签", "标签", "终端"],
-      pinyin: ["xinjianbiaoqian", "xjbq", "biaoqian", "bq", "zhongduan", "zd"],
+      en: ["session", "new session", "tab", "new tab", "terminal"],
+      zh: ["新建会话", "会话", "新建标签", "标签", "终端"],
+      pinyin: ["xinjianhuihua", "xjhh", "huihua", "hh", "xinjianbiaoqian", "xjbq", "biaoqian", "bq", "zhongduan", "zd"],
     },
   },
   {
