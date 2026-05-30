@@ -23,6 +23,8 @@ The palette follows the native-feel rule T3: adopt the platform; do not compete 
 - native menu: `Command Palette...`
 - scope: only while a Nocturne main window is active
 
+The keyboard shortcut is the default value for `terminal.openCommandPalette` in terminal keybindings. Users can remap it from settings, and the frontend keyboard handler must route it through the shared terminal keybinding registry instead of a page-local hard-coded shortcut.
+
 Do not bind global shortcuts such as `Meta+Space`, `Alt+Space`, or other OS launcher muscle-memory keys.
 
 ## Window Behavior
@@ -73,6 +75,7 @@ Initial IDs:
 
 ```text
 app.openCommandPalette
+terminal.openCommandPalette
 settings.open
 profile.new
 profile.switch:<profileName>

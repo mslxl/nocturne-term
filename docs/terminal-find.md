@@ -44,12 +44,17 @@ Controls:
 
 Behavior:
 
-- `Cmd+F` on macOS and `Ctrl+F` on Windows/Linux opens the find bar through the native menu/command path.
+- `Cmd+F` on macOS and `Ctrl+F` on Windows/Linux are the default values for `terminal.find` in terminal keybindings.
+- `Cmd+G` / `Ctrl+G` and `Cmd+Shift+G` / `Ctrl+Shift+G` are the default values for `terminal.findNext` and `terminal.findPrevious`.
+- The frontend keyboard handler should route these through the shared terminal keybinding registry instead of page-local hard-coded shortcuts.
+- Native menu Find commands should emit the same command path so menu and keyboard behavior stay aligned.
 - Opening the find bar seeds the query from the active pane selection when the selection is not empty.
 - Input changes update highlights without moving keyboard focus out of the input.
 - `Enter` moves to the next match.
 - `Shift+Enter` moves to the previous match.
 - `Esc` closes the find bar, clears find highlights, and returns focus to the terminal.
+- Closing the find bar must clear both `SearchAddon` decorations and xterm's active selection. The active match is represented as a real xterm selection, so `clearDecorations()` alone leaves a visible highlight behind.
+- After the find bar is removed from the DOM, refresh the pane presentation and Nocturne-owned terminal scrollbar across animation frames before restoring terminal focus. In WKWebView, search decoration cleanup and focus restoration can otherwise leave the custom scrollbar out of sync with xterm's `baseY`, `viewportY`, and `rows`.
 - Previous/next buttons move the active match and return focus to the terminal.
 - The close button closes the bar, clears highlights, and returns focus to the terminal.
 

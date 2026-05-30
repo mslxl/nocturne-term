@@ -16,6 +16,7 @@
   import TerminalTabBar from "$lib/terminal/components/TerminalTabBar.svelte";
   import { unwrapCommand } from "$lib/terminal/commands";
   import {
+    clearTerminalFindEffects,
     terminalFindSearchKeyChanged,
     terminalFindSnapshot,
     type TerminalFindSearchKey,
@@ -1341,12 +1342,14 @@
   }
 
   function hideFind() {
+    const pane = activePane();
+    const paneId = pane?.id;
     findVisible = false;
-    activePane()?.search?.clearDecorations?.();
-    activePane()?.term?.focus();
+    clearTerminalFindEffects(pane);
     findSnapshot = { activeIndex: 0, error: "", matches: [] };
     appliedFindSearchKey = null;
     syncTerminalMenuState();
+    void restoreTerminalAfterFindClose(paneId);
   }
 
   function findNext({ focusTerminal = true }: { focusTerminal?: boolean } = {}) {
@@ -1578,6 +1581,22 @@
       }
       await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
     }
+  }
+
+  async function restoreTerminalAfterFindClose(paneId: string | undefined) {
+    if (!paneId) return;
+    await tick();
+    await animationFrame();
+    const pane = tabs.flatMap((tab) => tab.panes).find((item) => item.id === paneId);
+    pane?.term?.focus();
+    for (let frame = 0; frame < 3; frame += 1) {
+      terminalTabs.refreshPanePresentation(paneId);
+      await animationFrame();
+    }
+  }
+
+  function animationFrame() {
+    return new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
   }
 
   function undoTextInputEdit(element: TextInputElement) {
@@ -2009,41 +2028,10 @@
 
   function handleKeyboard(event: KeyboardEvent) {
     if (commandPaletteOpen) return;
-    if (isCommandPaletteShortcut(event)) {
-      event.preventDefault();
-      openCommandPalette();
-      return;
-    }
-    const findCommand = findCommandForKeyboardEvent(event);
-    if (findCommand) {
-      event.preventDefault();
-      void runTerminalMenuCommand(findCommand).catch((error) => {
-        settingsError = error instanceof Error ? error.message : String(error);
-      });
-      return;
-    }
     const command = commandForKeyboardEvent(event);
     if (!command) return;
     event.preventDefault();
     runTerminalCommand(command);
-  }
-
-  function isCommandPaletteShortcut(event: KeyboardEvent) {
-    return primaryShortcutModifier(event) && event.key.toLowerCase() === "p" && event.shiftKey && !event.altKey;
-  }
-
-  function findCommandForKeyboardEvent(event: KeyboardEvent): TerminalMenuCommand | null {
-    if (!primaryShortcutModifier(event)) return null;
-    if (event.altKey) return null;
-    const key = event.key.toLowerCase();
-    if (key === "f" && !event.shiftKey) return "find";
-    if (key === "g") return event.shiftKey ? "find_previous" : "find_next";
-    return null;
-  }
-
-  function primaryShortcutModifier(event: KeyboardEvent) {
-    const isMac = navigator.platform.toLowerCase().includes("mac");
-    return isMac ? event.metaKey && !event.ctrlKey : event.ctrlKey && !event.metaKey;
   }
 
   function commandForKeyboardEvent(event: KeyboardEvent): TerminalCommandId | null {
@@ -2055,6 +2043,10 @@
   }
 
   function runTerminalCommand(command: TerminalCommandId) {
+    if (command === "terminal.openCommandPalette") {
+      openCommandPalette();
+      return;
+    }
     if (command === "terminal.newTab") {
       void newSession();
       return;
@@ -2081,6 +2073,18 @@
     }
     if (command === "terminal.closePane" && activeTab) {
       void closePane(activeTab.activePaneId, { recordHistory: true });
+      return;
+    }
+    if (command === "terminal.find") {
+      showFind();
+      return;
+    }
+    if (command === "terminal.findNext") {
+      findNext();
+      return;
+    }
+    if (command === "terminal.findPrevious") {
+      findPrevious();
     }
   }
 
@@ -2191,6 +2195,7 @@
     findSnapshot;
     void tick().then(syncTerminalMenuState);
   });
+
 </script>
 
 <main class:left-tabs={tabsOnLeft} class:vertical={isVertical} class="workspace">
@@ -2479,52 +2484,48 @@
     display: none;
   }
 
-  :global(.os-scrollbar.os-theme-nocturne-terminal) {
-    --os-size: 11px !important;
-    --os-padding-perpendicular: 2px !important;
-    --os-padding-axis: 4px !important;
-    --os-handle-border-radius: 999px !important;
-    --os-handle-bg: rgba(222, 228, 236, 0.68) !important;
-    --os-handle-bg-hover: rgba(222, 228, 236, 0.82) !important;
-    --os-handle-bg-active: rgba(222, 228, 236, 0.92) !important;
-    --os-track-bg: transparent !important;
-    --os-track-bg-hover: transparent !important;
-    --os-track-bg-active: transparent !important;
-    z-index: 8;
-  }
-
-  :global(.os-scrollbar.os-theme-nocturne-terminal.os-scrollbar-horizontal) {
-    display: none;
-  }
-
-  :global(.os-scrollbar.os-theme-nocturne-terminal.os-scrollbar-vertical) {
+  :global(.terminal-scrollbar) {
+    position: absolute;
+    top: 6px;
     right: 4px;
+    bottom: 6px;
+    z-index: 18;
     width: 10px;
+    display: flex;
+    opacity: 0;
+    visibility: hidden;
+    pointer-events: none;
   }
 
-  :global(.os-scrollbar.os-theme-nocturne-terminal.os-scrollbar-vertical.os-scrollbar-nocturne-visible) {
-    opacity: 1 !important;
-    visibility: visible !important;
+  :global(.terminal-scrollbar.terminal-scrollbar-visible) {
+    opacity: 1;
+    visibility: visible;
     pointer-events: auto;
   }
 
-  :global(.os-scrollbar.os-theme-nocturne-terminal .os-scrollbar-track) {
-    background: transparent !important;
+  :global(.terminal-scrollbar-track) {
+    position: relative;
+    width: 100%;
+    height: 100%;
+    background: transparent;
   }
 
-  :global(.os-scrollbar.os-theme-nocturne-terminal .os-scrollbar-handle) {
-    background: rgba(222, 228, 236, 0.68) !important;
-    border-radius: 999px !important;
+  :global(.terminal-scrollbar-handle) {
+    position: absolute;
+    right: 0;
+    width: 100%;
     min-height: 28px;
-    opacity: 1 !important;
+    border-radius: 999px;
+    background: rgba(222, 228, 236, 0.68);
+    opacity: 1;
   }
 
-  :global(.os-scrollbar.os-theme-nocturne-terminal:hover .os-scrollbar-handle) {
-    background: rgba(222, 228, 236, 0.82) !important;
+  :global(.terminal-scrollbar:hover .terminal-scrollbar-handle) {
+    background: rgba(222, 228, 236, 0.82);
   }
 
-  :global(.os-scrollbar.os-theme-nocturne-terminal:active .os-scrollbar-handle) {
-    background: rgba(222, 228, 236, 0.92) !important;
+  :global(.terminal-scrollbar:active .terminal-scrollbar-handle) {
+    background: rgba(222, 228, 236, 0.92);
   }
 
   :global(.xterm .xterm-screen) {

@@ -2,13 +2,17 @@ import type { ConfigValue } from "../bindings";
 import { stringValue } from "../config/document";
 
 export type TerminalCommandId =
+  | "terminal.openCommandPalette"
   | "terminal.newTab"
   | "terminal.closeTab"
   | "terminal.splitLeft"
   | "terminal.splitRight"
   | "terminal.splitUp"
   | "terminal.splitDown"
-  | "terminal.closePane";
+  | "terminal.closePane"
+  | "terminal.find"
+  | "terminal.findNext"
+  | "terminal.findPrevious";
 
 export type KeybindingDefinition = {
   command: TerminalCommandId;
@@ -18,6 +22,12 @@ export type KeybindingDefinition = {
 };
 
 export const terminalKeybindings: KeybindingDefinition[] = [
+  {
+    command: "terminal.openCommandPalette",
+    label: "Command Palette",
+    macDefault: "Meta+Shift+P",
+    default: "Ctrl+Shift+P",
+  },
   {
     command: "terminal.newTab",
     label: "New Tab",
@@ -59,6 +69,24 @@ export const terminalKeybindings: KeybindingDefinition[] = [
     label: "Close Pane",
     macDefault: "Meta+Shift+W",
     default: "Ctrl+Alt+W",
+  },
+  {
+    command: "terminal.find",
+    label: "Find",
+    macDefault: "Meta+F",
+    default: "Ctrl+F",
+  },
+  {
+    command: "terminal.findNext",
+    label: "Find Next",
+    macDefault: "Meta+G",
+    default: "Ctrl+G",
+  },
+  {
+    command: "terminal.findPrevious",
+    label: "Find Previous",
+    macDefault: "Meta+Shift+G",
+    default: "Ctrl+Shift+G",
   },
 ];
 

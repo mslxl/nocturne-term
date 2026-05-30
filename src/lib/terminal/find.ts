@@ -36,7 +36,17 @@ export type TerminalLike = {
       length: number;
     };
   };
+  clearSelection?: () => void;
   getSelectionPosition?: () => TerminalSelectionPosition | undefined;
+};
+
+export type TerminalFindCleanupTarget = {
+  search?: {
+    clearDecorations?: () => void;
+  };
+  term?: {
+    clearSelection?: () => void;
+  };
 };
 
 type TerminalSelectionPosition = {
@@ -95,6 +105,11 @@ export function terminalFindSearchKeyChanged(
     previous.caseSensitive !== next.caseSensitive ||
     previous.regex !== next.regex
   );
+}
+
+export function clearTerminalFindEffects(target: TerminalFindCleanupTarget | null | undefined): void {
+  target?.search?.clearDecorations?.();
+  target?.term?.clearSelection?.();
 }
 
 function terminalLogicalLines(terminal: TerminalLike): LogicalLine[] {

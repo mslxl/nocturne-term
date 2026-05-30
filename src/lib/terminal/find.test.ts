@@ -1,6 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
+  clearTerminalFindEffects,
   terminalFindSearchKeyChanged,
   terminalFindSnapshot,
   terminalLogicalLineAtSelection,
@@ -85,6 +86,27 @@ describe("terminal find", () => {
       terminalFindSearchKeyChanged(previous, { paneId: "pane-1", query: "Unload", caseSensitive: false, regex: false }),
       false,
     );
+  });
+
+  it("clears both search decorations and the xterm selection on close", () => {
+    let decorationsCleared = 0;
+    let selectionCleared = 0;
+
+    clearTerminalFindEffects({
+      search: {
+        clearDecorations: () => {
+          decorationsCleared += 1;
+        },
+      },
+      term: {
+        clearSelection: () => {
+          selectionCleared += 1;
+        },
+      },
+    });
+
+    assert.equal(decorationsCleared, 1);
+    assert.equal(selectionCleared, 1);
   });
 });
 
