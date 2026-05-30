@@ -2,7 +2,6 @@ import { FitAddon } from "@xterm/addon-fit";
 import { SearchAddon } from "@xterm/addon-search";
 import { SerializeAddon } from "@xterm/addon-serialize";
 import { Terminal } from "@xterm/xterm";
-import { OverlayScrollbars, type OverlayScrollbars as OverlayScrollbarsInstance } from "overlayscrollbars";
 import { commands, type TerminalSessionInfo, type TerminalSettings } from "$lib/bindings";
 import { unwrapCommand } from "./commands";
 import { orderedTerminalOutputChunks } from "./output";
@@ -37,6 +36,11 @@ type TerminalWithRenderService = Terminal & {
     _renderService?: WebglRenderService;
   };
 };
+type TerminalScrollbarDom = {
+  root: HTMLDivElement;
+  track: HTMLDivElement;
+  handle: HTMLDivElement;
+};
 export type TerminalTab = {
   id: string;
   title: string;
@@ -64,7 +68,7 @@ export type TerminalPane = {
   serialize?: SerializeAddon;
   image?: { dispose: () => void };
   webgl?: WebglTerminalAddon;
-  scrollbar?: OverlayScrollbarsInstance;
+  scrollbarDom?: TerminalScrollbarDom;
   scrollbarInteraction?: { dispose: () => void };
   container?: HTMLDivElement;
   resizeObserver?: ResizeObserver;
@@ -302,6 +306,12 @@ export function createTerminalTabController(context: TerminalTabContext) {
     });
   }
 
+  function refreshPanePresentation(id: string) {
+    const pane = paneById(id);
+    if (!pane) return;
+    refreshTerminalPanePresentation(pane);
+  }
+
   function scheduleResize(id: string, size: TerminalFitSize) {
     const pane = paneById(id);
     if (!pane || pane.status !== "running") return;
@@ -389,6 +399,7 @@ export function createTerminalTabController(context: TerminalTabContext) {
     enqueueOutput,
     markExited,
     mountTerminal,
+    refreshPanePresentation,
     scheduleFit,
   };
 }
@@ -405,6 +416,13 @@ function attachMountedTerminal(pane: TerminalPane, container: HTMLDivElement, sc
   attachTerminalScrollbar(pane);
   fitTerminal(pane);
   pane.term?.refresh(0, Math.max(0, pane.term.rows - 1));
+}
+
+export function refreshTerminalPanePresentation(pane: TerminalPane) {
+  if (!pane.term) return;
+  attachTerminalScrollbar(pane);
+  pane.term.refresh(0, Math.max(0, pane.term.rows - 1));
+  updateTerminalScrollbar(pane);
 }
 
 export function disposeTerminalTab(tab: TerminalTab) {
@@ -468,50 +486,19 @@ function fitTerminal(pane: TerminalPane): TerminalFitSize | null {
 }
 
 function attachTerminalScrollbar(pane: TerminalPane) {
-  const elements = terminalScrollbarElements(pane);
-  if (!elements) {
+  const previousRoot = pane.scrollbarDom?.root;
+  const dom = ensureTerminalScrollbarDom(pane);
+  if (!dom) {
     destroyTerminalScrollbar(pane);
     return;
   }
-  if (
-    pane.scrollbar &&
-    OverlayScrollbars.valid(pane.scrollbar) &&
-    pane.scrollbar.elements().target === elements.slot &&
-    pane.scrollbar.elements().viewport === elements.viewport &&
-    pane.scrollbar.elements().content === elements.content &&
-    pane.scrollbar.elements().scrollbarVertical.scrollbar.parentElement === elements.slot
-  ) {
+  pane.scrollbarDom = dom;
+  if (pane.scrollbarInteraction && previousRoot === dom.root) {
     updateTerminalScrollbar(pane);
     return;
   }
 
-  destroyTerminalScrollbar(pane);
-  pane.scrollbar = OverlayScrollbars(
-    {
-      target: elements.slot,
-      elements: {
-        viewport: elements.viewport,
-        content: elements.content,
-      },
-      scrollbars: {
-        slot: elements.slot,
-      },
-    },
-    {
-      overflow: {
-        x: "hidden",
-        y: "scroll",
-      },
-      scrollbars: {
-        autoHide: "never",
-        autoHideDelay: 900,
-        clickScroll: false,
-        dragScroll: false,
-        visibility: "visible",
-        theme: "os-theme-dark os-theme-nocturne-terminal",
-      },
-    },
-  );
+  pane.scrollbarInteraction?.dispose();
   pane.scrollbarInteraction = attachTerminalScrollbarInteraction(pane);
   updateTerminalScrollbar(pane);
 }
@@ -559,77 +546,80 @@ function attachTerminalScrollSync(pane: TerminalPane): { dispose: () => void } {
   };
 }
 
-function terminalScrollbarElements(
-  pane: TerminalPane,
-): { root: HTMLElement; viewport: HTMLElement; content: HTMLElement; slot: HTMLElement } | null {
-  const root = pane.term?.element;
-  const slot = pane.container;
-  if (!root || !slot) return null;
-  const viewport = root.querySelector<HTMLElement>(".xterm-viewport");
-  if (!viewport) return null;
-  const content = viewport.querySelector<HTMLElement>(".xterm-scroll-area");
-  if (!content) return null;
-  return { root, viewport, content, slot };
-}
-
 function updateTerminalScrollbar(pane: TerminalPane) {
-  const scrollbar = pane.scrollbar;
-  if (!scrollbar || !OverlayScrollbars.valid(scrollbar)) return;
-  requestAnimationFrame(() => {
-    if (!OverlayScrollbars.valid(scrollbar)) return;
-    scrollbar.update(true);
+  const sync = () => {
     syncTerminalScrollbarThumb(pane);
+  };
+  requestAnimationFrame(() => {
+    sync();
+    requestAnimationFrame(sync);
   });
 }
 
 function destroyTerminalScrollbar(pane: TerminalPane) {
   pane.scrollbarInteraction?.dispose();
   pane.scrollbarInteraction = undefined;
-  pane.scrollbar?.destroy();
-  pane.scrollbar = undefined;
+  pane.scrollbarDom?.root.remove();
+  pane.scrollbarDom = undefined;
+}
+
+function ensureTerminalScrollbarDom(pane: TerminalPane): TerminalScrollbarDom | undefined {
+  const slot = pane.container;
+  if (!slot) return undefined;
+  const existingRoot = slot.querySelector<HTMLDivElement>(":scope > .terminal-scrollbar");
+  if (existingRoot) {
+    const track = existingRoot.querySelector<HTMLDivElement>(".terminal-scrollbar-track");
+    const handle = existingRoot.querySelector<HTMLDivElement>(".terminal-scrollbar-handle");
+    if (track && handle) return { root: existingRoot, track, handle };
+    existingRoot.remove();
+  }
+
+  const root = document.createElement("div");
+  root.className = "terminal-scrollbar";
+  root.setAttribute("aria-hidden", "true");
+  const track = document.createElement("div");
+  track.className = "terminal-scrollbar-track";
+  const handle = document.createElement("div");
+  handle.className = "terminal-scrollbar-handle";
+  track.append(handle);
+  root.append(track);
+  slot.append(root);
+  return { root, track, handle };
 }
 
 function syncTerminalScrollbarThumb(pane: TerminalPane) {
   const term = pane.term;
-  const scrollbar = pane.scrollbar;
-  if (!term || !scrollbar || !OverlayScrollbars.valid(scrollbar)) return;
+  if (!term) return;
 
   const state = terminalScrollbarState({
     baseY: term.buffer.active.baseY,
     viewportY: term.buffer.active.viewportY,
     rows: term.rows,
   });
-  const { scrollbar: vertical, track, handle } = scrollbar.elements().scrollbarVertical;
-  vertical.classList.toggle("os-scrollbar-visible", state.visible);
-  vertical.classList.toggle("os-scrollbar-unusable", !state.visible);
-  vertical.classList.toggle("os-scrollbar-nocturne-visible", state.visible);
-  vertical.style.setProperty("--os-viewport-percent", String(state.thumbSizePercent));
-  vertical.style.setProperty("--os-scroll-percent", String(state.scrollPercent));
-  vertical.style.position = "absolute";
-  vertical.style.top = "6px";
-  vertical.style.right = "4px";
-  vertical.style.bottom = "6px";
-  vertical.style.width = "10px";
-  vertical.style.opacity = state.visible ? "1" : "";
-  vertical.style.visibility = state.visible ? "visible" : "";
-  vertical.style.zIndex = state.visible ? "12" : "";
+  const dom = pane.scrollbarDom ?? ensureTerminalScrollbarDom(pane);
+  if (dom) pane.scrollbarDom = dom;
+  if (!dom) return;
+  const { root: vertical, track, handle } = dom;
+  vertical.classList.toggle("terminal-scrollbar-visible", state.visible);
   track.style.position = "relative";
   track.style.width = "100%";
   track.style.height = "100%";
-  handle.style.setProperty("height", `${state.thumbSizePercent * 100}%`);
-  handle.style.position = "absolute";
-  handle.style.top = "auto";
-  handle.style.right = "0";
-  handle.style.width = "100%";
-  handle.style.opacity = state.visible ? "1" : "";
+  handle.style.display = "block";
+  handle.style.height = `${state.thumbSizePercent * 100}%`;
+  handle.style.minHeight = "28px";
+  handle.style.setProperty("position", "absolute");
+  handle.style.setProperty("top", `${state.scrollPercent * (100 - state.thumbSizePercent * 100)}%`);
+  handle.style.setProperty("right", "0");
+  handle.style.setProperty("width", "100%");
 }
 
 function attachTerminalScrollbarInteraction(pane: TerminalPane): { dispose: () => void } {
   const term = pane.term;
-  const scrollbar = pane.scrollbar;
-  if (!term || !scrollbar || !OverlayScrollbars.valid(scrollbar)) return { dispose: () => {} };
+  const dom = pane.scrollbarDom ?? ensureTerminalScrollbarDom(pane);
+  if (!term || !dom) return { dispose: () => {} };
+  pane.scrollbarDom = dom;
 
-  const { scrollbar: vertical, track } = scrollbar.elements().scrollbarVertical;
+  const { root: vertical, track } = dom;
   let dragging = false;
   let pointerId: number | null = null;
 

@@ -330,6 +330,7 @@ pub(crate) fn build_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R
     let root = config::ensure_layout(app).map_err(config_to_io)?;
     let profiles = config::list_profiles_impl_from_app(app).map_err(config_to_io)?;
     let labels = menu_text(resolve_ui_language(app));
+    let keybindings = terminal_menu_keybindings(app);
 
     let new_window =
         terminal_menu_item(app, MENU_NEW_WINDOW, labels.new_window, Some("CmdOrCtrl+N"))?;
@@ -362,7 +363,7 @@ pub(crate) fn build_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R
         app,
         MENU_COMMAND_PALETTE,
         labels.command_palette,
-        Some("CmdOrCtrl+Shift+P"),
+        keybindings.open_command_palette.as_deref(),
     )?;
     let profile_new = MenuItem::with_id(
         app,
@@ -449,13 +450,18 @@ pub(crate) fn build_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R
     )?;
     let select_all =
         terminal_menu_item(app, MENU_SELECT_ALL, labels.select_all, Some("CmdOrCtrl+A"))?;
-    let find = terminal_menu_item(app, MENU_FIND, labels.find, Some("CmdOrCtrl+F"))?;
-    let find_next = terminal_menu_item(app, MENU_FIND_NEXT, labels.find_next, Some("CmdOrCtrl+G"))?;
+    let find = terminal_menu_item(app, MENU_FIND, labels.find, keybindings.find.as_deref())?;
+    let find_next = terminal_menu_item(
+        app,
+        MENU_FIND_NEXT,
+        labels.find_next,
+        keybindings.find_next.as_deref(),
+    )?;
     let find_previous = terminal_menu_item(
         app,
         MENU_FIND_PREVIOUS,
         labels.find_previous,
-        Some("CmdOrCtrl+Shift+G"),
+        keybindings.find_previous.as_deref(),
     )?;
     let hide_find_bar =
         terminal_menu_item(app, MENU_HIDE_FIND_BAR, labels.hide_find_bar, None::<&str>)?;
@@ -969,6 +975,80 @@ fn terminal_menu_item_enabled<R: Runtime, A: AsRef<str>>(
     accelerator: Option<A>,
 ) -> tauri::Result<MenuItem<R>> {
     MenuItem::with_id(app, id, label, enabled, accelerator)
+}
+
+struct TerminalMenuKeybindings {
+    find: Option<String>,
+    find_next: Option<String>,
+    find_previous: Option<String>,
+    open_command_palette: Option<String>,
+}
+
+fn terminal_menu_keybindings<R: Runtime>(app: &AppHandle<R>) -> TerminalMenuKeybindings {
+    let is_macos = cfg!(target_os = "macos");
+    let config = config::effective_application_config(app).ok();
+    TerminalMenuKeybindings {
+        find: terminal_accelerator(&config, "find", if is_macos { "Meta+F" } else { "Ctrl+F" }),
+        find_next: terminal_accelerator(
+            &config,
+            "findNext",
+            if is_macos { "Meta+G" } else { "Ctrl+G" },
+        ),
+        find_previous: terminal_accelerator(
+            &config,
+            "findPrevious",
+            if is_macos {
+                "Meta+Shift+G"
+            } else {
+                "Ctrl+Shift+G"
+            },
+        ),
+        open_command_palette: terminal_accelerator(
+            &config,
+            "openCommandPalette",
+            if is_macos {
+                "Meta+Shift+P"
+            } else {
+                "Ctrl+Shift+P"
+            },
+        ),
+    }
+}
+
+fn terminal_accelerator(
+    config: &Option<toml::Value>,
+    key: &str,
+    default_value: &str,
+) -> Option<String> {
+    let configured = config
+        .as_ref()
+        .and_then(|config| config.get("keybindings"))
+        .and_then(|keybindings| keybindings.as_table())
+        .and_then(|keybindings| keybindings.get("terminal"))
+        .and_then(|terminal| terminal.as_table())
+        .and_then(|terminal| terminal.get(key))
+        .and_then(|binding| binding.as_str())
+        .unwrap_or(default_value);
+    tauri_accelerator(configured)
+}
+
+fn tauri_accelerator(binding: &str) -> Option<String> {
+    if binding.trim().is_empty() {
+        return None;
+    }
+    Some(
+        binding
+            .split('+')
+            .map(|part| match part.trim().to_lowercase().as_str() {
+                "meta" | "cmd" | "command" => "CmdOrCtrl".to_string(),
+                "ctrl" | "control" => "Ctrl".to_string(),
+                "alt" | "option" => "Alt".to_string(),
+                "shift" => "Shift".to_string(),
+                key => key.to_uppercase(),
+            })
+            .collect::<Vec<_>>()
+            .join("+"),
+    )
 }
 
 fn handle_terminal_menu<R: Runtime>(app: &AppHandle<R>, id: &str) -> Result<()> {

@@ -50,5 +50,9 @@ describe("terminal keybindings", () => {
     assert.equal(map["terminal.splitLeft"], "Ctrl+Alt+Left");
     assert.equal(map["terminal.splitUp"], "Ctrl+Alt+Up");
     assert.equal(map["terminal.newTab"], "Ctrl+Shift+T");
+    assert.equal(map["terminal.openCommandPalette"], "Ctrl+Shift+P");
+    assert.equal(map["terminal.find"], "Ctrl+F");
+    assert.equal(map["terminal.findNext"], "Ctrl+G");
+    assert.equal(map["terminal.findPrevious"], "Ctrl+Shift+G");
   });
 });
