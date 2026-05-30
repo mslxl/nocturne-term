@@ -4,17 +4,20 @@
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { ask } from "@tauri-apps/plugin-dialog";
   import { readText, writeText } from "@tauri-apps/plugin-clipboard-manager";
+  import { OverlayScrollbarsComponent } from "overlayscrollbars-svelte";
   import "overlayscrollbars/overlayscrollbars.css";
   import "@xterm/xterm/css/xterm.css";
-  import { commands, type AppConfigSnapshot, type TabBarOrientation, type TerminalSettings } from "$lib/bindings";
-  import { appLanguageFromConfig, appThemeFromConfig, applyAppPreferences, configString, readValue, resolveTheme, writeValue } from "$lib/config/document";
+  import { commands, type AppConfigSnapshot, type TabBarOrientation, type TerminalSessionInfo, type TerminalSettings } from "$lib/bindings";
+  import { appLanguageFromConfig, appThemeFromConfig, applyAppPreferences, booleanValue, configString, readValue, resolveTheme, writeValue } from "$lib/config/document";
   import CommandPalette from "$lib/command-palette/CommandPalette.svelte";
   import { staticPaletteCommands } from "$lib/command-palette/commands";
   import { localizeCommand, searchPaletteItems, type PaletteItem, type PaletteSearchResult } from "$lib/command-palette/search";
+  import { buildHostFolderTree, hostFolderLabel, hostHasBlockingDiagnostics, hostSubtitle, type HostFolderTreeNode } from "$lib/hosts/model";
   import { hasTauriRuntime } from "$lib/tauri/runtime";
   import TerminalPaneTree from "$lib/terminal/components/TerminalPaneTree.svelte";
   import TerminalTabBar from "$lib/terminal/components/TerminalTabBar.svelte";
   import { unwrapCommand } from "$lib/terminal/commands";
+  import { isTerminalSessionInactiveMessage } from "$lib/terminal/errors";
   import {
     clearTerminalFindEffects,
     terminalFindSearchKeyChanged,
@@ -46,12 +49,14 @@
     disposeTerminalPane,
     disposeTerminalTab,
     measureTerminalFit,
+    retargetTerminalPaneSession,
     refreshTerminalTabTitle,
     terminalPaneById,
     type TerminalExitEvent,
     type TerminalOutputEvent,
     type TerminalPane,
     type TerminalTab,
+    type TerminalTransportStateEvent,
   } from "$lib/terminal/tabs";
   import { toTerminalSessionSizeInput } from "$lib/terminal/sizes";
   import { terminalMenuCanRedo, terminalMenuCanUndo } from "$lib/terminal/menu-history";
@@ -112,6 +117,10 @@
     currentDirectory: string;
     titleOverride: string;
     readOnly: boolean;
+    reconnectPending: boolean;
+    everConnected: boolean;
+    connectionHostId: string;
+    reconnectTrust: TerminalPane["reconnectTrust"];
     status: TerminalPane["status"];
     serialized: string;
     lastCols: number;
@@ -130,6 +139,27 @@
   type StoredHotTabs = {
     activeIndex: number;
     tabs: StoredTab[];
+  };
+  type SshCredentialKind = "password" | "key_passphrase";
+  type HostSessionRetry = {
+    connectionHostId: string;
+    acceptNewHostKey?: boolean;
+    updateChangedHostKey?: boolean;
+  };
+  type PendingSshCredential = {
+    paneId: string | null;
+    connectionHostId: string;
+    kind: SshCredentialKind;
+    acceptNewHostKey: boolean;
+    updateChangedHostKey: boolean;
+    value: string;
+    save: boolean;
+  };
+  type HostPickerMenu = {
+    node: HostFolderTreeNode;
+    left: number;
+    top: number;
+    opensLeft: boolean;
   };
 
   const initialCols = 80;
@@ -213,6 +243,7 @@
   let tabBarOrientation = $state<TabBarOrientation>("horizontal");
   let outputUnlisten: undefined | (() => void);
   let exitUnlisten: undefined | (() => void);
+  let transportStateUnlisten: undefined | (() => void);
   let configUnlisten: undefined | (() => void);
   let paneMenuUnlisten: undefined | (() => void);
   let terminalMenuUnlisten: undefined | (() => void);
@@ -226,9 +257,16 @@
   let appliedFindSearchKey: TerminalFindSearchKey | null = null;
   let movedPaneIds = new Set<string>();
   let findInput = $state<HTMLInputElement>();
+  let sshCredentialInput = $state<HTMLInputElement>();
   let commandPaletteOpen = $state(false);
   let commandPaletteQuery = $state("");
   let commandPaletteSelected = $state(0);
+  let hostPickerOpen = $state(false);
+  let hostPickerPosition = $state({ left: 10, top: 44 });
+  let hostPickerSubmenus = $state<HostPickerMenu[]>([]);
+  let secondaryClickOpensDefault = $state(false);
+  let pendingSshCredential = $state<PendingSshCredential | null>(null);
+  let hostSessionRetryByPaneId = $state<Record<string, HostSessionRetry>>({});
   let commandPaletteLastFocus: HTMLElement | null = null;
   let recentPaletteIds = $state<string[]>([]);
   let zoomedPane = $state<{ tabId: string; paneId: string; tree: TerminalTab["tree"]; activePaneId: string } | null>(null);
@@ -277,6 +315,9 @@
     notifySelectionChange: () => {
       syncTerminalMenuState();
     },
+    requestReconnect: (paneId) => {
+      void reconnectPaneAfterDisconnect(paneId);
+    },
   });
 
   async function loadSettings() {
@@ -287,6 +328,7 @@
     setLanguage(appLanguageFromConfig(readValue(snapshot.effective_config.root, ["ui", "language"])));
     appTheme = resolveTheme(appThemeFromConfig(readValue(snapshot.effective_config.root, ["ui", "theme"])));
     keybindings = readKeybindingMap(snapshot.effective_config.root, navigator.platform.toLowerCase().includes("mac"));
+    secondaryClickOpensDefault = booleanValue(readValue(snapshot.effective_config.root, ["session", "secondary_click_opens_default"])) ?? false;
     const next = await unwrapCommand(commands.getTerminalSettingsForTheme({ resolved_theme: appTheme }));
     settings = next;
     tabBarOrientation = next.tab_bar_orientation;
@@ -314,14 +356,63 @@
     };
   }
 
-  async function newSession({ recordHistory = true }: { recordHistory?: boolean } = {}) {
+  async function createHostSession(
+    connectionHostId: string,
+    {
+      cwd = null,
+      recordHistory = true,
+      trust = {},
+    }: {
+      cwd?: string | null;
+      recordHistory?: boolean;
+      trust?: {
+        acceptNewHostKey?: boolean;
+        updateChangedHostKey?: boolean;
+        credential?: { kind: SshCredentialKind; value: string };
+        saveCredential?: boolean;
+      };
+    } = {},
+  ) {
+    let info: TerminalSessionInfo;
     try {
       if (!settings) await loadSettings();
       await tick();
-      const info = await unwrapCommand(commands.createTerminalSession(measureNewTerminal()));
-      const tab = createTerminalTab(info);
-      tabs = [...tabs, tab];
-      activeId = tab.id;
+      const measured = measureNewTerminal(cwd);
+      info = await unwrapCommand(
+        commands.createHostTerminalSession({
+          ...measured,
+          connection_host_id: connectionHostId,
+          accept_new_host_key: trust.acceptNewHostKey === true,
+          update_changed_host_key: trust.updateChangedHostKey === true,
+          credential: trust.credential ?? null,
+          save_credential: trust.saveCredential === true,
+        }),
+      );
+    } catch (error) {
+      await handleHostSessionError(connectionHostId, error, trust);
+      return;
+    }
+
+    const tab = createTerminalTab(info);
+    const pane = terminalPaneById(tab, tab.activePaneId);
+    if (!pane) throw new Error(`active pane ${tab.activePaneId} not found in created tab`);
+    pane.connectionHostId = connectionHostId;
+    pane.reconnectTrust = {
+      acceptNewHostKey: trust.acceptNewHostKey,
+      updateChangedHostKey: trust.updateChangedHostKey,
+    };
+    tabs = [...tabs, tab];
+    activeId = tab.id;
+    hostSessionRetryByPaneId = {
+      ...hostSessionRetryByPaneId,
+      [tab.activePaneId]: {
+        connectionHostId,
+        acceptNewHostKey: trust.acceptNewHostKey,
+        updateChangedHostKey: trust.updateChangedHostKey,
+      },
+    };
+    settingsError = "";
+    try {
       await tick();
       await mountTerminalWhenReady(tab.activePaneId);
       await flushTerminalOutputBacklog(tab.activePaneId);
@@ -332,18 +423,118 @@
         syncTerminalMenuState();
       }
     } catch (error) {
-      settingsError = error instanceof Error ? error.message : String(error);
+      terminalTabs.markConnectionError(tab.activePaneId, error instanceof Error ? error.message : String(error));
     }
+  }
+
+  async function reconnectHostSessionInPane(
+    paneId: string,
+    connectionHostId: string,
+    trust: {
+      acceptNewHostKey?: boolean;
+      updateChangedHostKey?: boolean;
+      credential?: { kind: SshCredentialKind; value: string };
+      saveCredential?: boolean;
+    },
+  ) {
+    const tab = findTabByPaneId(paneId);
+    const pane = terminalPaneById(tab, paneId);
+    if (!pane) throw new Error(`pane ${paneId} not found`);
+    if (!settings) await loadSettings();
+    await tick();
+    const info = await unwrapCommand(
+      commands.createHostTerminalSession({
+        ...measureNewTerminal(pane.currentDirectory.trim() || null),
+        connection_host_id: connectionHostId,
+        accept_new_host_key: trust.acceptNewHostKey === true,
+        update_changed_host_key: trust.updateChangedHostKey === true,
+        credential: trust.credential ?? null,
+        save_credential: trust.saveCredential === true,
+      }),
+    );
+    const nextPaneId = info.id;
+    tab.tree = replacePane(tab.tree, paneId, nextPaneId);
+    if (tab.activePaneId === paneId) tab.activePaneId = nextPaneId;
+    retargetTerminalPaneSession(pane, info);
+    pane.connectionHostId = connectionHostId;
+    pane.reconnectTrust = {
+      acceptNewHostKey: trust.acceptNewHostKey,
+      updateChangedHostKey: trust.updateChangedHostKey,
+    };
+    refreshTerminalTabTitle(tab);
+    activeId = tab.id;
+    hostSessionRetryByPaneId = {
+      ...hostSessionRetryByPaneId,
+      [nextPaneId]: {
+        connectionHostId,
+        acceptNewHostKey: trust.acceptNewHostKey,
+        updateChangedHostKey: trust.updateChangedHostKey,
+      },
+    };
+    await tick();
+    await mountTerminalWhenReady(nextPaneId);
+    await flushTerminalOutputBacklog(nextPaneId);
+    terminalTabs.scheduleFit(nextPaneId);
+    pane.term?.focus();
+    syncTerminalMenuState();
+  }
+
+  async function reconnectPaneAfterDisconnect(paneId: string) {
+    const tab = findTabByPaneId(paneId);
+    const pane = terminalPaneById(tab, paneId);
+    if (!pane) return;
+    if (!pane.connectionHostId) {
+      terminalTabs.markReconnectUnavailable(paneId, "This pane has no host metadata for reconnect.");
+      return;
+    }
+    try {
+      await reconnectHostSessionInPane(paneId, pane.connectionHostId, pane.reconnectTrust);
+    } catch (error) {
+      terminalTabs.markReconnectUnavailable(paneId, error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  async function openDefaultSession({ recordHistory = true }: { recordHistory?: boolean } = {}) {
+    const defaultHostId = lastConfigSnapshot?.root.default_host ?? "";
+    await createHostSession(defaultHostId, { recordHistory });
+  }
+
+  async function newSession({ recordHistory = true }: { recordHistory?: boolean } = {}) {
+    if (secondaryClickOpensDefault) {
+      openHostPickerAtElement(document.querySelector<HTMLElement>("[data-testid='new-session']"));
+      return;
+    }
+    await openDefaultSession({ recordHistory });
+  }
+
+  async function handleNewSessionSecondaryClick(event: MouseEvent) {
+    event.preventDefault();
+    event.stopPropagation();
+    if (secondaryClickOpensDefault) {
+      await openDefaultSession();
+      return;
+    }
+    openHostPicker(event);
   }
 
   async function ensureStartupSession(restored: boolean) {
     if (restored || tabs.length > 0) return;
-    await newSession({ recordHistory: false });
+    await openDefaultSession({ recordHistory: false });
   }
 
   async function flushTerminalOutputBacklog(paneId: string) {
     if (!hasTauriRuntime()) return;
-    const event = await unwrapCommand(commands.takeTerminalOutputBacklog({ session_id: paneId }));
+    let event: TerminalOutputEvent | null;
+    try {
+      event = await unwrapCommand(commands.takeTerminalOutputBacklog({ session_id: paneId }));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (isTerminalSessionInactiveMessage(message)) {
+        terminalTabs.markConnectionError(paneId, message);
+        return;
+      }
+      throw error;
+    }
     if (event) enqueueTerminalOutput(event);
   }
 
@@ -452,7 +643,8 @@
       if (!settings) await loadSettings();
       await tick();
       const cwd = sourcePane.currentDirectory.trim() || null;
-      const info = await unwrapCommand(commands.createTerminalSession(measureNewTerminal(cwd)));
+      const defaultHostId = lastConfigSnapshot?.root.default_host ?? "";
+      const info = await createHostPaneSession(defaultHostId, cwd);
       const nextPane = createTerminalPane(info, tab.id);
       tab.panes = [...tab.panes, nextPane];
       tab.tree = splitPane(tab.tree, paneId, nextPane.id, side);
@@ -471,6 +663,20 @@
     } catch (error) {
       settingsError = error instanceof Error ? error.message : String(error);
     }
+  }
+
+  async function createHostPaneSession(connectionHostId: string, cwd: string | null) {
+    const measured = measureNewTerminal(cwd);
+    return unwrapCommand(
+      commands.createHostTerminalSession({
+        ...measured,
+        connection_host_id: connectionHostId,
+        accept_new_host_key: false,
+        update_changed_host_key: false,
+        credential: null,
+        save_credential: false,
+      }),
+    );
   }
 
   async function closePane(paneId: string, { recordHistory = false }: { recordHistory?: boolean } = {}) {
@@ -659,7 +865,7 @@
   }
 
   async function restoreCreatedTabForRedo(): Promise<TerminalUndoAction> {
-    await newSession({ recordHistory: false });
+    await openDefaultSession({ recordHistory: false });
     const tab = tabs.find((item) => item.id === activeId);
     if (!tab) throw new Error("redo did not create a terminal tab");
     return { kind: "create_tab", tabId: tab.id };
@@ -991,6 +1197,10 @@
         currentDirectory: pane.currentDirectory,
         titleOverride: pane.titleOverride,
         readOnly: pane.readOnly,
+        reconnectPending: pane.reconnectPending,
+        everConnected: pane.everConnected,
+        connectionHostId: pane.connectionHostId,
+        reconnectTrust: pane.reconnectTrust,
         status: pane.status,
         serialized: pane.serialize?.serialize({ scrollback: 1000 }) ?? "",
         lastCols: pane.lastCols,
@@ -1062,14 +1272,31 @@
   async function restoreStoredPanes(stored: StoredTab) {
     const restoredPanes: TerminalPane[] = [];
     for (const pane of stored.panes) {
-      const info = await unwrapCommand(commands.existingTerminalSessionInfo({ session_id: pane.id }));
-      const restored = createTerminalPane(info, "");
+      const restored = pane.reconnectPending
+        ? createTerminalPane({
+            id: pane.id,
+            title: pane.title,
+            command: pane.command,
+            cwd: pane.currentDirectory || null,
+            cols: pane.lastCols,
+            rows: pane.lastRows,
+            pixel_width: pane.lastPixelWidth,
+            pixel_height: pane.lastPixelHeight,
+            process_id: null,
+            transport: "ssh",
+            transport_state: "disconnected",
+          }, "")
+        : createTerminalPane(await unwrapCommand(commands.existingTerminalSessionInfo({ session_id: pane.id })), "");
       restored.title = pane.title;
       restored.baseTitle = pane.baseTitle;
       restored.command = pane.command;
       restored.currentDirectory = pane.currentDirectory;
       restored.titleOverride = pane.titleOverride;
       restored.readOnly = pane.readOnly;
+      restored.reconnectPending = pane.reconnectPending;
+      restored.everConnected = pane.everConnected || pane.status === "running" || pane.status === "disconnected";
+      restored.connectionHostId = pane.connectionHostId;
+      restored.reconnectTrust = pane.reconnectTrust;
       restored.status = pane.status;
       restored.lastCols = pane.lastCols;
       restored.lastRows = pane.lastRows;
@@ -1736,7 +1963,54 @@
         disabledReason: paletteDisabledReason(item.id, hasActivePane, hasMultiplePanes),
       };
     });
-    return [...staticItems, ...tabPaletteItems(), ...profilePaletteItems()];
+    return [...staticItems, ...connectionHostPaletteItems(), ...tabPaletteItems(), ...profilePaletteItems()];
+  }
+
+  function connectionHostPaletteItems(): PaletteItem[] {
+    return (lastConfigSnapshot?.hosts ?? []).map((host) => {
+      const id = `connection.connect:${host.id}`;
+      const ssh = host.document.ssh;
+      const local = host.document.local;
+      const folder = hostFolderLabel(host);
+      return {
+        id,
+        kind: "connection-host",
+        title: `${host.document.protocol === "local" ? "Start" : "Connect"}: ${host.document.name}`,
+        scope: host.source === "open_ssh_config" ? folder : `${t("hosts")} / ${folder}`,
+        keywords: [
+          host.document.name,
+          folder,
+          host.document.icon_pack ?? "",
+          host.document.protocol,
+          local?.command ?? "",
+          local?.cwd ?? "",
+          ssh?.hostname ?? "",
+          ssh?.username ?? "",
+          ssh?.proxy_jump ?? "",
+          hostSubtitle(host),
+          "session",
+          "host",
+          "connect",
+          "connection",
+          "local",
+          "ssh",
+          "会话",
+          "连接",
+          "主机",
+          "本地",
+          "lianjie",
+          "lj",
+          "zhuji",
+          "zj",
+        ],
+        disabledReason: hostHasBlockingDiagnostics(host) ? host.diagnostics.find((diagnostic) => diagnostic.severity === "error")?.message : undefined,
+        recentScore: paletteRecentScore(id),
+      };
+    });
+  }
+
+  function hostPickerGroups() {
+    return buildHostFolderTree(lastConfigSnapshot?.hosts ?? []);
   }
 
   function tabPaletteItems(): PaletteItem[] {
@@ -1844,6 +2118,54 @@
     commandPaletteOpen = true;
   }
 
+  function openHostPickerAtElement(element: HTMLElement | null) {
+    const rect = element?.getBoundingClientRect() ?? null;
+    if (rect) {
+      const width = Math.min(320, window.innerWidth - 20);
+      const left = Math.min(Math.max(10, rect.right - width), Math.max(10, window.innerWidth - width - 10));
+      const below = rect.bottom + 6;
+      const above = rect.top - 426;
+      hostPickerPosition = {
+        left,
+        top: below < window.innerHeight - 80 ? below : Math.max(10, above),
+      };
+    }
+    hostPickerSubmenus = [];
+    hostPickerOpen = !hostPickerOpen;
+  }
+
+  function openHostPicker(event: MouseEvent) {
+    openHostPickerAtElement(event.currentTarget instanceof HTMLElement ? event.currentTarget : null);
+  }
+
+  async function runHostPickerHost(id: string) {
+    hostPickerOpen = false;
+    hostPickerSubmenus = [];
+    await createHostSession(id);
+  }
+
+  async function openHostManagerFromPicker() {
+    hostPickerOpen = false;
+    hostPickerSubmenus = [];
+    if (hasTauriRuntime()) await unwrapCommand(commands.openHostManagerWindow());
+  }
+
+  function showHostPickerSubmenu(node: HostFolderTreeNode, level: number, event: MouseEvent | FocusEvent) {
+    const target = event.currentTarget instanceof HTMLElement ? event.currentTarget : null;
+    if (!target) return;
+    const rect = target.getBoundingClientRect();
+    const width = Math.min(320, Math.max(240, window.innerWidth - 20));
+    const height = Math.min(390, window.innerHeight - 20);
+    const opensLeft = rect.right + 8 + width > window.innerWidth - 10;
+    const left = opensLeft ? Math.max(10, rect.left - width - 8) : Math.min(window.innerWidth - width - 10, rect.right + 8);
+    const top = Math.min(Math.max(10, rect.top - 6), Math.max(10, window.innerHeight - height - 10));
+    hostPickerSubmenus = [...hostPickerSubmenus.slice(0, level), { node, left, top, opensLeft }];
+  }
+
+  function trimHostPickerSubmenus(level: number) {
+    hostPickerSubmenus = hostPickerSubmenus.slice(0, level);
+  }
+
   async function closeCommandPalette({ restoreFocus = true }: { restoreFocus?: boolean } = {}) {
     commandPaletteOpen = false;
     commandPaletteQuery = "";
@@ -1883,12 +2205,20 @@
       await switchActiveProfile(id.slice("profile.switch:".length));
       return;
     }
+    if (id.startsWith("connection.connect:")) {
+      await createHostSession(id.slice("connection.connect:".length));
+      return;
+    }
     if (id.startsWith("ui.theme.")) {
       await switchAppTheme(id.slice("ui.theme.".length) as "system" | "light" | "dark");
       return;
     }
     if (id === "settings.open") {
       if (hasTauriRuntime()) await unwrapCommand(commands.openSettingsWindow("main"));
+      return;
+    }
+    if (id === "hosts.openManager") {
+      if (hasTauriRuntime()) await unwrapCommand(commands.openHostManagerWindow());
       return;
     }
     if (id === "profile.new") {
@@ -1902,6 +2232,179 @@
     if (id === "terminal.togglePaneZoom") return togglePaneZoom();
     runTerminalCommand(id as TerminalCommandId);
   }
+
+  async function handleHostSessionError(
+    connectionHostId: string,
+    error: unknown,
+    trust: {
+      acceptNewHostKey?: boolean;
+      updateChangedHostKey?: boolean;
+      credential?: { kind: SshCredentialKind; value: string };
+      saveCredential?: boolean;
+    } = {},
+  ) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (isUnknownHostKeyMessage(message) && !trust.acceptNewHostKey) {
+      const allow = await ask(`${message}\n\nTrust this host key and continue?`, {
+        title: "SSH Host Key",
+        kind: "warning",
+        okLabel: "Trust Host Key",
+        cancelLabel: "Cancel",
+      });
+      if (allow) return createHostSession(connectionHostId, { trust: { acceptNewHostKey: true } });
+    }
+    if (isChangedHostKeyMessage(message) && !trust.updateChangedHostKey) {
+      const allow = await ask(`${message}\n\nOnly continue if you expected this host key to change.`, {
+        title: "SSH Host Key Changed",
+        kind: "warning",
+        okLabel: "Update Trust Record",
+        cancelLabel: "Cancel",
+      });
+      if (allow) return createHostSession(connectionHostId, { trust: { updateChangedHostKey: true } });
+    }
+    const credentialKind = sshCredentialKindFromError(message);
+    if (credentialKind) {
+      pendingSshCredential = {
+        paneId: null,
+        connectionHostId,
+        kind: credentialKind,
+        acceptNewHostKey: trust.acceptNewHostKey === true,
+        updateChangedHostKey: trust.updateChangedHostKey === true,
+        value: "",
+        save: false,
+      };
+      return;
+    }
+    settingsError = message;
+  }
+
+  function clearHostSessionRetry(paneId: string) {
+    if (!hostSessionRetryByPaneId[paneId]) return;
+    const { [paneId]: _removed, ...rest } = hostSessionRetryByPaneId;
+    hostSessionRetryByPaneId = rest;
+  }
+
+  function markConnectionCancelled(paneId: string, message: string) {
+    clearHostSessionRetry(paneId);
+    void unwrapCommand(commands.closeTerminalSession(paneId)).catch(() => {});
+    terminalTabs.markConnectionCancelled(paneId, message);
+  }
+
+  function isChangedHostKeyMessage(message: string) {
+    return message.includes("host key changed");
+  }
+
+  function isUnknownHostKeyMessage(message: string) {
+    return message.includes("not trusted") && !isChangedHostKeyMessage(message);
+  }
+
+  async function handleTerminalExit(event: TerminalExitEvent) {
+    const retry = hostSessionRetryByPaneId[event.session_id];
+    if (retry && event.signal) {
+      if (handleSshCredentialExit(event.session_id, retry, event.signal)) return;
+      if (await handleSshTrustExit(event.session_id, retry, event.signal)) return;
+    }
+    clearHostSessionRetry(event.session_id);
+    terminalTabs.markExited(event);
+  }
+
+  async function handleSshTrustExit(paneId: string, retry: HostSessionRetry, message: string) {
+    if (isUnknownHostKeyMessage(message) && !retry.acceptNewHostKey) {
+      const allow = await ask(`${message}\n\nTrust this host key and reconnect?`, {
+        title: "SSH Host Key",
+        kind: "warning",
+        okLabel: "Trust Host Key",
+        cancelLabel: "Cancel",
+      });
+      clearHostSessionRetry(paneId);
+      if (allow) {
+        try {
+          await reconnectHostSessionInPane(paneId, retry.connectionHostId, { acceptNewHostKey: true });
+        } catch (error) {
+          terminalTabs.markConnectionError(paneId, error instanceof Error ? error.message : String(error));
+        }
+      } else {
+        markConnectionCancelled(paneId, "SSH host key was not trusted. Connection canceled.");
+      }
+      return true;
+    }
+    if (isChangedHostKeyMessage(message) && !retry.updateChangedHostKey) {
+      const allow = await ask(`${message}\n\nOnly continue if you expected this host key to change.`, {
+        title: "SSH Host Key Changed",
+        kind: "warning",
+        okLabel: "Update Trust Record",
+        cancelLabel: "Cancel",
+      });
+      clearHostSessionRetry(paneId);
+      if (allow) {
+        try {
+          await reconnectHostSessionInPane(paneId, retry.connectionHostId, { updateChangedHostKey: true });
+        } catch (error) {
+          terminalTabs.markConnectionError(paneId, error instanceof Error ? error.message : String(error));
+        }
+      } else {
+        markConnectionCancelled(paneId, "SSH host key changed. Connection canceled.");
+      }
+      return true;
+    }
+    return false;
+  }
+
+  function handleSshCredentialExit(paneId: string, retry: HostSessionRetry, message: string) {
+    const credentialKind = sshCredentialKindFromError(message);
+    if (!credentialKind) return false;
+    clearHostSessionRetry(paneId);
+    terminalTabs.markConnectionPrompt(paneId, "Waiting for SSH credential");
+    pendingSshCredential = {
+      paneId,
+      connectionHostId: retry.connectionHostId,
+      kind: credentialKind,
+      acceptNewHostKey: retry.acceptNewHostKey === true,
+      updateChangedHostKey: retry.updateChangedHostKey === true,
+      value: "",
+      save: false,
+    };
+    return true;
+  }
+
+  function sshCredentialKindFromError(message: string): SshCredentialKind | null {
+    if (message.includes("ssh credential required: key_passphrase")) return "key_passphrase";
+    if (message.includes("ssh credential required: password")) return "password";
+    return null;
+  }
+
+  async function submitSshCredential() {
+    if (!pendingSshCredential) return;
+    const pending = pendingSshCredential;
+    pendingSshCredential = null;
+    const trust = {
+      acceptNewHostKey: pending.acceptNewHostKey,
+      updateChangedHostKey: pending.updateChangedHostKey,
+      credential: { kind: pending.kind, value: pending.value },
+      saveCredential: pending.save,
+    };
+    if (pending.paneId) {
+      try {
+        await reconnectHostSessionInPane(pending.paneId, pending.connectionHostId, trust);
+      } catch (error) {
+        terminalTabs.markConnectionError(pending.paneId, error instanceof Error ? error.message : String(error));
+      }
+    } else {
+      await createHostSession(pending.connectionHostId, { trust });
+    }
+  }
+
+  function cancelSshCredential() {
+    if (pendingSshCredential?.paneId) {
+      markConnectionCancelled(pendingSshCredential.paneId, "SSH credential prompt canceled.");
+    }
+    pendingSshCredential = null;
+  }
+
+  $effect(() => {
+    if (!pendingSshCredential) return;
+    void tick().then(() => sshCredentialInput?.focus());
+  });
 
   async function switchActiveProfile(name: string) {
     await unwrapCommand(commands.setActiveProfile(name));
@@ -1961,7 +2464,7 @@
       return;
     }
     if (command === "new_tab") {
-      await newSession();
+      await openDefaultSession();
       return;
     }
     if (command === "split_right") return splitActivePane("right");
@@ -2047,8 +2550,8 @@
       openCommandPalette();
       return;
     }
-    if (command === "terminal.newTab") {
-      void newSession();
+    if (command === "terminal.newSession") {
+      void openDefaultSession();
       return;
     }
     if (command === "terminal.closeTab" && activeId) {
@@ -2092,9 +2595,14 @@
     let mounted = true;
     void (async () => {
       if (hasTauriRuntime()) {
-        const [outputDispose, exitDispose, configDispose, paneMenuDispose, terminalMenuDispose] = await Promise.all([
+        const [outputDispose, exitDispose, transportStateDispose, configDispose, paneMenuDispose, terminalMenuDispose] = await Promise.all([
           listen<TerminalOutputEvent>("terminal://output", (event) => enqueueTerminalOutput(event.payload)),
-          listen<TerminalExitEvent>("terminal://exit", (event) => terminalTabs.markExited(event.payload)),
+          listen<TerminalExitEvent>("terminal://exit", (event) => {
+            void handleTerminalExit(event.payload).catch((error) => {
+              settingsError = error instanceof Error ? error.message : String(error);
+            });
+          }),
+          listen<TerminalTransportStateEvent>("terminal://transport-state", (event) => terminalTabs.markTransportState(event.payload)),
           listen("config://changed", () => {
             void loadSettings().catch((error) => {
               settingsError = error instanceof Error ? error.message : String(error);
@@ -2110,6 +2618,7 @@
         if (!mounted) {
           outputDispose();
           exitDispose();
+          transportStateDispose();
           configDispose();
           paneMenuDispose();
           terminalMenuDispose();
@@ -2117,6 +2626,7 @@
         }
         outputUnlisten = outputDispose;
         exitUnlisten = exitDispose;
+        transportStateUnlisten = transportStateDispose;
         configUnlisten = configDispose;
         paneMenuUnlisten = paneMenuDispose;
         terminalMenuUnlisten = terminalMenuDispose;
@@ -2156,6 +2666,7 @@
       document.removeEventListener("visibilitychange", handleVisibilityChange);
       outputUnlisten?.();
       exitUnlisten?.();
+      transportStateUnlisten?.();
       configUnlisten?.();
       paneMenuUnlisten?.();
       terminalMenuUnlisten?.();
@@ -2211,6 +2722,8 @@
       {activateTab}
       {closeTab}
       {newSession}
+      openHostPicker={openHostPicker}
+      {handleNewSessionSecondaryClick}
       openContextMenu={tabContextMenu}
       {startTabPointerDrag}
     />
@@ -2256,9 +2769,116 @@
       {activateTab}
       {closeTab}
       {newSession}
+      openHostPicker={openHostPicker}
+      {handleNewSessionSecondaryClick}
       openContextMenu={tabContextMenu}
       {startTabPointerDrag}
     />
+  {/if}
+
+  {#if hostPickerOpen}
+    <section class="connection-picker" style={`--picker-left: ${hostPickerPosition.left}px; --picker-top: ${hostPickerPosition.top}px;`} aria-label="Hosts">
+      <OverlayScrollbarsComponent
+        element="div"
+        class="connection-picker-scroll"
+        options={{
+          overflow: {
+            x: "hidden",
+            y: "scroll",
+          },
+          scrollbars: {
+            autoHide: "leave",
+            autoHideDelay: 360,
+            theme: "os-theme-nocturne",
+          },
+        }}
+        defer
+      >
+        <div class="connection-picker-content">
+          {#each hostPickerGroups().hosts as host}
+            <button type="button" disabled={hostHasBlockingDiagnostics(host)} onclick={() => void runHostPickerHost(host.id)}>
+              <span>{host.document.name}</span>
+              <small>{hostSubtitle(host)}</small>
+            </button>
+          {/each}
+          {#each hostPickerGroups().children as node}
+            {@render pickerFolderRow(node, 0)}
+          {/each}
+          <button class="manager-row" type="button" onclick={() => void openHostManagerFromPicker()}>
+            <span>Manage Hosts</span>
+            <small>Open Host Manager</small>
+          </button>
+        </div>
+      </OverlayScrollbarsComponent>
+    </section>
+    {#each hostPickerSubmenus as menu, index}
+      <section
+        class:opens-left={menu.opensLeft}
+        class="connection-picker picker-submenu"
+        style={`--picker-left: ${menu.left}px; --picker-top: ${menu.top}px;`}
+        aria-label={menu.node.name}
+        onmouseenter={() => trimHostPickerSubmenus(index + 1)}
+      >
+        <OverlayScrollbarsComponent
+          element="div"
+          class="connection-picker-scroll"
+          options={{
+            overflow: {
+              x: "hidden",
+              y: "scroll",
+            },
+            scrollbars: {
+              autoHide: "leave",
+              autoHideDelay: 360,
+              theme: "os-theme-nocturne",
+            },
+          }}
+          defer
+        >
+          <div class="connection-picker-content">
+            {#each menu.node.hosts as host}
+              <button type="button" disabled={hostHasBlockingDiagnostics(host)} onclick={() => void runHostPickerHost(host.id)}>
+                <span>{host.document.name}</span>
+                <small>{hostSubtitle(host)}</small>
+              </button>
+            {/each}
+            {#each menu.node.children as child}
+              {@render pickerFolderRow(child, index + 1)}
+            {/each}
+          </div>
+        </OverlayScrollbarsComponent>
+      </section>
+    {/each}
+  {/if}
+
+  {#if pendingSshCredential}
+    <form
+      class="ssh-credential-sheet"
+      onsubmit={(event) => {
+        event.preventDefault();
+        void submitSshCredential();
+      }}
+    >
+      <header>
+        <h2>{pendingSshCredential.kind === "password" ? "SSH Password" : "SSH Key Passphrase"}</h2>
+        <button type="button" aria-label="Cancel" title="Cancel" onclick={cancelSshCredential}>×</button>
+      </header>
+      <input
+        type="password"
+        autocomplete="off"
+        bind:this={sshCredentialInput}
+        bind:value={pendingSshCredential.value}
+        aria-label={pendingSshCredential.kind === "password" ? "SSH password" : "SSH key passphrase"}
+      />
+      <label>
+        <input type="checkbox" bind:checked={pendingSshCredential.save} />
+        <span>Save in system keyring</span>
+      </label>
+      <footer>
+        <button type="button" onclick={cancelSshCredential}>Cancel</button>
+        <button type="submit">Connect</button>
+      </footer>
+    </form>
   {/if}
 
   {#if findVisible}
@@ -2347,6 +2967,21 @@
   />
 
 </main>
+
+{#snippet pickerFolderRow(node: HostFolderTreeNode, level: number)}
+  <button
+    class="folder-row"
+    type="button"
+    aria-haspopup="menu"
+    aria-expanded={hostPickerSubmenus[level]?.node.path === node.path}
+    onmouseenter={(event) => showHostPickerSubmenu(node, level, event)}
+    onfocus={(event) => showHostPickerSubmenu(node, level, event)}
+  >
+    <span>{node.name}</span>
+    <small>{node.hosts.length + node.children.length} item(s)</small>
+    <em>›</em>
+  </button>
+{/snippet}
 
 <style>
   :global(:root) {
@@ -2451,6 +3086,182 @@
   .terminal-pane.active {
     visibility: visible;
     pointer-events: auto;
+  }
+
+  .connection-picker {
+    position: fixed;
+    top: var(--picker-top);
+    left: var(--picker-left);
+    z-index: 18;
+    width: min(320px, calc(100vw - 20px));
+    max-height: min(410px, calc(100vh - 62px));
+    overflow: hidden;
+    padding: 6px;
+    border: 1px solid color-mix(in srgb, var(--app-fg) 16%, transparent);
+    border-radius: 8px;
+    background: color-mix(in srgb, var(--app-bg) 94%, transparent);
+    box-shadow: 0 14px 34px color-mix(in srgb, #000 22%, transparent);
+    -webkit-backdrop-filter: blur(18px);
+    backdrop-filter: blur(18px);
+  }
+
+  .connection-picker :global(.connection-picker-scroll) {
+    max-height: min(398px, calc(100vh - 74px));
+  }
+
+  .connection-picker-content {
+    display: grid;
+    gap: 2px;
+  }
+
+  .connection-picker button {
+    min-width: 0;
+    min-height: 42px;
+    display: grid;
+    gap: 2px;
+    border: 0;
+    border-radius: 6px;
+    padding: 6px 9px;
+    color: inherit;
+    background: transparent;
+    font: inherit;
+    text-align: left;
+  }
+
+  .connection-picker button:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--app-fg) 10%, transparent);
+  }
+
+  .connection-picker button:active:not(:disabled) {
+    background: var(--app-active);
+  }
+
+  .connection-picker button:disabled {
+    color: color-mix(in srgb, var(--app-fg) 38%, transparent);
+  }
+
+  .connection-picker .folder-row {
+    position: relative;
+    grid-template-columns: minmax(0, 1fr) auto;
+    padding-right: 24px;
+  }
+
+  .connection-picker .folder-row em {
+    position: absolute;
+    right: 9px;
+    align-self: center;
+    color: color-mix(in srgb, var(--app-fg) 54%, transparent);
+    font-style: normal;
+  }
+
+  .picker-submenu {
+    z-index: 19;
+  }
+
+  .picker-submenu :global(.connection-picker-scroll) {
+    max-height: min(398px, calc(100vh - 74px));
+  }
+
+  .connection-picker span,
+  .connection-picker small {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .connection-picker span {
+    font-size: 13px;
+    line-height: 1.15;
+  }
+
+  .connection-picker small {
+    color: color-mix(in srgb, var(--app-fg) 58%, transparent);
+    font-size: 11px;
+    line-height: 1.15;
+  }
+
+  .connection-picker .manager-row {
+    border-top: 1px solid color-mix(in srgb, var(--app-fg) 12%, transparent);
+    border-radius: 0 0 6px 6px;
+    margin-top: 4px;
+  }
+
+  :global(.os-theme-nocturne.os-scrollbar) {
+    --os-size: 7px;
+    --os-padding-perpendicular: 2px;
+    --os-padding-axis: 4px;
+    --os-handle-border-radius: 999px;
+    --os-handle-bg: color-mix(in srgb, var(--app-fg) 26%, transparent);
+    --os-handle-bg-hover: color-mix(in srgb, var(--app-fg) 34%, transparent);
+    --os-handle-bg-active: color-mix(in srgb, var(--app-fg) 42%, transparent);
+  }
+
+  .ssh-credential-sheet {
+    position: fixed;
+    top: 50%;
+    left: 50%;
+    z-index: 22;
+    width: min(380px, calc(100vw - 28px));
+    display: grid;
+    gap: 12px;
+    transform: translate(-50%, -50%);
+    padding: 14px;
+    border: 1px solid color-mix(in srgb, var(--app-fg) 18%, transparent);
+    border-radius: 8px;
+    background: color-mix(in srgb, var(--app-bg) 96%, transparent);
+    box-shadow: 0 18px 42px color-mix(in srgb, #000 28%, transparent);
+    -webkit-backdrop-filter: blur(18px);
+    backdrop-filter: blur(18px);
+  }
+
+  .ssh-credential-sheet header,
+  .ssh-credential-sheet footer {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+  }
+
+  .ssh-credential-sheet h2 {
+    margin: 0;
+    font-size: 15px;
+    line-height: 1.2;
+  }
+
+  .ssh-credential-sheet input[type="password"] {
+    width: 100%;
+    height: 32px;
+    border: 1px solid color-mix(in srgb, var(--app-fg) 18%, transparent);
+    border-radius: 6px;
+    padding: 0 9px;
+    background: color-mix(in srgb, var(--app-bg) 82%, var(--app-fg));
+    color: var(--app-fg);
+    font: inherit;
+  }
+
+  .ssh-credential-sheet label {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    color: color-mix(in srgb, var(--app-fg) 78%, transparent);
+    font-size: 12px;
+    user-select: none;
+    -webkit-user-select: none;
+  }
+
+  .ssh-credential-sheet button {
+    min-height: 28px;
+    border: 0;
+    border-radius: 6px;
+    padding: 4px 10px;
+    color: inherit;
+    background: transparent;
+    font: inherit;
+  }
+
+  .ssh-credential-sheet button:active {
+    background: var(--app-active);
   }
 
   .terminal-mount {

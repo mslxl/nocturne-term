@@ -22,6 +22,7 @@ use std::{
 
 const MAIN_WINDOW_LABEL: &str = "main";
 const SETTINGS_WINDOW_LABEL: &str = "settings";
+const HOST_MANAGER_WINDOW_LABEL: &str = "hosts";
 const PROFILE_NEW_DIALOG_LABEL: &str = "dialog-profile-new";
 const PROFILE_DELETE_DIALOG_LABEL: &str = "dialog-profile-delete";
 const MENU_SETTINGS: &str = "file.settings";
@@ -179,6 +180,7 @@ struct MenuText {
     split_up: &'static str,
     split_down: &'static str,
     settings_title: &'static str,
+    hosts_title: &'static str,
     new_profile_title: &'static str,
     delete_profile_title: &'static str,
 }
@@ -191,7 +193,7 @@ fn menu_text(language: UiLanguage) -> MenuText {
             view: "View",
             window: "Window",
             new_window: "New Window",
-            new_tab: "New Tab",
+            new_tab: "New Session",
             profile: "Profile",
             settings: "Settings...",
             profile_new: "New...",
@@ -251,6 +253,7 @@ fn menu_text(language: UiLanguage) -> MenuText {
             split_up: "Split Up",
             split_down: "Split Down",
             settings_title: "Nocturne Settings",
+            hosts_title: "Nocturne Hosts",
             new_profile_title: "New Profile",
             delete_profile_title: "Delete Profile",
         },
@@ -260,7 +263,7 @@ fn menu_text(language: UiLanguage) -> MenuText {
             view: "显示",
             window: "窗口",
             new_window: "新建窗口",
-            new_tab: "新建标签",
+            new_tab: "新建 Session",
             profile: "档案",
             settings: "设置...",
             profile_new: "新建...",
@@ -320,6 +323,7 @@ fn menu_text(language: UiLanguage) -> MenuText {
             split_up: "向上分割",
             split_down: "向下分割",
             settings_title: "Nocturne 设置",
+            hosts_title: "Nocturne 主机",
             new_profile_title: "新建档案",
             delete_profile_title: "删除档案",
         },
@@ -933,6 +937,12 @@ pub(crate) fn open_profile_new_dialog(app: AppHandle) -> Result<()> {
     open_dialog(&app, DialogKind::ProfileNew)
 }
 
+#[tauri::command]
+#[specta::specta]
+pub(crate) fn open_host_manager_window(app: AppHandle) -> Result<()> {
+    open_host_manager(&app)
+}
+
 pub(crate) fn handle_window_event<R: Runtime>(window: &Window<R>, event: &WindowEvent) {
     if matches!(event, WindowEvent::Focused(true)) && is_main_window_label(window.label()) {
         let state =
@@ -1496,6 +1506,26 @@ fn open_settings<R: Runtime>(app: &AppHandle<R>, mode: &str) -> Result<()> {
     .title(menu_text(resolve_ui_language(app)).settings_title)
     .inner_size(920.0, 680.0)
     .min_inner_size(540.0, 420.0)
+    .resizable(true)
+    .center()
+    .build()
+    .map_err(to_config_error)?;
+    focus_window(&window)
+}
+
+fn open_host_manager<R: Runtime>(app: &AppHandle<R>) -> Result<()> {
+    if let Some(window) = app.get_webview_window(HOST_MANAGER_WINDOW_LABEL) {
+        return focus_window(&window);
+    }
+
+    let window = WebviewWindowBuilder::new(
+        app,
+        HOST_MANAGER_WINDOW_LABEL,
+        WebviewUrl::App("hosts".into()),
+    )
+    .title(menu_text(resolve_ui_language(app)).hosts_title)
+    .inner_size(920.0, 680.0)
+    .min_inner_size(560.0, 420.0)
     .resizable(true)
     .center()
     .build()

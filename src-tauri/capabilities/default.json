@@ -2,7 +2,7 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Capability for the main window",
-  "windows": ["main", "main-*", "settings", "dialog-*"],
+  "windows": ["main", "main-*", "settings", "hosts", "dialog-*"],
   "permissions": [
     "core:default",
     "clipboard-manager:allow-read-text",

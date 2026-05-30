@@ -23,9 +23,9 @@ Keep these concepts separate in code:
 - Tab state: `id`, title, active pane id, pane list, and tree.
 - Pane state: PTY session id, xterm instance, mount container, cwd/title/status, output queue, and resize bookkeeping.
 - Tree state: layout only. It stores pane ids and split ratios, not terminal instances.
-- Native session state: the backend PTY process and its session id.
+- Transport session state: the backend local PTY process, SSH channel, or future protocol connection and its session id.
 
-Most split-pane bugs come from accidentally treating one of these as another. A tree reorder must not recreate terminal sessions. A pane move must update the owning tab and pane `tabId`. A tab title refresh must read the active pane, not the first pane.
+Most split-pane bugs come from accidentally treating one of these as another. A tree reorder must not recreate terminal sessions. A pane move must update the owning tab and pane `tabId`. A tab title refresh must read the active pane, not the first pane. Remote transports such as SSH must behave like ordinary pane sessions once connected.
 
 The tree shape is:
 
@@ -56,7 +56,9 @@ Use direction commands instead of ambiguous horizontal/vertical wording:
 
 The native context menu exposes all four directions.
 
-Splitting a pane creates a new shell session. The new session should inherit the source pane's current working directory when known. The first implementation can inherit configured environment plus application process environment; inheriting shell-local dynamic environment variables requires shell integration and is not part of the current contract.
+Splitting a pane should create a new session from the selected host. Generic split commands may use the default host, while explicit host-picker split flows may choose any host.
+
+Local hosts may inherit the source pane's current working directory when known. The first implementation can inherit configured environment plus application process environment; inheriting shell-local dynamic environment variables requires shell integration and is not part of the current contract.
 
 After split creation, focus moves to the new pane.
 
@@ -128,7 +130,7 @@ Do not use a WebView-drawn context menu for this interaction. The terminal is a 
 
 Split panes should be backed by command IDs so keyboard shortcuts and settings can use the same actions:
 
-- `terminal.newTab`
+- `terminal.newSession`
 - `terminal.closeTab`
 - `terminal.splitLeft`
 - `terminal.splitRight`
@@ -156,7 +158,7 @@ Config path:
 
 ```toml
 [keybindings.terminal]
-newTab = "Meta+T"
+newSession = "Meta+T"
 closeTab = "Meta+W"
 splitLeft = "Meta+Alt+D"
 splitRight = "Meta+D"
@@ -229,6 +231,8 @@ When closing:
 
 Hidden inactive tabs keep their pane state but should not receive pointer events. When switching tabs, mount and fit that tab's panes after the tab becomes visible. This avoids stale wrapping and blank panes.
 
+Pane/session failures must stay scoped to their pane. Do not route backend terminal lifecycle errors into global page or settings error state. For example, an SSH connection can fail and remove `term-x` while the frontend still has queued backlog, resize, or write work for that id; the resulting `terminal session term-x not found` is a stale terminal-session condition. It should be ignored if the pane is already gone, or translated into that pane's disconnected/error presentation if the pane still exists. If this leaks into a global error placeholder, switching tabs or opening a new local session will not clear the stale SSH failure.
+
 ## Size Normalization
 
 Terminal sizes cross the Tauri command boundary and eventually reach backend PTY resize calls. They must always be finite integers within backend limits.
@@ -236,7 +240,7 @@ Terminal sizes cross the Tauri command boundary and eventually reach backend PTY
 Practical rules:
 
 - Normalize measured fit sizes before creating sessions or resizing sessions.
-- Never pass `null`, `undefined`, `NaN`, or infinite values to `create_terminal_session` or `resize_terminal`.
+- Never pass `null`, `undefined`, `NaN`, or infinite values to `create_host_terminal_session` or `resize_terminal`.
 - Clamp columns, rows, pixel width, and pixel height before serialization.
 - Treat missing layout measurements as a temporary UI state, not as a valid backend size.
 

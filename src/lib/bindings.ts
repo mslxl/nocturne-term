@@ -8,7 +8,7 @@ export const commands = {
 	getConfigSnapshot: () => typedError<AppConfigSnapshot, ConfigError>(__TAURI_INVOKE("get_config_snapshot")),
 	getTerminalSettings: () => typedError<TerminalSettings, ConfigError>(__TAURI_INVOKE("get_terminal_settings")),
 	getTerminalSettingsForTheme: (input: TerminalSettingsInput) => typedError<TerminalSettings, ConfigError>(__TAURI_INVOKE("get_terminal_settings_for_theme", { input })),
-	createTerminalSession: (input: CreateTerminalSessionInput) => typedError<TerminalSessionInfo, ConfigError>(__TAURI_INVOKE("create_terminal_session", { input })),
+	createHostTerminalSession: (input: CreateHostTerminalSessionInput) => typedError<TerminalSessionInfo, ConfigError>(__TAURI_INVOKE("create_host_terminal_session", { input })),
 	existingTerminalSessionInfo: (input: ExistingTerminalSessionInput) => typedError<TerminalSessionInfo, ConfigError>(__TAURI_INVOKE("existing_terminal_session_info", { input })),
 	transferTerminalSessionsToWindow: (input: TerminalSessionOwnershipInput) => typedError<null, ConfigError>(__TAURI_INVOKE("transfer_terminal_sessions_to_window", { input })),
 	takeTerminalOutputBacklog: (input: TerminalOutputBacklogInput) => typedError<{
@@ -35,16 +35,21 @@ export const commands = {
 	setActiveProfile: (name: string) => typedError<ConfigRootInfo, ConfigError>(__TAURI_INVOKE("set_active_profile", { name })),
 	readMainConfig: () => typedError<MainConfigDocument, ConfigError>(__TAURI_INVOKE("read_main_config")),
 	updateMainConfig: (document: MainConfigDocument) => typedError<MainConfigDocument, ConfigError>(__TAURI_INVOKE("update_main_config", { document })),
-	readHost: (id: string) => typedError<HostEntry, ConfigError>(__TAURI_INVOKE("read_host", { id })),
-	listHosts: () => typedError<HostEntry[], ConfigError>(__TAURI_INVOKE("list_hosts")),
-	createHost: (document: HostConfigDocument) => typedError<HostEntry, ConfigError>(__TAURI_INVOKE("create_host", { document })),
-	updateHost: (input: HostDocumentInput) => typedError<HostEntry, ConfigError>(__TAURI_INVOKE("update_host", { input })),
-	deleteHost: (id: string) => typedError<null, ConfigError>(__TAURI_INVOKE("delete_host", { id })),
+	readConnectionHost: (id: string) => typedError<ConnectionHostEntry, ConfigError>(__TAURI_INVOKE("read_connection_host", { id })),
+	listConnectionHosts: () => typedError<ConnectionHostEntry[], ConfigError>(__TAURI_INVOKE("list_connection_hosts")),
+	createConnectionHost: (input: ConnectionHostDocumentInput) => typedError<ConnectionHostEntry, ConfigError>(__TAURI_INVOKE("create_connection_host", { input })),
+	updateConnectionHost: (input: ConnectionHostDocumentInput) => typedError<ConnectionHostEntry, ConfigError>(__TAURI_INVOKE("update_connection_host", { input })),
+	deleteConnectionHost: (id: string) => typedError<null, ConfigError>(__TAURI_INVOKE("delete_connection_host", { id })),
+	repairConnectionHostId: (id: string) => typedError<ConnectionHostEntry, ConfigError>(__TAURI_INVOKE("repair_connection_host_id", { id })),
+	listSshKnownHosts: () => typedError<string[], ConfigError>(__TAURI_INVOKE("list_ssh_known_hosts")),
 	setHostDirsCommand: (input: HostDirsInput) => typedError<ConfigRootInfo, ConfigError>(__TAURI_INVOKE("set_host_dirs_command", { input })),
+	setOpensshConfigFilesCommand: (input: HostDirsInput) => typedError<ConfigRootInfo, ConfigError>(__TAURI_INVOKE("set_openssh_config_files_command", { input })),
+	setDefaultHostCommand: (hostId: string) => typedError<ConfigRootInfo, ConfigError>(__TAURI_INVOKE("set_default_host_command", { hostId })),
 	removeConfigKey: (input: ConfigKeyPathInput) => typedError<null, ConfigError>(__TAURI_INVOKE("remove_config_key", { input })),
 	showTabBarContextMenu: (input: TabBarContextMenuInput) => typedError<null, ConfigError>(__TAURI_INVOKE("show_tab_bar_context_menu", { input })),
 	showPaneContextMenu: (input: PaneContextMenuInput) => typedError<null, ConfigError>(__TAURI_INVOKE("show_pane_context_menu", { input })),
 	openSettingsWindow: (mode: string) => typedError<null, ConfigError>(__TAURI_INVOKE("open_settings_window", { mode })),
+	openHostManagerWindow: () => typedError<null, ConfigError>(__TAURI_INVOKE("open_host_manager_window")),
 	openProfileNewDialog: () => typedError<null, ConfigError>(__TAURI_INVOKE("open_profile_new_dialog")),
 	openMainWindow: (route: string | null) => typedError<null, ConfigError>(__TAURI_INVOKE("open_main_window", { route })),
 	refreshAppMenu: () => typedError<null, ConfigError>(__TAURI_INVOKE("refresh_app_menu")),
@@ -59,7 +64,7 @@ export type AppConfigSnapshot = {
 	profile_config: ProfileConfigDocument,
 	effective_config: EffectiveConfigDocument,
 	profiles: ProfileEntry[],
-	hosts: HostEntry[],
+	hosts: ConnectionHostEntry[],
 };
 
 export type ConfigDocumentTarget = "main" | "profile";
@@ -89,6 +94,8 @@ export type ConfigRootInfo = {
 	profile_config_path: string,
 	state_path: string,
 	host_dirs: string[],
+	openssh_config_files: string[],
+	default_host: string,
 };
 
 export type ConfigTable = {
@@ -97,14 +104,59 @@ export type ConfigTable = {
 
 export type ConfigValue = { kind: "String"; value: string } | { kind: "Integer"; value: string } | { kind: "Float"; value: number | null } | { kind: "Boolean"; value: boolean } | { kind: "Datetime"; value: string } | { kind: "Array"; value: ConfigValue[] } | { kind: "Table"; value: { [key in string]: ConfigValue } };
 
-export type CreateTerminalSessionInput = {
+export type ConnectionDiagnosticSeverity = "warning" | "error";
+
+export type ConnectionHostDiagnostic = {
+	severity: ConnectionDiagnosticSeverity,
+	code: string,
+	message: string,
+};
+
+export type ConnectionHostDocument = {
+	version: number,
+	id: string,
+	name: string,
+	folder: string | null,
+	icon_pack: string | null,
+	protocol: ConnectionProtocol,
+	local: LocalConnectionConfig | null,
+	ssh: SshConnectionConfig | null,
+	telnet: TelnetConnectionConfig | null,
+};
+
+export type ConnectionHostDocumentInput = {
+	id: string | null,
+	directory: string | null,
+	folder: string | null,
+	document: ConnectionHostDocument,
+};
+
+export type ConnectionHostEntry = {
+	id: string,
+	path: string | null,
+	source: ConnectionHostSource,
+	read_only: boolean,
+	document: ConnectionHostDocument,
+	diagnostics: ConnectionHostDiagnostic[],
+};
+
+export type ConnectionHostSource = "virtual" | "user" | "open_ssh_config";
+
+export type ConnectionProtocol = "local" | "ssh" | "telnet";
+
+export type CreateHostTerminalSessionInput = {
 	cols: number,
 	rows: number,
 	pixel_width: number,
 	pixel_height: number,
 	resolved_theme: TerminalColorSchemeVariant | null,
 	cwd: string | null,
+	connection_host_id: string,
 	window_label: string,
+	accept_new_host_key: boolean,
+	update_changed_host_key: boolean,
+	credential: SshCredentialInput | null,
+	save_credential: boolean,
 };
 
 export type EffectiveConfigDocument = {
@@ -115,23 +167,15 @@ export type ExistingTerminalSessionInput = {
 	session_id: string,
 };
 
-export type HostConfigDocument = {
-	root: ConfigTable,
-};
-
 export type HostDirsInput = {
 	dirs: string[],
 };
 
-export type HostDocumentInput = {
-	id: string | null,
-	document: HostConfigDocument,
-};
-
-export type HostEntry = {
-	id: string,
-	path: string,
-	document: HostConfigDocument,
+export type LocalConnectionConfig = {
+	command: string | null,
+	args: string[],
+	cwd: string | null,
+	env: { [key in string]: string },
 };
 
 export type MainConfigDocument = {
@@ -161,6 +205,23 @@ export type ProfileEntry = {
 	path: string,
 };
 
+export type SshConnectionConfig = {
+	hostname: string,
+	port: number,
+	username: string | null,
+	identity_file: string | null,
+	proxy_jump: string | null,
+	forward_agent: boolean,
+	server_alive_interval: number | null,
+};
+
+export type SshCredentialInput = {
+	kind: SshCredentialKind,
+	value: string,
+};
+
+export type SshCredentialKind = "password" | "key_passphrase";
+
 export type TabBarContextMenuInput = {
 	x: number | null,
 	y: number | null,
@@ -168,6 +229,11 @@ export type TabBarContextMenuInput = {
 };
 
 export type TabBarOrientation = "horizontal" | "vertical_left" | "vertical_right";
+
+export type TelnetConnectionConfig = {
+	hostname: string,
+	port: number,
+};
 
 export type TerminalColorScheme = {
 	id: string,
@@ -277,6 +343,8 @@ export type TerminalSessionInfo = {
 	pixel_width: number,
 	pixel_height: number,
 	process_id: number | null,
+	transport: TerminalTransportKind,
+	transport_state: TerminalTransportState,
 };
 
 export type TerminalSessionOwnershipInput = {
@@ -333,6 +401,10 @@ export type TerminalTheme = {
 	bright_cyan: string,
 	bright_white: string,
 };
+
+export type TerminalTransportKind = "local" | "ssh" | "telnet";
+
+export type TerminalTransportState = "resolving" | "connecting" | "verifying_host_key" | "authenticating" | "connected" | "disconnected" | "failed";
 
 /* Tauri Specta runtime */
 async function typedError<T, E>(result: Promise<T>): Promise<{ status: "ok"; data: T } | { status: "error"; error: E }> {

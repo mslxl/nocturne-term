@@ -9,6 +9,8 @@
     activateTab: (id: string) => void | Promise<void>;
     closeTab: (id: string) => void | Promise<void>;
     newSession: () => void | Promise<void>;
+    openHostPicker: (event: MouseEvent) => void | Promise<void>;
+    handleNewSessionSecondaryClick: (event: MouseEvent) => void | Promise<void>;
     openContextMenu: (event: MouseEvent) => void | Promise<void>;
     startTabPointerDrag: (event: PointerEvent, tabId: string) => void;
   };
@@ -20,6 +22,8 @@
     activateTab,
     closeTab,
     newSession,
+    openHostPicker,
+    handleNewSessionSecondaryClick,
     openContextMenu,
     startTabPointerDrag,
   }: Props = $props();
@@ -50,6 +54,12 @@
 
   function pointerDragStart(event: PointerEvent, id: string) {
     startTabPointerDrag(event, id);
+  }
+
+  function openPicker(event: MouseEvent) {
+    event.preventDefault();
+    event.stopPropagation();
+    void openHostPicker(event);
   }
 </script>
 
@@ -101,7 +111,20 @@
       </div>
     {/each}
   </div>
-  <button class="new-session" data-testid="new-session" type="button" aria-label="New session" title="New session" onclick={newSession}>+</button>
+  <div class="new-actions">
+    <button
+      class="new-session"
+      data-testid="new-session"
+      type="button"
+      aria-label="New session"
+      title="New session"
+      onclick={newSession}
+      oncontextmenu={handleNewSessionSecondaryClick}
+    >
+      <span>+</span>
+      <small>Session</small>
+    </button>
+  </div>
 </nav>
 
 <style>
@@ -114,7 +137,7 @@
 
   .tabbar.horizontal {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) 36px;
+    grid-template-columns: minmax(0, 1fr) 56px;
     align-items: stretch;
     border-bottom: 1px solid var(--app-border);
   }
@@ -227,19 +250,42 @@
     color: var(--app-fg);
   }
 
-  .new-session {
-    width: 36px;
-    min-width: 36px;
+  .new-actions {
+    display: flex;
+  }
+
+  .new-actions button {
+    width: 56px;
+    min-width: 56px;
     height: 39px;
     display: grid;
-    place-items: center;
-    font-size: 21px;
-    line-height: 1;
+    align-content: center;
+    justify-items: center;
+    gap: 1px;
+  }
+
+  .new-session {
     border-left: 1px solid var(--app-border);
+  }
+
+  .new-actions span {
+    font-size: 15px;
+    line-height: 1;
+  }
+
+  .new-actions small {
+    color: color-mix(in srgb, var(--app-fg) 62%, transparent);
+    font-size: 9px;
+    line-height: 1;
+  }
+
+  .vertical-tabs .new-actions {
+    display: grid;
   }
 
   .vertical-tabs .new-session {
     width: 100%;
+    min-width: 0;
     border-left: 0;
     border-top: 1px solid var(--app-border);
   }

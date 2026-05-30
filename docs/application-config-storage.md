@@ -10,11 +10,14 @@ Nocturne stores configuration as TOML files inside Tauri's application config di
 
 - Main application config
 - Profile config
-- Host config
+- Host/session config
+- Private SSH trust store
 
 Main config and profile config together form the application config. The effective application config is produced by deep-merging the main config and the active profile config, with the profile winning on conflicts.
 
-Host config is stored separately as individual TOML files. Host files are identified by a content hash, and the hash is intentionally independent of TOML key order.
+Host config is stored separately as individual TOML files in configured host directories. User-created hosts use stable UUIDs, not content hashes, because connection history, keyring records, trust repair, default-host selection, and command palette entries need durable identity across edits.
+
+OpenSSH config entries from configured OpenSSH config files are read as separate read-only sources. They do not live under the Nocturne config root and Nocturne must not write them. The default configured OpenSSH file is `~/.ssh/config`.
 
 The Rust backend owns all file I/O. The Svelte frontend only talks to Rust through Tauri commands and reacts to file changes through TanStack Query plus a config-changed event.
 
@@ -27,15 +30,19 @@ All files live under the Tauri app config directory, inside a Nocturne root fold
 The current layout is:
 
 - `config.toml` - main application config
-- `state.toml` - startup state, currently only the active profile
+- `state.toml` - startup state, including the active profile and whether the virtual default local host was removed
 - `profiles/default.toml` - default profile
 - `profiles/<name>.toml` - additional profiles
-- `hosts/<hash>.toml` - host configs when using the default host directory
+- `hosts/<uuid>.toml` - user-created hosts when using the default host directory
+- `hosts/<folder>/<uuid>.toml` - user-created hosts organized into nested folders
+- `known-hosts.toml` - private SSH host-key trust store for connection hosts
 - `terminal-color-schemes/<id>.toml` - user terminal color schemes
 
-The system also supports additional host directories through application config.
+The system also supports additional connection host directories through application config.
 
-## Requirements Implemented
+Configured OpenSSH config files and files reached through their supported `Include` directives are read-only external sources. They are not copied into this layout unless the user explicitly copies an OpenSSH entry into a Nocturne host directory.
+
+## Storage Requirements
 
 ### 1. TOML storage
 
@@ -61,9 +68,9 @@ The active profile is stored in `state.toml`.
 
 If nothing has been selected yet, the system defaults to `profiles/default.toml`.
 
-### 4. Host config directories
+### 4. Connection host directories
 
-Application config may specify one or more host config directories through `host_dirs`.
+Application config may specify one or more connection host directories through `host_dirs`.
 
 Because main config and profile config are deep-merged, `host_dirs` may be defined in either file. If both define it, the active profile wins because arrays are replaced by the profile value.
 
@@ -73,22 +80,39 @@ If no custom host directory is stored, the default is:
 
 relative to the application config root.
 
-Each host is stored in its own TOML file inside one of the configured host directories.
+Each user-created connection host is stored in its own TOML file inside one of the configured host directories.
+
+User-created host folders are represented by file location, not by a TOML field. For example, `hosts/work/prod/<uuid>.toml` appears in folder `work/prod`. Editing a folder in Host Manager moves the TOML file under the same configured host directory, and the backend creates missing directories automatically. Absolute paths and `..` segments are invalid folder values.
+
+User-created host TOML may include organizational metadata such as `icon_pack`. `folder` is part of the typed frontend-facing document so the UI can display and edit it, but Rust skips it during TOML serialization.
+
+Application config may also specify one or more OpenSSH config files through `openssh_config_files`.
+
+If no custom OpenSSH config file list is stored, the default is:
+
+- `~/.ssh/config`
+
+Nocturne reads these files as read-only sources and expands their supported `Include` directives. Users can add or remove files from settings, similar to host directories. OpenSSH-derived hosts get a read-only `folder` value from the config file stem, for example `~/.ssh/config` becomes `config`; Nocturne must not persist folder edits back into OpenSSH files.
+
+Application config may specify a default host through `default_host`. Nocturne exposes a virtual default local host as the initial default. If the user removes that virtual host, Nocturne stores `default_local_host_removed = true` in `state.toml` and stops showing it.
 
 Terminal color schemes are stored separately from app config under `terminal-color-schemes/`.
 Built-in schemes are provided by Rust and do not live on disk. User schemes are individual TOML files
 that can be previewed, edited, copied, and exported from the settings window.
 
-### 5. Hash-based host identity
+### 5. Stable connection host identity
 
-Host IDs are computed from the host config content.
+User-created connection hosts use stable UUIDs stored in each host TOML file. The virtual default local host uses a reserved stable UUID but does not live on disk and is not editable.
 
 Important detail:
 
-- the hash must not depend on TOML key order
-- two TOML documents with the same logical content but different key order should produce the same ID
+- editing a host must not change its identity
+- duplicate UUIDs are configuration errors
+- duplicate display names are allowed
+- the filename should match the UUID, for example `hosts/018f6eb3-6f91-7410-bc43-f927b2236d94.toml`
+- a filename/document UUID mismatch is a diagnostic that must be shown in settings
 
-The current implementation hashes a normalized TOML value after parsing.
+Nocturne may offer a repair action that regenerates a duplicate UUID, but it must warn and ask before changing identity because related history and keyring records can be affected.
 
 ## Typed Documents
 
@@ -98,7 +122,7 @@ Rust parses TOML into typed document objects before returning data to the Svelte
 
 - `MainConfigDocument`
 - `ProfileConfigDocument`
-- `HostConfigDocument`
+- `ConnectionHostDocument`
 - `EffectiveConfigDocument`
 
 Each document has a `root: ConfigTable`. A `ConfigTable` contains keyed `ConfigValue` entries. `ConfigValue` is a tagged union covering TOML-compatible values:
@@ -121,7 +145,7 @@ Empty TOML files are valid. They deserialize to the corresponding empty typed do
 
 This gives the frontend a stable typed shape even before a schema-specific editor exists.
 
-Raw TOML is allowed only inside the Rust storage layer for parse, merge, hash, and serialization work. Do not send raw TOML file contents to the frontend.
+Raw TOML is allowed only inside the Rust storage layer for parse, merge, validation, and serialization work. Do not send raw TOML file contents to the frontend.
 
 ## Backend API
 
@@ -139,12 +163,15 @@ The important commands are:
 - `set_active_profile`
 - `read_main_config`
 - `update_main_config`
-- `read_host`
-- `list_hosts`
-- `create_host`
-- `update_host`
-- `delete_host`
+- `read_connection_host`
+- `list_connection_hosts`
+- `create_connection_host`
+- `update_connection_host`
+- `delete_connection_host`
+- `repair_connection_host_id`
 - `set_host_dirs_command`
+- `set_openssh_config_files_command`
+- `set_default_host_command`
 - `watch_config_command`
 - `list_terminal_color_schemes`
 - `read_terminal_color_scheme`
@@ -159,6 +186,8 @@ The important commands are:
 - Write commands accept typed document objects and serialize them to TOML internally.
 - CRUD operations emit `config://changed` after successful writes.
 - `watch_config_command` installs filesystem watchers so external edits also trigger refreshes.
+- Connection host commands work with typed connection host documents and never expose raw TOML as the primary frontend contract.
+- Session creation should prefer host IDs over protocol-specific commands. Local, SSH, and future Telnet hosts share the same host/session surface.
 
 ## Frontend Integration
 
@@ -203,18 +232,21 @@ This keeps the frontend stable even when the on-disk TOML changes, and it keeps 
 It currently stores:
 
 - `active_profile`
+- `default_local_host_removed`
 
 If you change config storage later, keep this file conceptually separate from application config. It prevents startup ambiguity and keeps host directory configuration persistent.
 
 Host directories are not stored in `state.toml`; they belong to application config and are read from the effective deep-merged document.
 
-### 2. Host update changes the ID
+OpenSSH config file lists and the default host are also application config, not state.
 
-Because host IDs are content hashes, editing a host can change its ID and therefore its filename.
+### 2. Connection host IDs are stable
 
-This is expected.
+Connection host IDs must not depend on TOML content, key order, filename casing, or display name.
 
-Do not assume host IDs are stable across edits.
+The UUID in the document is the identity. It must remain stable across ordinary edits so recent connections, keyring records, trust repair, command palette entries, and protocol transports can refer to the same host.
+
+Duplicate UUIDs, missing UUIDs, and filename/document UUID mismatches are diagnostics. Duplicate UUIDs should trigger an OS notification at startup and remain visible in settings until repaired. See `docs/connection-hosts.md`.
 
 ### 3. File watching is required
 
@@ -226,6 +258,8 @@ The app must watch:
 - `state.toml`
 - `profiles/`
 - all configured host directories
+- all configured OpenSSH config files that exist
+- `known-hosts.toml`
 
 When any of these change, emit `config://changed` and refresh the TanStack Query cache.
 
@@ -272,6 +306,11 @@ language = "en"
 tab_width = 2
 
 host_dirs = ["hosts"]
+openssh_config_files = ["~/.ssh/config"]
+default_host = "00000000-0000-0000-0000-000000000001"
+
+[hosts]
+show_address = true
 ```
 
 ### Profile config
@@ -323,19 +362,61 @@ language = "en"
 tab_width = 4
 ```
 
-### Host config
+### Connection host config
+
+Local host:
 
 ```toml
-[host]
-name = "production"
-url = "https://example.com"
+version = 1
+id = "018f6eb4-3da8-73c8-9b2d-fca30a256196"
+name = "Project Shell"
+protocol = "local"
+
+[local]
+command = "zsh"
+args = ["-l"]
+cwd = "~/Projects/nocturne"
 ```
 
-The host file name is derived from the content hash, not the host name.
+SSH host:
+
+```toml
+version = 1
+id = "018f6eb3-6f91-7410-bc43-f927b2236d94"
+name = "Production API"
+protocol = "ssh"
+
+[ssh]
+hostname = "prod.example.com"
+port = 22
+username = "deploy"
+identity_file = "~/.ssh/id_ed25519"
+proxy_jump = "bastion"
+forward_agent = true
+```
+
+The host file name is derived from the stable UUID, not the host name.
+
+### Private SSH trust store
+
+```toml
+version = 1
+
+[[ssh]]
+target = "prod.example.com:22"
+keys = [
+  "ssh-ed25519 SHA256:abc123",
+]
+```
 
 ## Things to Watch Carefully
 
-- Do not make host IDs depend on raw file text formatting.
+- Do not make connection host IDs depend on raw file text formatting or document content.
+- Do not allow duplicate connection host UUIDs to connect before repair.
+- Do not store passwords or private-key passphrases in TOML.
+- Do not write Nocturne trust decisions into `~/.ssh/known_hosts`.
+- Do not write configured OpenSSH config files; they are read-only external inputs.
+- Do not keep local shell creation as a separate app path from host/session creation.
 - Do not pass raw TOML contents to the frontend.
 - Do not silently fall back to an arbitrary profile if the active profile is missing.
 - Do not bypass the Rust backend from the frontend.

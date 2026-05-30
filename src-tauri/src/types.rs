@@ -30,9 +30,33 @@ pub struct ProfileConfigDocument {
     pub root: ConfigTable,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Type, Default)]
-pub struct HostConfigDocument {
-    pub root: ConfigTable,
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct ConnectionHostDocument {
+    pub version: u32,
+    pub id: String,
+    pub name: String,
+    pub folder: Option<String>,
+    pub icon_pack: Option<String>,
+    pub protocol: ConnectionProtocol,
+    pub local: Option<LocalConnectionConfig>,
+    pub ssh: Option<SshConnectionConfig>,
+    pub telnet: Option<TelnetConnectionConfig>,
+}
+
+impl Default for ConnectionHostDocument {
+    fn default() -> Self {
+        Self {
+            version: 1,
+            id: String::new(),
+            name: String::new(),
+            folder: None,
+            icon_pack: None,
+            protocol: ConnectionProtocol::Local,
+            local: None,
+            ssh: None,
+            telnet: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type, Default)]
@@ -48,6 +72,8 @@ pub struct ConfigRootInfo {
     pub profile_config_path: String,
     pub state_path: String,
     pub host_dirs: Vec<String>,
+    pub openssh_config_files: Vec<String>,
+    pub default_host: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
@@ -57,10 +83,68 @@ pub struct ProfileEntry {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
-pub struct HostEntry {
+pub struct ConnectionHostEntry {
     pub id: String,
-    pub path: String,
-    pub document: HostConfigDocument,
+    pub path: Option<String>,
+    pub source: ConnectionHostSource,
+    pub read_only: bool,
+    pub document: ConnectionHostDocument,
+    pub diagnostics: Vec<ConnectionHostDiagnostic>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum ConnectionProtocol {
+    Local,
+    Ssh,
+    Telnet,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum ConnectionHostSource {
+    Virtual,
+    User,
+    OpenSshConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, Default)]
+pub struct LocalConnectionConfig {
+    pub command: Option<String>,
+    pub args: Vec<String>,
+    pub cwd: Option<String>,
+    pub env: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct SshConnectionConfig {
+    pub hostname: String,
+    pub port: u16,
+    pub username: Option<String>,
+    pub identity_file: Option<String>,
+    pub proxy_jump: Option<String>,
+    pub forward_agent: bool,
+    pub server_alive_interval: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct TelnetConnectionConfig {
+    pub hostname: String,
+    pub port: u16,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct ConnectionHostDiagnostic {
+    pub severity: ConnectionDiagnosticSeverity,
+    pub code: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum ConnectionDiagnosticSeverity {
+    Warning,
+    Error,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
@@ -133,7 +217,7 @@ pub struct AppConfigSnapshot {
     pub profile_config: ProfileConfigDocument,
     pub effective_config: EffectiveConfigDocument,
     pub profiles: Vec<ProfileEntry>,
-    pub hosts: Vec<HostEntry>,
+    pub hosts: Vec<ConnectionHostEntry>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
@@ -148,9 +232,11 @@ pub struct ProfileDocumentInput {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
-pub struct HostDocumentInput {
+pub struct ConnectionHostDocumentInput {
     pub id: Option<String>,
-    pub document: HostConfigDocument,
+    pub directory: Option<String>,
+    pub folder: Option<String>,
+    pub document: ConnectionHostDocument,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
@@ -363,15 +449,53 @@ pub struct TerminalSettingsInput {
     pub resolved_theme: Option<TerminalColorSchemeVariant>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum TerminalTransportKind {
+    Local,
+    Ssh,
+    Telnet,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum TerminalTransportState {
+    Resolving,
+    Connecting,
+    VerifyingHostKey,
+    Authenticating,
+    Connected,
+    Disconnected,
+    Failed,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
-pub struct CreateTerminalSessionInput {
+pub struct CreateHostTerminalSessionInput {
     pub cols: u16,
     pub rows: u16,
     pub pixel_width: u16,
     pub pixel_height: u16,
     pub resolved_theme: Option<TerminalColorSchemeVariant>,
     pub cwd: Option<String>,
+    pub connection_host_id: String,
     pub window_label: String,
+    pub accept_new_host_key: bool,
+    pub update_changed_host_key: bool,
+    pub credential: Option<SshCredentialInput>,
+    pub save_credential: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct SshCredentialInput {
+    pub kind: SshCredentialKind,
+    pub value: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum SshCredentialKind {
+    Password,
+    KeyPassphrase,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
@@ -400,6 +524,8 @@ pub struct TerminalSessionInfo {
     pub pixel_width: u16,
     pub pixel_height: u16,
     pub process_id: Option<u32>,
+    pub transport: TerminalTransportKind,
+    pub transport_state: TerminalTransportState,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
@@ -431,4 +557,10 @@ pub struct TerminalExitEvent {
     pub session_id: String,
     pub exit_code: Option<u32>,
     pub signal: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct TerminalTransportStateEvent {
+    pub session_id: String,
+    pub state: TerminalTransportState,
 }
