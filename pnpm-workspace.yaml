@@ -1,4 +1,2 @@
 allowBuilds:
   esbuild: true
-patchedDependencies:
-  '@xterm/addon-webgl@0.18.0': patches/@xterm__addon-webgl@0.18.0.patch
