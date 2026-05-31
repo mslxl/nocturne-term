@@ -102,6 +102,8 @@ const PANE_PASTE: &str = "terminal.pane.paste";
 const PANE_RESET_TERMINAL: &str = "terminal.pane.reset_terminal";
 const PANE_TOGGLE_READ_ONLY: &str = "terminal.pane.toggle_read_only";
 const PANE_CHANGE_TAB_TITLE: &str = "terminal.pane.change_tab_title";
+const PANE_ZOOM_SPLIT: &str = "terminal.pane.zoom_split";
+const PANE_CLOSE_PANE: &str = "terminal.pane.close_pane";
 const PANE_SPLIT_LEFT: &str = "terminal.pane.split_left";
 const PANE_SPLIT_RIGHT: &str = "terminal.pane.split_right";
 const PANE_SPLIT_UP: &str = "terminal.pane.split_up";
@@ -141,6 +143,7 @@ struct MenuText {
     profile_delete: &'static str,
     command_palette: &'static str,
     close: &'static str,
+    close_pane: &'static str,
     close_tab: &'static str,
     close_window: &'static str,
     undo: &'static str,
@@ -214,6 +217,7 @@ fn menu_text(language: UiLanguage) -> MenuText {
             profile_delete: "Delete...",
             command_palette: "Command Palette...",
             close: "Close",
+            close_pane: "Close Pane",
             close_tab: "Close Tab",
             close_window: "Close Window",
             undo: "Undo",
@@ -284,6 +288,7 @@ fn menu_text(language: UiLanguage) -> MenuText {
             profile_delete: "删除...",
             command_palette: "命令面板...",
             close: "关闭",
+            close_pane: "关闭窗格",
             close_tab: "关闭标签",
             close_window: "关闭窗口",
             undo: "撤销",
@@ -932,6 +937,8 @@ pub(crate) fn handle_menu_event<R: Runtime>(app: &AppHandle<R>, id: &str) {
         || id.starts_with(&format!("{PANE_RESET_TERMINAL}:"))
         || id.starts_with(&format!("{PANE_TOGGLE_READ_ONLY}:"))
         || id.starts_with(&format!("{PANE_CHANGE_TAB_TITLE}:"))
+        || id.starts_with(&format!("{PANE_ZOOM_SPLIT}:"))
+        || id.starts_with(&format!("{PANE_CLOSE_PANE}:"))
     {
         emit_pane_menu_event(app, id)
     } else {
@@ -1342,6 +1349,22 @@ pub(crate) fn show_pane_context_menu(app: AppHandle, input: PaneContextMenuInput
         None::<&str>,
     )
     .map_err(to_config_error)?;
+    let zoom_split = MenuItem::with_id(
+        &app,
+        format!("{PANE_ZOOM_SPLIT}:{}", input.pane_id),
+        labels.zoom_split,
+        input.has_multiple_panes,
+        None::<&str>,
+    )
+    .map_err(to_config_error)?;
+    let close_pane = MenuItem::with_id(
+        &app,
+        format!("{PANE_CLOSE_PANE}:{}", input.pane_id),
+        labels.close_pane,
+        true,
+        None::<&str>,
+    )
+    .map_err(to_config_error)?;
     let split_left = MenuItem::with_id(
         &app,
         format!("{PANE_SPLIT_LEFT}:{}", input.pane_id),
@@ -1376,6 +1399,7 @@ pub(crate) fn show_pane_context_menu(app: AppHandle, input: PaneContextMenuInput
     .map_err(to_config_error)?;
     let separator1 = PredefinedMenuItem::separator(&app).map_err(to_config_error)?;
     let separator2 = PredefinedMenuItem::separator(&app).map_err(to_config_error)?;
+    let separator3 = PredefinedMenuItem::separator(&app).map_err(to_config_error)?;
     let menu = Menu::with_items(
         &app,
         &[
@@ -1386,6 +1410,9 @@ pub(crate) fn show_pane_context_menu(app: AppHandle, input: PaneContextMenuInput
             &toggle_read_only,
             &change_tab_title,
             &separator2,
+            &zoom_split,
+            &close_pane,
+            &separator3,
             &split_right,
             &split_left,
             &split_down,
@@ -1649,6 +1676,10 @@ fn emit_pane_menu_event<R: Runtime>(app: &AppHandle<R>, id: &str) -> Result<()> 
         (PaneMenuAction::ToggleReadOnly, pane_id)
     } else if let Some(pane_id) = id.strip_prefix(&format!("{PANE_CHANGE_TAB_TITLE}:")) {
         (PaneMenuAction::ChangeTabTitle, pane_id)
+    } else if let Some(pane_id) = id.strip_prefix(&format!("{PANE_ZOOM_SPLIT}:")) {
+        (PaneMenuAction::ZoomSplit, pane_id)
+    } else if let Some(pane_id) = id.strip_prefix(&format!("{PANE_CLOSE_PANE}:")) {
+        (PaneMenuAction::ClosePane, pane_id)
     } else if let Some(pane_id) = id.strip_prefix(&format!("{PANE_SPLIT_LEFT}:")) {
         (PaneMenuAction::SplitLeft, pane_id)
     } else if let Some(pane_id) = id.strip_prefix(&format!("{PANE_SPLIT_RIGHT}:")) {

@@ -8,6 +8,7 @@ import {
   deriveTabDisplayTitle,
   layoutPaneTree,
   listPaneIds,
+  paneItemsForTree,
   normalizeRatios,
   removePane,
   resizeAdjacentPanes,
@@ -23,6 +24,25 @@ describe("pane tree", () => {
 
     assert.equal(countPaneLeaves(tree), 1);
     assert.deepEqual(listPaneIds(tree), ["pane-1"]);
+  });
+
+  it("returns pane items in the visible tree order only", () => {
+    const splitTree = splitPane(createPaneLeaf("pane-1"), "pane-1", "pane-2", "right");
+    const zoomTree = createPaneLeaf("pane-2");
+    const items = [
+      { id: "pane-1", title: "left" },
+      { id: "pane-2", title: "right" },
+    ];
+
+    assert.deepEqual(paneItemsForTree(splitTree, items).map((item) => item.id), ["pane-1", "pane-2"]);
+    assert.deepEqual(paneItemsForTree(zoomTree, items), [{ id: "pane-2", title: "right" }]);
+  });
+
+  it("rejects visible tree panes that are missing from pane items", () => {
+    assert.throws(
+      () => paneItemsForTree(createPaneLeaf("pane-2"), [{ id: "pane-1" }]),
+      /pane item pane-2 not found/,
+    );
   });
 
   it("clones pane trees without sharing nested arrays", () => {

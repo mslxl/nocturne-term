@@ -189,6 +189,14 @@ export type PaneContextMenuInput = {
 	window_label: string,
 	has_selection: boolean,
 	read_only: boolean,
+	has_multiple_panes: boolean,
+};
+
+export type PaneMenuAction = "copy" | "paste" | "reset_terminal" | "toggle_read_only" | "change_tab_title" | "zoom_split" | "close_pane" | "split_left" | "split_right" | "split_up" | "split_down";
+
+export type PaneMenuEvent = {
+	action: PaneMenuAction,
+	pane_id: string,
 };
 
 export type ProfileConfigDocument = {

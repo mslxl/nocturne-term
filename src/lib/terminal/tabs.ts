@@ -6,10 +6,11 @@ import { commands, type TerminalSessionInfo, type TerminalSettings, type Termina
 import { unwrapCommand } from "./commands";
 import { isTerminalSessionInactiveMessage } from "./errors";
 import { orderedTerminalOutputChunks } from "./output";
-import { countPaneLeaves, createPaneLeaf, deriveCustomizableTabTitle, type PaneTree } from "./panes";
+import { createPaneLeaf, type PaneTree } from "./panes";
 import { terminalScrollbarLineFromPointer, terminalScrollbarState, terminalWheelScrollResult } from "./scrollbar";
 import { xtermOptions } from "./settings";
 import { normalizeTerminalFitSize, normalizeTerminalSessionSize, type TerminalFitSize } from "./sizes";
+import { refreshTerminalTabTitleModel } from "./tab-title";
 
 export type TerminalOutputEvent = {
   session_id: string;
@@ -237,9 +238,7 @@ function disconnectMessage(message: string): string {
 }
 
 export function refreshTerminalTabTitle(tab: TerminalTab) {
-  const activePane = terminalPaneById(tab, tab.activePaneId);
-  if (!activePane) throw new Error(`active pane ${tab.activePaneId} not found in tab ${tab.id}`);
-  tab.title = deriveCustomizableTabTitle(tab.customTitle, activePane.title, countPaneLeaves(tab.tree));
+  refreshTerminalTabTitleModel(tab);
 }
 
 export function terminalPaneById(tab: TerminalTab, paneId: string): TerminalPane | undefined {

@@ -66,7 +66,8 @@ pub fn run() {
             app_shell::update_terminal_menu_state,
             config::watch_config_command
         ])
-        .typ::<types::TerminalMenuEvent>();
+        .typ::<types::TerminalMenuEvent>()
+        .typ::<types::PaneMenuEvent>();
 
     #[cfg(debug_assertions)]
     builder

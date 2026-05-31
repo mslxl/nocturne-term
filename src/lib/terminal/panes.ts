@@ -61,6 +61,21 @@ export function listPaneIds(tree: PaneTree): string[] {
   return tree.children.flatMap((child) => listPaneIds(child));
 }
 
+export function paneItemsForTree<T extends { id: string }>(tree: PaneTree, items: readonly T[]): T[] {
+  const byId = new Map<string, T>();
+  for (const item of items) {
+    if (byId.has(item.id)) {
+      throw new Error(`duplicate pane item ${item.id}`);
+    }
+    byId.set(item.id, item);
+  }
+  return listPaneIds(tree).map((paneId) => {
+    const item = byId.get(paneId);
+    if (!item) throw new Error(`pane item ${paneId} not found`);
+    return item;
+  });
+}
+
 export function clonePaneTree(tree: PaneTree): PaneTree {
   if (tree.kind === "leaf") return { kind: "leaf", paneId: tree.paneId };
   return {
