@@ -265,6 +265,7 @@
   let hostPickerPosition = $state({ left: 10, top: 44 });
   let hostPickerSubmenus = $state<HostPickerMenu[]>([]);
   let secondaryClickOpensDefault = $state(false);
+  let macosIntegratedTitlebar = $state(false);
   let pendingSshCredential = $state<PendingSshCredential | null>(null);
   let hostSessionRetryByPaneId = $state<Record<string, HostSessionRetry>>({});
   let commandPaletteLastFocus: HTMLElement | null = null;
@@ -300,6 +301,7 @@
   let activeTab = $derived(tabs.find((tab) => tab.id === activeId));
   let isVertical = $derived(tabBarOrientation !== "horizontal");
   let tabsOnLeft = $derived(tabBarOrientation === "vertical_left");
+  let integratedTitlebar = $derived(isMacPlatform() && macosIntegratedTitlebar && !isVertical);
   let paletteResults = $derived(
     searchPaletteItems(buildPaletteItems(), commandPaletteQuery, {
       language: language(),
@@ -329,6 +331,7 @@
     appTheme = resolveTheme(appThemeFromConfig(readValue(snapshot.effective_config.root, ["ui", "theme"])));
     keybindings = readKeybindingMap(snapshot.effective_config.root, navigator.platform.toLowerCase().includes("mac"));
     secondaryClickOpensDefault = booleanValue(readValue(snapshot.effective_config.root, ["session", "secondary_click_opens_default"])) ?? false;
+    macosIntegratedTitlebar = booleanValue(readValue(snapshot.effective_config.root, ["ui", "macos_integrated_titlebar"])) ?? true;
     const next = await unwrapCommand(commands.getTerminalSettingsForTheme({ resolved_theme: appTheme }));
     settings = next;
     tabBarOrientation = next.tab_bar_orientation;
@@ -343,6 +346,10 @@
 
   function currentWindowLabel() {
     return hasTauriRuntime() ? getCurrentWindow().label : "main";
+  }
+
+  function isMacPlatform() {
+    return navigator.platform.toLowerCase().includes("mac");
   }
 
   function measureNewTerminal(cwd: string | null = null) {
@@ -2709,7 +2716,7 @@
 
 </script>
 
-<main class:left-tabs={tabsOnLeft} class:vertical={isVertical} class="workspace">
+<main class:integrated-titlebar={integratedTitlebar} class:left-tabs={tabsOnLeft} class:vertical={isVertical} class="workspace">
   <div class="terminal-measure-host" aria-hidden="true">
     <div class="terminal-mount" bind:this={terminalMeasureContainer}></div>
   </div>
@@ -2719,6 +2726,7 @@
       {tabs}
       {activeId}
       placement={tabBarOrientation}
+      {integratedTitlebar}
       {activateTab}
       {closeTab}
       {newSession}
@@ -2766,6 +2774,7 @@
       {tabs}
       {activeId}
       placement={tabBarOrientation}
+      {integratedTitlebar}
       {activateTab}
       {closeTab}
       {newSession}

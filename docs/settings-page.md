@@ -89,6 +89,19 @@ On first use, the frontend defaults to Chinese when `navigator.language` starts 
 
 User-facing frontend text should use the lightweight dictionary under `src/lib/i18n/`.
 
+## macOS Integrated Title Bar
+
+On macOS, the main terminal window can place the horizontal tab bar in the native title bar:
+
+```toml
+[ui]
+macos_integrated_titlebar = true
+```
+
+The setting defaults to `true` on macOS and is ignored on other platforms. It is only applied when the terminal tab bar is horizontal; vertical tab placements keep the standard native title bar so the traffic-light controls do not cover terminal content.
+
+The integrated tab bar must leave a draggable margin around the controls. The tab bar root owns `data-tauri-drag-region="deep"` only in this mode, while tab buttons remain normal interactive controls.
+
 ## Immediate Refresh
 
 Config writes emit `config://changed`. Windows should listen for that event and refresh their config snapshot or terminal settings.

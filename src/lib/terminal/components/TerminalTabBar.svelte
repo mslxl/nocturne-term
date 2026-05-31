@@ -6,6 +6,7 @@
     tabs: TerminalTab[];
     activeId: string;
     placement: TabBarOrientation;
+    integratedTitlebar?: boolean;
     activateTab: (id: string) => void | Promise<void>;
     closeTab: (id: string) => void | Promise<void>;
     newSession: () => void | Promise<void>;
@@ -19,6 +20,7 @@
     tabs,
     activeId,
     placement,
+    integratedTitlebar = false,
     activateTab,
     closeTab,
     newSession,
@@ -65,10 +67,12 @@
 
 <nav
   class:vertical-tabs={isVertical}
+  class:integrated-titlebar={integratedTitlebar}
   class:horizontal={!isVertical}
   class="tabbar"
   aria-label="Terminal sessions"
   data-placement={placement}
+  data-tauri-drag-region={integratedTitlebar ? "deep" : undefined}
   oncontextmenu={openContextMenu}
   data-testid="terminal-tabbar"
 >
@@ -142,6 +146,12 @@
     border-bottom: 1px solid var(--app-border);
   }
 
+  .tabbar.integrated-titlebar {
+    grid-template-columns: minmax(0, 1fr) 50px;
+    column-gap: 6px;
+    padding: 5px 8px 5px 84px;
+  }
+
   .vertical-tabs {
     display: grid;
     grid-template-rows: minmax(0, 1fr) 40px;
@@ -182,6 +192,15 @@
     border-right: 1px solid var(--app-border);
   }
 
+  .integrated-titlebar .tab-item {
+    height: 30px;
+    min-width: 152px;
+    border: 1px solid color-mix(in srgb, var(--app-border) 80%, transparent);
+    border-radius: 6px;
+    margin-right: 6px;
+    overflow: hidden;
+  }
+
   .vertical-tabs .tab-item {
     width: 100%;
     max-width: none;
@@ -211,6 +230,12 @@
     text-align: left;
   }
 
+  .integrated-titlebar .tab-activate {
+    height: 28px;
+    gap: 0;
+    padding: 2px 4px 2px 10px;
+  }
+
   .tab-activate span,
   .tab-activate small {
     min-width: 0;
@@ -224,10 +249,19 @@
     line-height: 1.1;
   }
 
+  .integrated-titlebar .tab-activate span {
+    line-height: 14px;
+  }
+
   .tab-activate small {
     font-size: 10px;
     line-height: 1.1;
     color: color-mix(in srgb, var(--app-fg) 64%, transparent);
+  }
+
+  .integrated-titlebar .tab-activate small {
+    font-size: 9px;
+    line-height: 10px;
   }
 
   .close-tab {
@@ -238,6 +272,11 @@
     color: color-mix(in srgb, var(--app-fg) 58%, transparent);
     font-size: 16px;
     line-height: 1;
+  }
+
+  .integrated-titlebar .close-tab {
+    width: 28px;
+    height: 28px;
   }
 
   .close-tab:active,
@@ -264,8 +303,19 @@
     gap: 1px;
   }
 
+  .integrated-titlebar .new-actions button {
+    width: 50px;
+    min-width: 50px;
+    height: 30px;
+    border-radius: 6px;
+  }
+
   .new-session {
     border-left: 1px solid var(--app-border);
+  }
+
+  .integrated-titlebar .new-session {
+    border: 1px solid color-mix(in srgb, var(--app-border) 80%, transparent);
   }
 
   .new-actions span {
@@ -277,6 +327,10 @@
     color: color-mix(in srgb, var(--app-fg) 62%, transparent);
     font-size: 9px;
     line-height: 1;
+  }
+
+  .integrated-titlebar .new-actions small {
+    display: none;
   }
 
   .vertical-tabs .new-actions {
@@ -293,6 +347,10 @@
   @media (max-width: 720px) {
     .tab-item {
       min-width: 138px;
+    }
+
+    .integrated-titlebar .tab-item {
+      min-width: 118px;
     }
 
     .tab-activate {

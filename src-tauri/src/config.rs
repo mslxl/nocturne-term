@@ -1660,6 +1660,7 @@ pub(crate) fn set_active_profile_impl(
 }
 
 pub(crate) fn emit_change(app: &AppHandle<impl Runtime>) {
+    let _ = crate::app_shell::apply_main_window_chrome(app);
     let _ = app.emit(CONFIG_CHANGED_EVENT, ());
 }
 
@@ -1672,6 +1673,54 @@ pub(crate) fn effective_application_config(app: &AppHandle<impl Runtime>) -> Res
     let main_value = config_table_to_toml(&main_config.root)?;
     let profile_value = config_table_to_toml(&profile_config.root)?;
     Ok(deep_merge(&main_value, &profile_value))
+}
+
+pub(crate) fn effective_macos_integrated_titlebar(app: &AppHandle<impl Runtime>) -> Result<bool> {
+    let config = effective_application_config(app)?;
+    let Some(table) = config.as_table() else {
+        return Err(invalid_error("effective config must be a TOML table"));
+    };
+    let Some(ui) = table.get("ui") else {
+        return Ok(true);
+    };
+    let Some(ui) = ui.as_table() else {
+        return Err(invalid_error("ui must be a table"));
+    };
+    match ui.get("macos_integrated_titlebar") {
+        Some(toml::Value::Boolean(value)) => Ok(*value),
+        Some(_) => Err(invalid_error(
+            "ui.macos_integrated_titlebar must be a boolean",
+        )),
+        None => Ok(true),
+    }
+}
+
+pub(crate) fn effective_horizontal_tab_bar(app: &AppHandle<impl Runtime>) -> Result<bool> {
+    let config = effective_application_config(app)?;
+    let Some(table) = config.as_table() else {
+        return Err(invalid_error("effective config must be a TOML table"));
+    };
+    let Some(terminal) = table.get("terminal") else {
+        return Ok(true);
+    };
+    let Some(terminal) = terminal.as_table() else {
+        return Err(invalid_error("terminal must be a table"));
+    };
+    match terminal.get("tab_bar_orientation") {
+        Some(toml::Value::String(value)) if value == "horizontal" => Ok(true),
+        Some(toml::Value::String(value))
+            if value == "vertical" || value == "vertical_left" || value == "vertical_right" =>
+        {
+            Ok(false)
+        }
+        Some(toml::Value::String(value)) => Err(invalid_error(format!(
+            "unsupported terminal.tab_bar_orientation value: {value}"
+        ))),
+        Some(_) => Err(invalid_error(
+            "terminal.tab_bar_orientation must be a string",
+        )),
+        None => Ok(true),
+    }
 }
 
 #[tauri::command]
