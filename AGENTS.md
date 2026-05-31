@@ -55,6 +55,7 @@ The default goal is a native-feeling experience on each platform, with a polishe
 ## Implementation Discipline
 
 - Follow the repository's existing patterns unless they are clearly wrong for the task.
+- Run development, check, test, and build commands inside the Nix devShell. Prefer `nix develop -c sh -lc '<command>'` unless already inside the devShell.
 - Keep async boundaries clear and errors visible.
 - Add tests or checks when behavior changes in a way that could regress.
 - After finishing code changes, first run `pnpm check` and `cargo check` to validate frontend and backend code. Only after both pass should you attempt build checks, and all checks must pass before considering the work complete.
