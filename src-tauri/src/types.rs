@@ -291,6 +291,7 @@ pub struct PaneContextMenuInput {
     pub window_label: String,
     pub has_selection: bool,
     pub read_only: bool,
+    pub has_multiple_panes: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
@@ -325,6 +326,8 @@ pub enum PaneMenuAction {
     ResetTerminal,
     ToggleReadOnly,
     ChangeTabTitle,
+    ZoomSplit,
+    ClosePane,
     SplitLeft,
     SplitRight,
     SplitUp,

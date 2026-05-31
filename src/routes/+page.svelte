@@ -7,7 +7,7 @@
   import { OverlayScrollbarsComponent } from "overlayscrollbars-svelte";
   import "overlayscrollbars/overlayscrollbars.css";
   import "@xterm/xterm/css/xterm.css";
-  import { commands, type AppConfigSnapshot, type TabBarOrientation, type TerminalSessionInfo, type TerminalSettings } from "$lib/bindings";
+  import { commands, type AppConfigSnapshot, type PaneMenuEvent, type TabBarOrientation, type TerminalSessionInfo, type TerminalSettings } from "$lib/bindings";
   import { appLanguageFromConfig, appThemeFromConfig, applyAppPreferences, booleanValue, configString, readValue, resolveTheme, writeValue } from "$lib/config/document";
   import CommandPalette from "$lib/command-palette/CommandPalette.svelte";
   import { staticPaletteCommands } from "$lib/command-palette/commands";
@@ -32,6 +32,7 @@
     removePane,
     replacePane,
     resizeAdjacentPanes,
+    paneItemsForTree,
     splitPane,
     swapPanes,
     clonePaneTree,
@@ -167,19 +168,6 @@
   const minPaneWidth = 160;
   const minPaneHeight = 96;
   const hotTabsStorageKey = "nocturne:dev-hot-tabs";
-  type PaneMenuEvent = {
-    action:
-      | "copy"
-      | "paste"
-      | "reset_terminal"
-      | "toggle_read_only"
-      | "change_tab_title"
-      | "split_left"
-      | "split_right"
-      | "split_up"
-    | "split_down";
-    pane_id: string;
-  };
   type TextInputElement = HTMLInputElement | HTMLTextAreaElement;
   type TextEditSnapshot = {
     selectionEnd: number;
@@ -1332,7 +1320,7 @@
 
   async function mountAndFitTabPanes(tab: TerminalTab) {
     await tick();
-    for (const pane of tab.panes) {
+    for (const pane of paneItemsForTree(tab.tree, tab.panes)) {
       await mountTerminalWhenReady(pane.id);
       await flushTerminalOutputBacklog(pane.id);
       terminalTabs.scheduleFit(pane.id);
@@ -1391,7 +1379,8 @@
     event.preventDefault();
     await activatePane(paneId);
     if (!hasTauriRuntime()) return;
-    const pane = terminalPaneById(findTabByPaneId(paneId), paneId);
+    const tab = findTabByPaneId(paneId);
+    const pane = terminalPaneById(tab, paneId);
     if (!pane) throw new Error(`pane ${paneId} not found`);
     await unwrapCommand(
       commands.showPaneContextMenu({
@@ -1401,6 +1390,7 @@
         window_label: currentWindowLabel(),
         has_selection: pane.term?.hasSelection() === true,
         read_only: pane.readOnly,
+        has_multiple_panes: tab.panes.length > 1,
       }),
     ).catch((error) => {
       settingsError = error instanceof Error ? error.message : String(error);
@@ -1426,6 +1416,14 @@
     }
     if (event.action === "change_tab_title") {
       changeTabTitleForPane(event.pane_id);
+      return;
+    }
+    if (event.action === "zoom_split") {
+      void zoomPane(event.pane_id);
+      return;
+    }
+    if (event.action === "close_pane") {
+      void closePane(event.pane_id, { recordHistory: true });
       return;
     }
     if (event.action === "split_left") {
@@ -2477,6 +2475,11 @@
     refreshTerminalTabTitle(tab);
     await mountAndFitTabPanes(tab);
     terminalPaneById(tab, tab.activePaneId)?.term?.focus();
+  }
+
+  async function zoomPane(paneId: string) {
+    await activatePane(paneId);
+    await togglePaneZoom();
   }
 
   async function runTerminalMenuCommand(command: TerminalMenuEvent["command"]) {
