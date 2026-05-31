@@ -22,7 +22,7 @@ use tauri::{AppHandle, Emitter};
 use crate::{
     config::{
         connection_host_by_id, default_connection_host_id, effective_application_config,
-        ssh_known_hosts_path,
+        resolve_openssh_proxy_jump_chain, ssh_known_hosts_path,
     },
     error::{invalid_error, missing_error, terminal_error, Result},
     ssh_trust::{ssh_trust_target, SshTrustStore},
@@ -31,12 +31,12 @@ use crate::{
         terminal_color_scheme_by_id,
     },
     types::{
-        ConnectionDiagnosticSeverity, ConnectionHostEntry, ConnectionProtocol,
-        CreateHostTerminalSessionInput, ExistingTerminalSessionInput, LocalConnectionConfig,
-        SshConnectionConfig, SshCredentialInput, SshCredentialKind, TabBarOrientation,
-        TerminalColorSchemeVariant, TerminalCursorStyle, TerminalExitEvent, TerminalInput,
-        TerminalOutputBacklogInput, TerminalOutputEvent, TerminalPadding, TerminalRenderer,
-        TerminalSessionInfo, TerminalSessionOwnershipInput, TerminalSettings,
+        ConnectionDiagnosticSeverity, ConnectionHostEntry, ConnectionHostSource,
+        ConnectionProtocol, CreateHostTerminalSessionInput, ExistingTerminalSessionInput,
+        LocalConnectionConfig, SshConnectionConfig, SshCredentialInput, SshCredentialKind,
+        TabBarOrientation, TerminalColorSchemeVariant, TerminalCursorStyle, TerminalExitEvent,
+        TerminalInput, TerminalOutputBacklogInput, TerminalOutputEvent, TerminalPadding,
+        TerminalRenderer, TerminalSessionInfo, TerminalSessionOwnershipInput, TerminalSettings,
         TerminalSettingsInput, TerminalSizeInput, TerminalTheme, TerminalTransportKind,
         TerminalTransportState, TerminalTransportStateEvent,
     },
@@ -769,11 +769,12 @@ fn emit_terminal_exit(
 }
 
 struct SshWorkerInput {
-    app: AppHandle,
+    app: Option<AppHandle>,
     session_id: String,
     display_name: String,
     host_id: String,
     ssh: SshConnectionConfig,
+    proxy_jump_chain: Option<Vec<SshConnectionConfig>>,
     username: String,
     size: PtySize,
     trust_path: PathBuf,
@@ -833,8 +834,13 @@ fn run_ssh_worker(
 
 fn prepare_ssh_session(input: &SshWorkerInput) -> Result<PreparedSshSession> {
     let mut jump_guards = Vec::new();
-    let tcp = if let Some(proxy_jump) = input.ssh.proxy_jump.as_deref() {
-        let chain = connect_proxy_jump_chain(input, proxy_jump)?;
+    let tcp = if let Some(proxy_jump_chain) = input.proxy_jump_chain.as_deref() {
+        let chain = connect_proxy_jump_chain(input, proxy_jump_chain)?;
+        jump_guards = chain.guards;
+        chain.stream
+    } else if let Some(proxy_jump) = input.ssh.proxy_jump.as_deref() {
+        let jumps = parse_proxy_jump_chain(proxy_jump)?;
+        let chain = connect_proxy_jump_chain(input, &jumps)?;
         jump_guards = chain.guards;
         chain.stream
     } else {
@@ -846,18 +852,10 @@ fn prepare_ssh_session(input: &SshWorkerInput) -> Result<PreparedSshSession> {
     let mut session = Session::new().map_err(terminal_error)?;
     session.set_tcp_stream(tcp);
     session.handshake().map_err(terminal_error)?;
-    update_terminal_transport_state(
-        &input.app,
-        &input.session_id,
-        TerminalTransportState::VerifyingHostKey,
-    );
+    update_ssh_input_transport_state(input, TerminalTransportState::VerifyingHostKey);
     verify_ssh_host_key(&session, &input)?;
     authenticate_ssh_session(&session, input)?;
-    update_terminal_transport_state(
-        &input.app,
-        &input.session_id,
-        TerminalTransportState::Connected,
-    );
+    update_ssh_input_transport_state(input, TerminalTransportState::Connected);
 
     let mut channel = session.channel_session().map_err(terminal_error)?;
     channel
@@ -881,13 +879,21 @@ fn prepare_ssh_session(input: &SshWorkerInput) -> Result<PreparedSshSession> {
     })
 }
 
+fn update_ssh_input_transport_state(input: &SshWorkerInput, state: TerminalTransportState) {
+    if let Some(app) = &input.app {
+        update_terminal_transport_state(app, &input.session_id, state);
+    }
+}
+
 struct ProxyBridge {
     stream: TcpStream,
     guard: thread::JoinHandle<()>,
 }
 
-fn connect_proxy_jump_chain(input: &SshWorkerInput, proxy_jump: &str) -> Result<ProxyJumpChain> {
-    let jumps = parse_proxy_jump_chain(proxy_jump)?;
+fn connect_proxy_jump_chain(
+    input: &SshWorkerInput,
+    jumps: &[SshConnectionConfig],
+) -> Result<ProxyJumpChain> {
     let mut guards = Vec::new();
     let mut current_stream: Option<TcpStream> = None;
     for (index, jump) in jumps.iter().enumerate() {
@@ -929,6 +935,7 @@ fn connect_proxy_jump_hop(
         display_name: format!("{} via {}", input.display_name, jump.hostname),
         host_id: format!("proxy-jump:{}", ssh_trust_target(&jump.hostname, jump.port)),
         ssh: jump.clone(),
+        proxy_jump_chain: None,
         username: jump
             .username
             .clone()
@@ -942,10 +949,10 @@ fn connect_proxy_jump_hop(
     };
     verify_ssh_host_key(&jump_session, &jump_input)?;
     authenticate_ssh_session(&jump_session, &jump_input)?;
-    jump_session.set_blocking(false);
     let remote = jump_session
         .channel_direct_tcpip(&target.hostname, target.port, None)
         .map_err(terminal_error)?;
+    jump_session.set_blocking(false);
     jump_tcp_mode
         .set_nonblocking(true)
         .map_err(terminal_error)?;
@@ -1567,17 +1574,29 @@ fn create_ssh_host_terminal_session(
         .ssh
         .clone()
         .ok_or_else(|| invalid_error("ssh connection host requires ssh config"))?;
+    let proxy_jump_chain = if matches!(host.source, ConnectionHostSource::OpenSshConfig) {
+        match (host.path.as_deref(), ssh.proxy_jump.as_deref()) {
+            (Some(path), Some(proxy_jump)) => Some(resolve_openssh_proxy_jump_chain(
+                Path::new(path),
+                proxy_jump,
+            )?),
+            _ => None,
+        }
+    } else {
+        None
+    };
     let username = default_ssh_username(&ssh)?;
     let trust_path = ssh_known_hosts_path(&app)?;
     let state = terminal_state();
     let session_number = state.next_id.fetch_add(1, Ordering::Relaxed) + 1;
     let id = format!("term-{session_number}");
     let worker = SshWorkerInput {
-        app: app.clone(),
+        app: Some(app.clone()),
         session_id: id.clone(),
         display_name: host.document.name.clone(),
         host_id: host.id.clone(),
         ssh: ssh.clone(),
+        proxy_jump_chain,
         username: username.clone(),
         size,
         trust_path,
@@ -1726,6 +1745,7 @@ pub(crate) fn close_terminal_session(session_id: String) -> Result<()> {
 mod tests {
     use super::*;
     use crate::config::parse_toml;
+    use tempfile::tempdir;
 
     #[test]
     fn parses_uniform_terminal_padding() {
@@ -1875,6 +1895,297 @@ mod tests {
         assert_eq!(config[1].username.as_deref(), Some("ops"));
         assert_eq!(config[1].hostname, "second.example.com");
         assert_eq!(config[1].port, 2200);
+    }
+
+    #[test]
+    #[ignore = "requires Docker; run with cargo test ssh_proxy_jump_multi_hop_reaches_target_through_docker -- --ignored"]
+    fn ssh_proxy_jump_multi_hop_reaches_target_through_docker() {
+        let fixture = DockerSshFixture::start();
+        let config_path = fixture.root.path().join("ssh_config");
+        std::fs::write(
+            &config_path,
+            &format!(
+                r#"
+                Host jump1
+                  HostName 127.0.0.1
+                  Port {}
+                  User root
+
+                Host jump2
+                  HostName {}
+                  User root
+
+                Host target
+                  HostName {}
+                  User root
+                  ProxyJump jump1,jump2
+                "#,
+                fixture.jump1_port, fixture.jump2_name, fixture.target_name
+            ),
+        )
+        .expect("write OpenSSH config");
+        let proxy_jump_chain =
+            crate::config::resolve_openssh_proxy_jump_chain(&config_path, "jump1,jump2")
+                .expect("resolve OpenSSH ProxyJump aliases");
+        assert_eq!(proxy_jump_chain[0].hostname, "127.0.0.1");
+        assert_eq!(proxy_jump_chain[0].port, fixture.jump1_port);
+        assert_eq!(proxy_jump_chain[1].hostname, fixture.jump2_name);
+
+        let input = SshWorkerInput {
+            app: None,
+            session_id: "docker-proxy-jump-test".to_string(),
+            display_name: "docker target".to_string(),
+            host_id: "docker-target".to_string(),
+            ssh: SshConnectionConfig {
+                hostname: fixture.target_name.clone(),
+                port: 22,
+                username: Some("root".to_string()),
+                identity_file: None,
+                proxy_jump: Some("jump1,jump2".to_string()),
+                forward_agent: false,
+                server_alive_interval: None,
+            },
+            proxy_jump_chain: Some(proxy_jump_chain),
+            username: "root".to_string(),
+            size: PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 800,
+                pixel_height: 600,
+            },
+            trust_path: fixture.root.path().join("known-hosts.toml"),
+            accept_new_host_key: true,
+            update_changed_host_key: false,
+            credential: Some(SshCredentialInput {
+                kind: SshCredentialKind::Password,
+                value: "nocturne".to_string(),
+            }),
+            save_credential: false,
+        };
+        let mut prepared = prepare_ssh_session(&input).expect("connect through two jump hosts");
+        prepared
+            .channel
+            .write_all(b"printf 'nocturne-docker-target\\n'; exit\n")
+            .expect("write shell command");
+
+        let output = read_ssh_channel_until(&mut prepared.channel, "nocturne-docker-target");
+        assert!(
+            output.contains("nocturne-docker-target"),
+            "expected target marker in SSH shell output, got: {output:?}"
+        );
+    }
+
+    struct DockerSshFixture {
+        root: tempfile::TempDir,
+        network: String,
+        image: String,
+        jump1_name: String,
+        jump2_name: String,
+        target_name: String,
+        jump1_port: u16,
+    }
+
+    impl DockerSshFixture {
+        fn start() -> Self {
+            require_docker();
+            let root = tempdir().expect("temp dir");
+            let suffix = format!(
+                "{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .expect("system clock after unix epoch")
+                    .as_millis()
+            );
+            let image = format!("nocturne-ssh-test:{suffix}");
+            let network = format!("nocturne-ssh-test-{suffix}");
+            write_dockerfile(root.path());
+            docker([
+                "build",
+                "-q",
+                "-t",
+                &image,
+                root.path().to_string_lossy().as_ref(),
+            ]);
+            docker(["network", "create", &network]);
+
+            let jump1_name = format!("nocturne-jump1-{suffix}");
+            let jump2_name = format!("nocturne-jump2-{suffix}");
+            let target_name = format!("nocturne-target-{suffix}");
+            docker([
+                "run",
+                "-d",
+                "--rm",
+                "--name",
+                &jump1_name,
+                "--network",
+                &network,
+                "-p",
+                "127.0.0.1::22",
+                &image,
+            ]);
+            docker([
+                "run",
+                "-d",
+                "--rm",
+                "--name",
+                &jump2_name,
+                "--network",
+                &network,
+                &image,
+            ]);
+            docker([
+                "run",
+                "-d",
+                "--rm",
+                "--name",
+                &target_name,
+                "--network",
+                &network,
+                &image,
+            ]);
+            wait_for_ssh_container(&jump1_name);
+            wait_for_ssh_container(&jump2_name);
+            wait_for_ssh_container(&target_name);
+            let jump1_port = docker_output([
+                "inspect",
+                "-f",
+                "{{(index (index .NetworkSettings.Ports \"22/tcp\") 0).HostPort}}",
+                &jump1_name,
+            ])
+            .trim()
+            .parse::<u16>()
+            .expect("mapped jump host port");
+
+            Self {
+                root,
+                network,
+                image,
+                jump1_name,
+                jump2_name,
+                target_name,
+                jump1_port,
+            }
+        }
+    }
+
+    impl Drop for DockerSshFixture {
+        fn drop(&mut self) {
+            let _ = std::process::Command::new("docker")
+                .args([
+                    "rm",
+                    "-f",
+                    &self.jump1_name,
+                    &self.jump2_name,
+                    &self.target_name,
+                ])
+                .output();
+            let _ = std::process::Command::new("docker")
+                .args(["network", "rm", &self.network])
+                .output();
+            let _ = std::process::Command::new("docker")
+                .args(["image", "rm", "-f", &self.image])
+                .output();
+        }
+    }
+
+    fn write_dockerfile(root: &Path) {
+        let dockerfile = r#"
+FROM alpine:3.20
+RUN apk add --no-cache openssh-server \
+  && ssh-keygen -A \
+  && echo 'root:nocturne' | chpasswd \
+  && sed -i 's/^#*PasswordAuthentication .*/PasswordAuthentication yes/' /etc/ssh/sshd_config \
+  && sed -i 's/^#*PermitRootLogin .*/PermitRootLogin yes/' /etc/ssh/sshd_config \
+  && sed -i 's/^#*AllowTcpForwarding .*/AllowTcpForwarding yes/' /etc/ssh/sshd_config
+EXPOSE 22
+CMD ["/usr/sbin/sshd", "-D", "-e"]
+"#;
+        std::fs::write(root.join("Dockerfile"), dockerfile).expect("write Dockerfile");
+    }
+
+    fn require_docker() {
+        let status = std::process::Command::new("docker")
+            .arg("version")
+            .status()
+            .expect("Docker is required for this ignored integration test");
+        assert!(
+            status.success(),
+            "Docker is required for this integration test"
+        );
+    }
+
+    fn docker<const N: usize>(args: [&str; N]) {
+        let output = std::process::Command::new("docker")
+            .args(args)
+            .output()
+            .expect("run docker");
+        assert!(
+            output.status.success(),
+            "docker command failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn docker_output<const N: usize>(args: [&str; N]) -> String {
+        let output = std::process::Command::new("docker")
+            .args(args)
+            .output()
+            .expect("run docker");
+        assert!(
+            output.status.success(),
+            "docker command failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).expect("docker stdout is utf8")
+    }
+
+    fn wait_for_ssh_container(name: &str) {
+        for _ in 0..50 {
+            let output = std::process::Command::new("docker")
+                .args([
+                    "exec",
+                    name,
+                    "sh",
+                    "-lc",
+                    "test -S /var/run/docker.sock || pgrep sshd >/dev/null",
+                ])
+                .output()
+                .expect("docker exec");
+            if output.status.success() {
+                return;
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+        panic!("sshd did not become ready in {name}");
+    }
+
+    fn read_ssh_channel_until(channel: &mut Channel, marker: &str) -> String {
+        let started = std::time::Instant::now();
+        let mut output = Vec::new();
+        let mut buffer = [0_u8; 4096];
+        while started.elapsed() < Duration::from_secs(15) {
+            match channel.read(&mut buffer) {
+                Ok(0) => {
+                    if channel.eof() {
+                        break;
+                    }
+                }
+                Ok(size) => {
+                    output.extend_from_slice(&buffer[..size]);
+                    let text = String::from_utf8_lossy(&output);
+                    if text.contains(marker) {
+                        return text.into_owned();
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(error) => panic!("failed to read SSH channel: {error}"),
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        String::from_utf8_lossy(&output).into_owned()
     }
 
     #[test]
