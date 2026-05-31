@@ -23,7 +23,12 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["app"],
+    "targets": "all",
+    "publisher": "mslxl",
+    "category": "DeveloperTool",
+    "shortDescription": "A native-feeling cross-platform terminal app.",
+    "longDescription": "Nocturne is a cross-platform terminal app for macOS, Linux, Windows, Android, and iOS, built for a native-feeling experience with a clean interface and fast everyday use.",
+    "licenseFile": "../LICENSE",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

@@ -44,3 +44,10 @@ keyring-core = "1.0.0"
 
 [dev-dependencies]
 tempfile = "3.27.0"
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+opt-level = "z"
+panic = "abort"
+strip = true
