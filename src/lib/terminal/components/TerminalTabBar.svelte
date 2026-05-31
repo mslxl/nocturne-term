@@ -119,6 +119,7 @@
     <button
       class="new-session"
       data-testid="new-session"
+      data-host-picker-trigger="true"
       type="button"
       aria-label="New session"
       title="New session"
