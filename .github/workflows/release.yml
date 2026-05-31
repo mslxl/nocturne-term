@@ -1,0 +1,320 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+      - "*.*.*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  GH_REPO: ${{ github.repository }}
+
+jobs:
+  prepare:
+    name: Prepare release
+    runs-on: ubuntu-latest
+    outputs:
+      changelog: ${{ steps.changelog.outputs.changelog }}
+      tag: ${{ steps.version.outputs.tag }}
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate semver tag
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          TAG="${GITHUB_REF_NAME}"
+          VERSION="${TAG#v}"
+          SEMVER_REGEX='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$'
+
+          if [[ ! "$VERSION" =~ $SEMVER_REGEX ]]; then
+            echo "Tag '$TAG' is not a supported semver tag. Use v1.2.3 or 1.2.3, with optional prerelease/build metadata." >&2
+            exit 1
+          fi
+
+          {
+            echo "tag=$TAG"
+            echo "version=$VERSION"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Generate changelog
+        id: changelog
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CURRENT_TAG: ${{ steps.version.outputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          previous_tag="$(
+            gh release list \
+              --exclude-drafts \
+              --limit 100 \
+              --json tagName \
+              --jq '.[].tagName' \
+              | while read -r tag; do
+                  if [[ "$tag" == "$CURRENT_TAG" ]]; then
+                    continue
+                  fi
+                  if git rev-parse -q --verify "refs/tags/${tag}^{commit}" >/dev/null; then
+                    echo "$tag"
+                    break
+                  fi
+                done
+          )"
+
+          delimiter="CHANGELOG_$(uuidgen | tr '[:lower:]-' '[:upper:]_')"
+          {
+            echo "changelog<<${delimiter}"
+            if [[ -n "$previous_tag" ]]; then
+              echo "Changes since ${previous_tag}:"
+              echo
+              git log "${previous_tag}..${CURRENT_TAG}" --first-parent --pretty=format:'- %s (%h)' || true
+            else
+              echo "Initial release ${CURRENT_TAG}."
+              echo
+              git log "${CURRENT_TAG}" --first-parent --pretty=format:'- %s (%h)' || true
+            fi
+            echo
+            echo "${delimiter}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Write changelog file
+        env:
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+          RELEASE_BODY: ${{ steps.changelog.outputs.changelog }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          printf '%s\n' "$RELEASE_BODY" > "CHANGELOG-${RELEASE_TAG}.md"
+
+      - name: Create draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+          RELEASE_BODY: ${{ steps.changelog.outputs.changelog }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          prerelease_flag=()
+          if [[ "$RELEASE_VERSION" == *-* ]]; then
+            prerelease_flag+=(--prerelease)
+          fi
+
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            is_draft="$(gh release view "$RELEASE_TAG" --json isDraft --jq '.isDraft')"
+            if [[ "$is_draft" != "true" ]]; then
+              echo "Release ${RELEASE_TAG} already exists and is not a draft. Refusing to overwrite a published release." >&2
+              exit 1
+            fi
+
+            gh release view "$RELEASE_TAG" --json assets --jq '.assets[].name' \
+              | while read -r asset; do
+                  gh release delete-asset "$RELEASE_TAG" "$asset" --yes
+                done
+
+            gh release edit "$RELEASE_TAG" \
+              --draft=true \
+              --title "Nocturne ${RELEASE_TAG}" \
+              --notes "$RELEASE_BODY" \
+              "${prerelease_flag[@]}"
+          else
+            gh release create "$RELEASE_TAG" \
+              --verify-tag \
+              --draft \
+              --title "Nocturne ${RELEASE_TAG}" \
+              --notes "$RELEASE_BODY" \
+              "${prerelease_flag[@]}"
+          fi
+
+      - name: Upload changelog asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          gh release upload "$RELEASE_TAG" "CHANGELOG-${RELEASE_TAG}.md" --clobber
+
+  build:
+    name: Build ${{ matrix.label }}
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: macOS Apple Silicon
+            platform: macos-15
+            args: --target aarch64-apple-darwin --bundles dmg
+            rust-target: aarch64-apple-darwin
+          - label: macOS Intel
+            platform: macos-15-intel
+            args: --target x86_64-apple-darwin --bundles dmg
+            rust-target: x86_64-apple-darwin
+          - label: Windows x64
+            platform: windows-latest
+            args: --target x86_64-pc-windows-msvc --bundles msi,nsis
+            rust-target: x86_64-pc-windows-msvc
+          - label: Linux x64
+            platform: ubuntu-22.04
+            args: --target x86_64-unknown-linux-gnu --bundles appimage,deb,rpm
+            rust-target: x86_64-unknown-linux-gnu
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.1.2
+          run_install: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust-target }}
+
+      - name: Install Linux system dependencies
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            curl \
+            file \
+            libayatana-appindicator3-dev \
+            libssl-dev \
+            libwebkit2gtk-4.1-dev \
+            pkg-config \
+            librsvg2-dev \
+            patchelf \
+            rpm \
+            wget
+
+      - name: Install JavaScript dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Sync app versions from tag
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          node --input-type=module <<'NODE'
+          import { readFileSync, writeFileSync } from "node:fs";
+
+          const releaseVersion = process.env.RELEASE_VERSION;
+          if (!releaseVersion) {
+            throw new Error("RELEASE_VERSION is required");
+          }
+
+          const packagePath = "package.json";
+          const packageJson = JSON.parse(readFileSync(packagePath, "utf8"));
+          packageJson.version = releaseVersion;
+          writeFileSync(packagePath, `${JSON.stringify(packageJson, null, 2)}\n`);
+
+          const configPath = "src-tauri/tauri.conf.json";
+          const config = JSON.parse(readFileSync(configPath, "utf8"));
+          config.version = releaseVersion;
+          const versionParts = releaseVersion.match(
+            /^(?<major>0|[1-9]\d*)\.(?<minor>0|[1-9]\d*)\.(?<patch>0|[1-9]\d*)(?:-(?<prerelease>[0-9A-Za-z.-]+))?/,
+          );
+          if (!versionParts?.groups) {
+            throw new Error(`Invalid release version: ${releaseVersion}`);
+          }
+          const { major, minor, patch, prerelease } = versionParts.groups;
+          const wixVersion = prerelease
+            ? `${major}.${minor}.${patch}.${wixPrereleaseBuild(prerelease)}`
+            : `${major}.${minor}.${patch}`;
+          config.bundle ??= {};
+          config.bundle.windows ??= {};
+          config.bundle.windows.wix ??= {};
+          config.bundle.windows.wix.version = wixVersion;
+          writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`);
+
+          const cargoPath = "src-tauri/Cargo.toml";
+          const cargoToml = readFileSync(cargoPath, "utf8");
+          const updatedCargoToml = cargoToml.replace(
+            /^(\[package\][\s\S]*?^version\s*=\s*)"[^"]+"/m,
+            `$1"${releaseVersion}"`,
+          );
+          if (updatedCargoToml === cargoToml) {
+            throw new Error("Could not update src-tauri/Cargo.toml package version");
+          }
+          writeFileSync(cargoPath, updatedCargoToml);
+
+          function wixPrereleaseBuild(prerelease) {
+            const channel = prerelease.split(".")[0].toLowerCase();
+            const trailingNumber = prerelease.match(/(?:^|\.)(\d+)$/)?.[1];
+            const number = trailingNumber ? Number(trailingNumber) : 0;
+            if (!Number.isInteger(number) || number < 0 || number > 9999) {
+              throw new Error(`MSI prerelease number must be between 0 and 9999: ${prerelease}`);
+            }
+
+            const channelOffset = new Map([
+              ["alpha", 10000],
+              ["beta", 20000],
+              ["rc", 30000],
+            ]).get(channel) ?? 40000;
+            return channelOffset + number;
+          }
+          NODE
+
+      - name: Build and upload release assets
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        with:
+          tagName: ${{ needs.prepare.outputs.tag }}
+          releaseName: "Nocturne ${{ needs.prepare.outputs.tag }}"
+          releaseBody: ${{ needs.prepare.outputs.changelog }}
+          releaseDraft: true
+          prerelease: ${{ contains(needs.prepare.outputs.version, '-') }}
+          assetNamePattern: "[name]-[version]-[platform]-[arch][setup].[ext]"
+          tauriScript: pnpm tauri
+          args: ${{ matrix.args }}
+
+  publish:
+    name: Publish release
+    needs:
+      - prepare
+      - build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Publish draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          gh release edit "$RELEASE_TAG" --draft=false

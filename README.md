@@ -30,6 +30,8 @@ To run Nocturne locally while developing:
 pnpm tauri dev
 ```
 
+Development Tauri runs use the app identifier `com.mslxl.nocturne.dev`, so they do not share the production macOS bundle identity.
+
 For frontend checks only:
 
 ```bash
@@ -51,4 +53,4 @@ cargo check
 
 ## License
 
-MIT
+GNU Affero General Public License v3.0
