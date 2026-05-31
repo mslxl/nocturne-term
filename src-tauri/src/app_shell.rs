@@ -886,15 +886,23 @@ fn macos_application_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Subme
 
 pub(crate) fn handle_menu_event<R: Runtime>(app: &AppHandle<R>, id: &str) {
     let result = if id == MENU_SETTINGS {
-        open_settings(app, "main")
+        spawn_app_shell_action(app, "open settings window from menu", |app| {
+            open_settings(&app, "main")
+        })
     } else if id == MENU_COMMAND_PALETTE {
         handle_terminal_menu(app, id)
     } else if id == MENU_PROFILE_EDIT {
-        open_settings(app, "profile")
+        spawn_app_shell_action(app, "open profile settings window from menu", |app| {
+            open_settings(&app, "profile")
+        })
     } else if id == MENU_PROFILE_NEW {
-        open_dialog(app, DialogKind::ProfileNew)
+        spawn_app_shell_action(app, "open new profile dialog from menu", |app| {
+            open_dialog(&app, DialogKind::ProfileNew)
+        })
     } else if id == MENU_PROFILE_DELETE {
-        open_dialog(app, DialogKind::ProfileDelete)
+        spawn_app_shell_action(app, "open delete profile dialog from menu", |app| {
+            open_dialog(&app, DialogKind::ProfileDelete)
+        })
     } else if let Some(profile) = id.strip_prefix(PROFILE_SWITCH_PREFIX) {
         config::set_active_profile_impl(app, profile.to_string()).and_then(|_| refresh_menu(app))
     } else if let Some(placement) = id.strip_prefix(TAB_BAR_ORIENTATION_PREFIX) {
@@ -924,7 +932,7 @@ pub(crate) fn handle_menu_event<R: Runtime>(app: &AppHandle<R>, id: &str) {
 
 #[tauri::command]
 #[specta::specta]
-pub(crate) fn open_settings_window(app: AppHandle, mode: String) -> Result<()> {
+pub(crate) async fn open_settings_window(app: AppHandle, mode: String) -> Result<()> {
     match mode.as_str() {
         "main" | "profile" => open_settings(&app, &mode),
         _ => Err(invalid_error(format!("unsupported settings mode: {mode}"))),
@@ -933,13 +941,13 @@ pub(crate) fn open_settings_window(app: AppHandle, mode: String) -> Result<()> {
 
 #[tauri::command]
 #[specta::specta]
-pub(crate) fn open_profile_new_dialog(app: AppHandle) -> Result<()> {
+pub(crate) async fn open_profile_new_dialog(app: AppHandle) -> Result<()> {
     open_dialog(&app, DialogKind::ProfileNew)
 }
 
 #[tauri::command]
 #[specta::specta]
-pub(crate) fn open_host_manager_window(app: AppHandle) -> Result<()> {
+pub(crate) async fn open_host_manager_window(app: AppHandle) -> Result<()> {
     open_host_manager(&app)
 }
 
@@ -954,6 +962,26 @@ pub(crate) fn handle_window_event<R: Runtime>(window: &Window<R>, event: &Window
         terminal::close_terminal_sessions_for_window(window.label());
         clear_last_focused_main_window(&window.app_handle(), window.label());
     }
+}
+
+fn spawn_app_shell_action<R, F>(
+    app: &AppHandle<R>,
+    description: &'static str,
+    action: F,
+) -> Result<()>
+where
+    R: Runtime,
+    F: FnOnce(AppHandle<R>) -> Result<()> + Send + 'static,
+{
+    let app = app.clone();
+    std::thread::spawn(move || {
+        log::debug!("{description} started");
+        if let Err(error) = action(app) {
+            log::warn!("{description} failed: {error}");
+        }
+        log::debug!("{description} finished");
+    });
+    Ok(())
 }
 
 fn clear_last_focused_main_window<R: Runtime>(app: &AppHandle<R>, label: &str) {
@@ -1489,8 +1517,10 @@ fn emit_pane_menu_event<R: Runtime>(app: &AppHandle<R>, id: &str) -> Result<()> 
 }
 
 fn open_settings<R: Runtime>(app: &AppHandle<R>, mode: &str) -> Result<()> {
+    log::debug!("opening Settings window mode={mode}");
     let route = format!("/settings?mode={mode}");
     if let Some(window) = app.get_webview_window(SETTINGS_WINDOW_LABEL) {
+        log::debug!("Settings window already exists; focusing it");
         focus_window(&window)?;
         window
             .emit(SETTINGS_NAVIGATE_EVENT, route)
@@ -1498,38 +1528,46 @@ fn open_settings<R: Runtime>(app: &AppHandle<R>, mode: &str) -> Result<()> {
         return Ok(());
     }
 
+    let title = menu_text(resolve_ui_language(app)).settings_title;
+    log::debug!("building Settings window route={route}");
     let window = WebviewWindowBuilder::new(
         app,
         SETTINGS_WINDOW_LABEL,
         WebviewUrl::App(route.trim_start_matches('/').into()),
     )
-    .title(menu_text(resolve_ui_language(app)).settings_title)
+    .title(title)
     .inner_size(920.0, 680.0)
     .min_inner_size(540.0, 420.0)
     .resizable(true)
     .center()
     .build()
     .map_err(to_config_error)?;
+    log::debug!("Settings window built; focusing it");
     focus_window(&window)
 }
 
 fn open_host_manager<R: Runtime>(app: &AppHandle<R>) -> Result<()> {
+    log::debug!("opening Host Manager window");
     if let Some(window) = app.get_webview_window(HOST_MANAGER_WINDOW_LABEL) {
+        log::debug!("Host Manager window already exists; focusing it");
         return focus_window(&window);
     }
 
+    let title = menu_text(resolve_ui_language(app)).hosts_title;
+    log::debug!("building Host Manager window");
     let window = WebviewWindowBuilder::new(
         app,
         HOST_MANAGER_WINDOW_LABEL,
         WebviewUrl::App("hosts".into()),
     )
-    .title(menu_text(resolve_ui_language(app)).hosts_title)
+    .title(title)
     .inner_size(920.0, 680.0)
     .min_inner_size(560.0, 420.0)
     .resizable(true)
     .center()
     .build()
     .map_err(to_config_error)?;
+    log::debug!("Host Manager window built; focusing it");
     focus_window(&window)
 }
 

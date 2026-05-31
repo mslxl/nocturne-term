@@ -4,6 +4,7 @@ use std::{
     io::Write,
     path::{Component, Path, PathBuf},
     sync::{Arc, Mutex, OnceLock},
+    time::Instant,
 };
 
 use keyring_core::Entry as KeyringEntry;
@@ -155,7 +156,9 @@ fn resolve_root_relative(root: &Path, dir: &str) -> PathBuf {
 }
 
 pub(crate) fn ensure_layout(app: &AppHandle<impl Runtime>) -> Result<ConfigRootInfo> {
+    let started = Instant::now();
     let root = root_dir(app)?;
+    log::debug!("ensuring config layout at {}", root.display());
     fs::create_dir_all(&root).map_err(io_error)?;
     let terminal_color_schemes_dir = root.join(TERMINAL_COLOR_SCHEMES_DIR);
     let state_path = root.join(STATE_FILE);
@@ -183,24 +186,43 @@ pub(crate) fn ensure_layout(app: &AppHandle<impl Runtime>) -> Result<ConfigRootI
         write_atomic(&default_profile, "")?;
     }
     for host_dir in host_dirs(&root, &active_profile)? {
+        log::debug!("ensuring configured host directory {}", host_dir.display());
         fs::create_dir_all(&host_dir).map_err(io_error)?;
     }
     let root_info = root_paths(app)?;
-    notify_connection_diagnostics(app, &root)?;
+    log::debug!(
+        "ensured config layout in {} ms",
+        started.elapsed().as_millis()
+    );
     Ok(root_info)
 }
 
-fn notify_connection_diagnostics(app: &AppHandle<impl Runtime>, root: &Path) -> Result<()> {
+pub(crate) fn notify_connection_diagnostics(app: &AppHandle<impl Runtime>) -> Result<()> {
+    let started = Instant::now();
+    let root = root_dir(app)?;
+    log::debug!(
+        "checking connection diagnostics for notification at {}",
+        root.display()
+    );
     let state = load_state(&root.join(STATE_FILE))?;
-    let hosts = load_connection_host_entries(root, &state)?;
+    let hosts = load_connection_host_entries(&root, &state)?;
     let error_count = hosts
         .iter()
         .flat_map(|host| host.diagnostics.iter())
         .filter(|diagnostic| diagnostic.severity == ConnectionDiagnosticSeverity::Error)
         .count();
     if error_count == 0 {
+        log::debug!(
+            "connection diagnostics notification check completed with no errors in {} ms",
+            started.elapsed().as_millis()
+        );
         return Ok(());
     }
+    log::warn!(
+        "connection diagnostics found {} error(s) in {} ms",
+        error_count,
+        started.elapsed().as_millis()
+    );
     let _ = app
         .notification()
         .builder()
@@ -873,19 +895,52 @@ fn load_connection_host_entries(
     root: &Path,
     state: &AppStateFile,
 ) -> Result<Vec<ConnectionHostEntry>> {
+    let started = Instant::now();
+    log::debug!(
+        "loading connection hosts from root={} active_profile={} default_local_host_removed={}",
+        root.display(),
+        state.active_profile,
+        state.default_local_host_removed
+    );
     let mut hosts = Vec::new();
     if !state.default_local_host_removed {
         hosts.push(virtual_default_local_host());
     }
-    for dir in host_dirs(root, &state.active_profile)? {
+    let dirs = host_dirs(root, &state.active_profile)?;
+    log::debug!(
+        "resolved {} connection host directory/directories: {}",
+        dirs.len(),
+        display_paths(&dirs)
+    );
+    let mut user_host_count = 0usize;
+    for dir in dirs {
+        let dir_started = Instant::now();
+        log::debug!("scanning connection host directory {}", dir.display());
         if !dir.exists() {
+            log::debug!(
+                "skipped missing connection host directory {} in {} ms",
+                dir.display(),
+                dir_started.elapsed().as_millis()
+            );
             continue;
         }
-        for path in collect_host_toml_files(&dir)? {
+        let paths = collect_host_toml_files(&dir)?;
+        log::debug!(
+            "found {} TOML connection host file(s) in {} after {} ms",
+            paths.len(),
+            dir.display(),
+            dir_started.elapsed().as_millis()
+        );
+        for path in paths {
             let mut diagnostics = Vec::new();
             let mut document = match read_connection_host_document_from_path(&path) {
                 Ok(document) => document,
                 Err(error) => {
+                    log::warn!(
+                        "failed to read connection host document {}: {}",
+                        path.display(),
+                        error
+                    );
                     diagnostics.push(connection_diagnostic(
                         ConnectionDiagnosticSeverity::Error,
                         "malformed_toml",
@@ -922,6 +977,7 @@ fn load_connection_host_entries(
                     ));
                 }
             }
+            user_host_count += 1;
             hosts.push(ConnectionHostEntry {
                 id: document.id.clone(),
                 path: Some(path.to_string_lossy().into_owned()),
@@ -931,9 +987,23 @@ fn load_connection_host_entries(
                 diagnostics,
             });
         }
+        log::debug!(
+            "finished connection host directory {} in {} ms",
+            dir.display(),
+            dir_started.elapsed().as_millis()
+        );
     }
+    let config_started = Instant::now();
     let config = load_application_connection_config(root, &state.active_profile)?;
-    hosts.extend(load_openssh_connection_hosts(&config.openssh_config_files)?);
+    log::debug!(
+        "resolved {} OpenSSH config file candidate(s) in {} ms: {}",
+        config.openssh_config_files.len(),
+        config_started.elapsed().as_millis(),
+        display_paths(&config.openssh_config_files)
+    );
+    let openssh_hosts = load_openssh_connection_hosts(&config.openssh_config_files)?;
+    let openssh_host_count = openssh_hosts.len();
+    hosts.extend(openssh_hosts);
     mark_duplicate_connection_ids(&mut hosts);
     hosts.sort_by(|a, b| {
         a.document
@@ -941,6 +1011,17 @@ fn load_connection_host_entries(
             .cmp(&b.document.name)
             .then_with(|| a.id.cmp(&b.id))
     });
+    log::info!(
+        "loaded {} connection host(s) ({} user, {} OpenSSH/virtual) in {} ms",
+        hosts.len(),
+        user_host_count,
+        hosts.len().saturating_sub(user_host_count),
+        started.elapsed().as_millis()
+    );
+    log::debug!(
+        "OpenSSH contributed {} host(s) before sorting and duplicate checks",
+        openssh_host_count
+    );
     Ok(hosts)
 }
 
@@ -960,14 +1041,34 @@ struct OpenSshMatchBlock {
 }
 
 fn load_openssh_connection_hosts(paths: &[PathBuf]) -> Result<Vec<ConnectionHostEntry>> {
+    let started = Instant::now();
     let mut hosts = Vec::new();
     for path in paths {
+        let file_started = Instant::now();
+        log::debug!("checking OpenSSH config file {}", path.display());
         if !path.exists() {
+            log::debug!(
+                "skipped missing OpenSSH config file {} in {} ms",
+                path.display(),
+                file_started.elapsed().as_millis()
+            );
             continue;
         }
         let parsed = parse_openssh_config(path)?;
-        hosts.extend(parsed_to_openssh_hosts(parsed, path));
+        let parsed_hosts = parsed_to_openssh_hosts(parsed, path);
+        log::debug!(
+            "loaded {} OpenSSH host projection(s) from {} in {} ms",
+            parsed_hosts.len(),
+            path.display(),
+            file_started.elapsed().as_millis()
+        );
+        hosts.extend(parsed_hosts);
     }
+    log::debug!(
+        "loaded {} total OpenSSH host projection(s) in {} ms",
+        hosts.len(),
+        started.elapsed().as_millis()
+    );
     Ok(hosts)
 }
 
@@ -991,12 +1092,23 @@ fn parse_openssh_config_file(
     visited: &mut Vec<PathBuf>,
     parsed: &mut ParsedOpenSshConfig,
 ) -> Result<()> {
+    let started = Instant::now();
+    log::debug!(
+        "parsing OpenSSH config file depth={} path={}",
+        depth,
+        path.display()
+    );
     if depth > OPENSSH_INCLUDE_LIMIT {
         parsed.diagnostics.push(connection_diagnostic(
             ConnectionDiagnosticSeverity::Warning,
             "include_depth",
             format!("OpenSSH Include depth exceeded at {}", path.display()),
         ));
+        log::warn!(
+            "OpenSSH Include depth exceeded at depth={} path={}",
+            depth,
+            path.display()
+        );
         return Ok(());
     }
     let canonical = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
@@ -1006,6 +1118,7 @@ fn parse_openssh_config_file(
             "include_cycle",
             format!("OpenSSH Include cycle at {}", path.display()),
         ));
+        log::warn!("OpenSSH Include cycle at {}", path.display());
         return Ok(());
     }
     if !path.exists() {
@@ -1014,6 +1127,12 @@ fn parse_openssh_config_file(
             "missing_include",
             format!("OpenSSH Include file not found: {}", path.display()),
         ));
+        log::debug!(
+            "OpenSSH config file missing at depth={} path={} after {} ms",
+            depth,
+            path.display(),
+            started.elapsed().as_millis()
+        );
         return Ok(());
     }
     visited.push(canonical);
@@ -1032,6 +1151,13 @@ fn parse_openssh_config_file(
         if key_lower == "include" {
             for include in split_openssh_words(rest) {
                 for include_path in expand_openssh_include(base_dir, &include) {
+                    log::debug!(
+                        "OpenSSH Include from {} depth={} include={} resolved_path={}",
+                        path.display(),
+                        depth,
+                        include,
+                        include_path.display()
+                    );
                     parse_openssh_config_file(&include_path, depth + 1, visited, parsed)?;
                 }
             }
@@ -1081,6 +1207,12 @@ fn parse_openssh_config_file(
     }
     flush_openssh_section(&mut current, parsed);
     visited.pop();
+    log::debug!(
+        "parsed OpenSSH config file depth={} path={} in {} ms",
+        depth,
+        path.display(),
+        started.elapsed().as_millis()
+    );
     Ok(())
 }
 
@@ -1128,6 +1260,7 @@ fn split_openssh_words(value: &str) -> Vec<String> {
 }
 
 fn expand_openssh_include(base_dir: &Path, include: &str) -> Vec<PathBuf> {
+    let started = Instant::now();
     let expanded = expand_home(include);
     let path = PathBuf::from(expanded);
     let path = if path.is_absolute() {
@@ -1137,13 +1270,41 @@ fn expand_openssh_include(base_dir: &Path, include: &str) -> Vec<PathBuf> {
     };
     let pattern = path.to_string_lossy().into_owned();
     if pattern.contains('*') || pattern.contains('?') || pattern.contains('[') {
+        log::debug!("expanding OpenSSH Include glob pattern={pattern}");
         match glob::glob(&pattern) {
-            Ok(paths) => paths.filter_map(std::result::Result::ok).collect(),
-            Err(_) => vec![path],
+            Ok(paths) => {
+                let matches = paths
+                    .filter_map(std::result::Result::ok)
+                    .collect::<Vec<_>>();
+                log::debug!(
+                    "expanded OpenSSH Include glob pattern={} to {} path(s) in {} ms",
+                    pattern,
+                    matches.len(),
+                    started.elapsed().as_millis()
+                );
+                matches
+            }
+            Err(error) => {
+                log::warn!("failed to expand OpenSSH Include glob pattern={pattern}: {error}");
+                vec![path]
+            }
         }
     } else {
+        log::debug!(
+            "resolved OpenSSH Include path={} in {} ms",
+            path.display(),
+            started.elapsed().as_millis()
+        );
         vec![path]
     }
+}
+
+fn display_paths(paths: &[PathBuf]) -> String {
+    paths
+        .iter()
+        .map(|path| path.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn expand_home(value: &str) -> String {
@@ -1516,15 +1677,25 @@ pub(crate) fn effective_application_config(app: &AppHandle<impl Runtime>) -> Res
 #[tauri::command]
 #[specta::specta]
 pub(crate) fn get_config_root(app: AppHandle) -> Result<ConfigRootInfo> {
-    ensure_layout(&app)
+    log::debug!("command get_config_root started");
+    let started = Instant::now();
+    let root = ensure_layout(&app)?;
+    log::debug!(
+        "command get_config_root completed in {} ms",
+        started.elapsed().as_millis()
+    );
+    Ok(root)
 }
 
 #[tauri::command]
 #[specta::specta]
 pub(crate) fn get_config_snapshot(app: AppHandle) -> Result<AppConfigSnapshot> {
+    log::debug!("command get_config_snapshot started");
+    let started = Instant::now();
     let root = ensure_layout(&app)?;
     let root_path = PathBuf::from(&root.root_dir);
     let state = load_state(Path::new(&root.state_path))?;
+    log::debug!("get_config_snapshot reading config documents");
     let main_config = read_main_config_from_path(Path::new(&root.main_config_path))?;
     let profile_path = profile_path(&root_path, &root.active_profile);
     let profile_config = read_profile_document_from_path(&profile_path)?;
@@ -1537,13 +1708,31 @@ pub(crate) fn get_config_snapshot(app: AppHandle) -> Result<AppConfigSnapshot> {
         },
         _ => return Err(invalid_error("effective config must be a TOML table")),
     };
+    let profiles_started = Instant::now();
+    let profiles = list_profiles_impl(&root_path)?;
+    log::debug!(
+        "get_config_snapshot loaded {} profile(s) in {} ms",
+        profiles.len(),
+        profiles_started.elapsed().as_millis()
+    );
+    let hosts_started = Instant::now();
+    let hosts = load_connection_host_entries(&root_path, &state)?;
+    log::debug!(
+        "get_config_snapshot loaded {} host entry/entries in {} ms",
+        hosts.len(),
+        hosts_started.elapsed().as_millis()
+    );
+    log::info!(
+        "command get_config_snapshot completed in {} ms",
+        started.elapsed().as_millis()
+    );
     Ok(AppConfigSnapshot {
         root,
         main_config,
         profile_config,
         effective_config,
-        profiles: list_profiles_impl(&root_path)?,
-        hosts: load_connection_host_entries(&root_path, &state)?,
+        profiles,
+        hosts,
     })
 }
 
@@ -1711,9 +1900,17 @@ pub(crate) fn read_connection_host(app: AppHandle, id: String) -> Result<Connect
 #[tauri::command]
 #[specta::specta]
 pub(crate) fn list_connection_hosts(app: AppHandle) -> Result<Vec<ConnectionHostEntry>> {
+    log::debug!("command list_connection_hosts started");
+    let started = Instant::now();
     let root = ensure_layout(&app)?;
     let state = load_state(Path::new(&root.state_path))?;
-    load_connection_host_entries(Path::new(&root.root_dir), &state)
+    let hosts = load_connection_host_entries(Path::new(&root.root_dir), &state)?;
+    log::info!(
+        "command list_connection_hosts completed with {} host(s) in {} ms",
+        hosts.len(),
+        started.elapsed().as_millis()
+    );
+    Ok(hosts)
 }
 
 #[tauri::command]
@@ -1962,6 +2159,8 @@ pub(crate) fn set_default_host_command(app: AppHandle, host_id: String) -> Resul
 #[tauri::command]
 #[specta::specta]
 pub(crate) fn watch_config_command(app: AppHandle) -> Result<()> {
+    log::debug!("command watch_config_command started");
+    let started = Instant::now();
     let root = ensure_layout(&app)?;
     let state = load_state(Path::new(&root.state_path))?;
     let mut paths = vec![
@@ -1976,7 +2175,17 @@ pub(crate) fn watch_config_command(app: AppHandle) -> Result<()> {
             .openssh_config_files,
     );
     paths.push(Path::new(&root.root_dir).join(KNOWN_HOSTS_FILE));
-    watch_config(app, paths)
+    log::debug!(
+        "watch_config_command installing watchers for {} path(s): {}",
+        paths.len(),
+        display_paths(&paths)
+    );
+    watch_config(app, paths)?;
+    log::debug!(
+        "command watch_config_command completed in {} ms",
+        started.elapsed().as_millis()
+    );
+    Ok(())
 }
 
 #[tauri::command]

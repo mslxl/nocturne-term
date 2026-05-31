@@ -99,9 +99,19 @@ pub fn run() {
                 Ok(_) => {}
                 Err(error) => log::warn!("{}", logging::cleanup_error(error)),
             }
+            log::info!("Nocturne setup started");
             let _ = config::ensure_layout(app.handle())?;
+            let diagnostics_app = app.handle().clone();
+            std::thread::spawn(move || {
+                log::debug!("background connection diagnostics notification check started");
+                if let Err(error) = config::notify_connection_diagnostics(&diagnostics_app) {
+                    log::warn!("failed to notify connection diagnostics during setup: {error}");
+                }
+                log::debug!("background connection diagnostics notification check finished");
+            });
             app_shell::refresh_menu(app.handle())?;
             config::watch_config_command(app.handle().clone())?;
+            log::info!("Nocturne setup completed");
             Ok(())
         })
         .run(tauri::generate_context!())
