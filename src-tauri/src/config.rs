@@ -1079,6 +1079,13 @@ struct ParsedOpenSshConfig {
     diagnostics: Vec<ConnectionHostDiagnostic>,
 }
 
+#[derive(Debug, Clone)]
+struct OpenSshProxyJumpReference {
+    alias: String,
+    username: Option<String>,
+    port: Option<u16>,
+}
+
 fn parse_openssh_config(path: &Path) -> Result<ParsedOpenSshConfig> {
     let mut parsed = ParsedOpenSshConfig::default();
     let mut visited = Vec::new();
@@ -1400,7 +1407,8 @@ fn parsed_to_openssh_hosts(parsed: ParsedOpenSshConfig, path: &Path) -> Vec<Conn
             let username = setting_first(&effective, "user");
             let identity_file =
                 setting_first(&effective, "identityfile").map(|value| expand_home(&value));
-            let proxy_jump = setting_first(&effective, "proxyjump");
+            let proxy_jump = setting_first(&effective, "proxyjump")
+                .filter(|value| !value.eq_ignore_ascii_case("none"));
             let forward_agent = setting_first(&effective, "forwardagent")
                 .map(|value| matches!(value.to_ascii_lowercase().as_str(), "yes" | "true"))
                 .unwrap_or(false);
@@ -1441,6 +1449,118 @@ fn parsed_to_openssh_hosts(parsed: ParsedOpenSshConfig, path: &Path) -> Vec<Conn
         }
     }
     entries
+}
+
+pub(crate) fn resolve_openssh_proxy_jump_chain(
+    config_path: &Path,
+    proxy_jump: &str,
+) -> Result<Vec<SshConnectionConfig>> {
+    let parsed = parse_openssh_config(config_path)?;
+    resolve_openssh_proxy_jump_chain_from_parsed(&parsed, proxy_jump)
+}
+
+fn resolve_openssh_proxy_jump_chain_from_parsed(
+    parsed: &ParsedOpenSshConfig,
+    proxy_jump: &str,
+) -> Result<Vec<SshConnectionConfig>> {
+    let jumps = proxy_jump
+        .split(',')
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .map(parse_openssh_proxy_jump_reference)
+        .collect::<Result<Vec<_>>>()?;
+    if jumps.is_empty() {
+        return Err(invalid_error("ProxyJump cannot be empty"));
+    }
+    if jumps
+        .iter()
+        .any(|jump| jump.alias.eq_ignore_ascii_case("none"))
+    {
+        return Err(invalid_error(
+            "ProxyJump none cannot be combined with jump hosts",
+        ));
+    }
+    jumps
+        .into_iter()
+        .map(|jump| openssh_proxy_jump_config(parsed, jump))
+        .collect()
+}
+
+fn openssh_proxy_jump_config(
+    parsed: &ParsedOpenSshConfig,
+    jump: OpenSshProxyJumpReference,
+) -> Result<SshConnectionConfig> {
+    let effective = effective_openssh_settings(parsed, &jump.alias);
+    let hostname = setting_first(&effective, "hostname").unwrap_or(jump.alias);
+    let port = match jump.port {
+        Some(port) => port,
+        None => setting_first(&effective, "port")
+            .map(|value| {
+                value
+                    .parse::<u16>()
+                    .map_err(|_| invalid_error(format!("invalid OpenSSH Port: {value}")))
+            })
+            .transpose()?
+            .unwrap_or(22),
+    };
+    let username = jump.username.or_else(|| setting_first(&effective, "user"));
+    let identity_file = setting_first(&effective, "identityfile").map(|value| expand_home(&value));
+    let forward_agent = setting_first(&effective, "forwardagent")
+        .map(|value| matches!(value.to_ascii_lowercase().as_str(), "yes" | "true"))
+        .unwrap_or(false);
+    let server_alive_interval = setting_first(&effective, "serveraliveinterval")
+        .map(|value| {
+            value
+                .parse::<u32>()
+                .map_err(|_| invalid_error(format!("invalid ServerAliveInterval: {value}")))
+        })
+        .transpose()?;
+    Ok(SshConnectionConfig {
+        hostname,
+        port,
+        username,
+        identity_file,
+        proxy_jump: None,
+        forward_agent,
+        server_alive_interval,
+    })
+}
+
+fn parse_openssh_proxy_jump_reference(value: &str) -> Result<OpenSshProxyJumpReference> {
+    let (username, host_port) = match value.rsplit_once('@') {
+        Some((user, host)) if !user.trim().is_empty() => (Some(user.to_string()), host),
+        _ => (None, value),
+    };
+    let (alias, port) = parse_openssh_proxy_jump_host_port(host_port)?;
+    if alias.trim().is_empty() {
+        return Err(invalid_error("ProxyJump host cannot be empty"));
+    }
+    Ok(OpenSshProxyJumpReference {
+        alias,
+        username,
+        port,
+    })
+}
+
+fn parse_openssh_proxy_jump_host_port(value: &str) -> Result<(String, Option<u16>)> {
+    if let Some(rest) = value.strip_prefix('[') {
+        let (host, port_text) = rest
+            .split_once("]:")
+            .ok_or_else(|| invalid_error("invalid bracketed ProxyJump host:port"))?;
+        let port = port_text
+            .parse::<u16>()
+            .map_err(|_| invalid_error("invalid ProxyJump port"))?;
+        return Ok((host.to_string(), Some(port)));
+    }
+    if let Some((host, port_text)) = value.rsplit_once(':') {
+        if !host.contains(':') {
+            let port = port_text
+                .parse::<u16>()
+                .map_err(|_| invalid_error("invalid ProxyJump port"))?;
+            return Ok((host.to_string(), Some(port)));
+        }
+    }
+    Ok((value.to_string(), None))
 }
 
 fn concrete_openssh_patterns(patterns: &[String]) -> Vec<String> {
@@ -2609,6 +2729,52 @@ mod tests {
                 .as_deref(),
             Some("deploy")
         );
+    }
+
+    #[test]
+    fn openssh_proxy_jump_aliases_resolve_to_effective_hop_configs() {
+        let root = tempdir().expect("temp dir");
+        let key = root.path().join("jump-key");
+        let config = root.path().join("config");
+        write_atomic(
+            &config,
+            &format!(
+                r#"
+                Host bastion
+                  HostName 127.0.0.1
+                  User jump
+                  Port 2222
+                  IdentityFile {}
+
+                Host inner
+                  HostName 127.0.0.2
+                  User relay
+                  Port 2200
+
+                Host target
+                  HostName 127.0.0.3
+                  User app
+                  ProxyJump bastion,inner
+                "#,
+                key.display()
+            ),
+        )
+        .expect("config");
+
+        let hops =
+            resolve_openssh_proxy_jump_chain(&config, "bastion,inner").expect("resolved jumps");
+
+        assert_eq!(hops.len(), 2);
+        assert_eq!(hops[0].hostname, "127.0.0.1");
+        assert_eq!(hops[0].username.as_deref(), Some("jump"));
+        assert_eq!(hops[0].port, 2222);
+        assert_eq!(
+            hops[0].identity_file.as_deref(),
+            Some(key.to_string_lossy().as_ref())
+        );
+        assert_eq!(hops[1].hostname, "127.0.0.2");
+        assert_eq!(hops[1].username.as_deref(), Some("relay"));
+        assert_eq!(hops[1].port, 2200);
     }
 
     #[test]
