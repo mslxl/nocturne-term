@@ -1,6 +1,7 @@
 mod app_shell;
 mod config;
 mod error;
+mod logging;
 mod ssh_trust;
 mod terminal;
 mod terminal_schemes;
@@ -15,6 +16,7 @@ pub use types::*;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let log_file_name = logging::session_log_file_name();
     let builder = Builder::<tauri::Wry>::new()
         .commands(collect_commands![
             config::get_config_root,
@@ -78,12 +80,25 @@ pub fn run() {
     tauri_builder
         .on_menu_event(|app, event| app_shell::handle_menu_event(app, event.id().as_ref()))
         .on_window_event(|window, event| app_shell::handle_window_event(window, event))
+        .plugin(logging::plugin(log_file_name.clone()))
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(builder.invoke_handler())
-        .setup(|app| {
+        .setup(move |app| {
+            match logging::clean_log_dir(app.handle(), &log_file_name) {
+                Ok(summary) if summary.removed_files > 0 => {
+                    log::info!(
+                        "cleaned {} old log files ({} bytes removed, {} files kept)",
+                        summary.removed_files,
+                        summary.removed_bytes,
+                        summary.kept_files
+                    );
+                }
+                Ok(_) => {}
+                Err(error) => log::warn!("{}", logging::cleanup_error(error)),
+            }
             let _ = config::ensure_layout(app.handle())?;
             app_shell::refresh_menu(app.handle())?;
             config::watch_config_command(app.handle().clone())?;
