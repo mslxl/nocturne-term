@@ -9,6 +9,8 @@
     "clipboard-manager:allow-write-text",
     "dialog:allow-open",
     "dialog:allow-message",
+    "core:window:allow-internal-toggle-maximize",
+    "core:window:allow-start-dragging",
     "log:default",
     "opener:default"
   ]

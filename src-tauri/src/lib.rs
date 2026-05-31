@@ -110,6 +110,7 @@ pub fn run() {
                 log::debug!("background connection diagnostics notification check finished");
             });
             app_shell::refresh_menu(app.handle())?;
+            app_shell::apply_initial_main_window_chrome(app.handle())?;
             config::watch_config_command(app.handle().clone())?;
             log::info!("Nocturne setup completed");
             Ok(())

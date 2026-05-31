@@ -90,6 +90,22 @@ export const settingsSchema: SettingDefinition[] = [
     get: (root) => stringValue(valueAt(root, ["ui", "language"])) ?? defaultLanguage(),
     toConfigValue: (value) => (String(value) ? configString(String(value)) : undefined),
   },
+  ...(isMacPlatform()
+    ? [
+        {
+          key: "ui.macos_integrated_titlebar",
+          category: "appearance" as const,
+          label: "macosIntegratedTitlebar" as const,
+          path: ["ui", "macos_integrated_titlebar"],
+          kind: "boolean" as const,
+          defaultValue: true,
+          help: "macosIntegratedTitlebarHelp" as const,
+          get: (root: { values: Record<string, ConfigValue> }) =>
+            booleanValue(valueAt(root, ["ui", "macos_integrated_titlebar"])) ?? true,
+          toConfigValue: (value: unknown) => configBoolean(Boolean(value)),
+        },
+      ]
+    : []),
   {
     key: "terminal.command",
     category: "terminal",

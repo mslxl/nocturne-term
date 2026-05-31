@@ -351,12 +351,24 @@ tab_bar_orientation = "horizontal" # horizontal | vertical_left | vertical_right
 
 Older configs that use `"vertical"` remain valid. Rust treats that value as `"vertical_right"` when producing typed settings.
 
+### macOS integrated title bar
+
+The macOS main window can use an overlay title bar so horizontal terminal tabs sit on the same line as the traffic-light controls:
+
+```toml
+[ui]
+macos_integrated_titlebar = true
+```
+
+This defaults to `true` when absent. The setting is macOS-only and applies only with `terminal.tab_bar_orientation = "horizontal"`; vertical tab bar placements keep the normal system title bar.
+
 ### Effective config
 
 ```toml
 [ui]
 theme = "system"
 language = "en"
+macos_integrated_titlebar = true
 
 [editor]
 tab_width = 4

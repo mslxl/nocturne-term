@@ -1,9 +1,16 @@
+#[cfg(target_os = "macos")]
+use tauri::TitleBarStyle;
 use tauri::{
     menu::{
         AboutMetadata, CheckMenuItem, Menu, MenuItem, MenuItemKind, PredefinedMenuItem, Submenu,
     },
     AppHandle, Emitter, EventTarget, LogicalPosition, Manager, PhysicalPosition, PhysicalSize,
     Runtime, Size, WebviewUrl, WebviewWindow, WebviewWindowBuilder, Window, WindowEvent,
+};
+#[cfg(target_os = "macos")]
+use {
+    objc2_app_kit::{NSView, NSWindow, NSWindowButton},
+    objc2_foundation::{NSPoint, NSRect, NSSize},
 };
 
 use crate::{
@@ -107,6 +114,12 @@ const DEFAULT_WINDOW_HEIGHT: f64 = 640.0;
 const MIN_WINDOW_WIDTH: f64 = 540.0;
 const MIN_WINDOW_HEIGHT: f64 = 360.0;
 static LAST_FOCUSED_MAIN_WINDOW: OnceLock<Mutex<String>> = OnceLock::new();
+#[cfg(target_os = "macos")]
+const MACOS_TRAFFIC_LIGHT_X: f64 = 14.0;
+#[cfg(target_os = "macos")]
+const MACOS_TRAFFIC_LIGHT_CONTAINER_HEIGHT: f64 = 52.0;
+#[cfg(target_os = "macos")]
+const MACOS_TRAFFIC_LIGHT_BUTTON_Y: f64 = 23.0;
 
 #[derive(Copy, Clone, PartialEq, Eq)]
 enum UiLanguage {
@@ -958,9 +971,152 @@ pub(crate) fn handle_window_event<R: Runtime>(window: &Window<R>, event: &Window
         if let Ok(mut label) = state.lock() {
             *label = window.label().to_string();
         }
+        #[cfg(target_os = "macos")]
+        if let Ok(true) = macos_integrated_titlebar_active(&window.app_handle()) {
+            let _ = position_macos_window_traffic_lights(window);
+        }
     } else if matches!(event, WindowEvent::Destroyed) && is_main_window_label(window.label()) {
         terminal::close_terminal_sessions_for_window(window.label());
         clear_last_focused_main_window(&window.app_handle(), window.label());
+    }
+}
+
+pub(crate) fn apply_main_window_chrome<R: Runtime>(app: &AppHandle<R>) -> Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        let integrated = macos_integrated_titlebar_active(app)?;
+        let style = if integrated {
+            TitleBarStyle::Overlay
+        } else {
+            TitleBarStyle::Visible
+        };
+        let title = if integrated { "" } else { "Nocturne" };
+        for window in app.webview_windows().values() {
+            if !is_main_window_label(window.label()) {
+                continue;
+            }
+            window.set_title_bar_style(style).map_err(to_config_error)?;
+            window.set_title(title).map_err(to_config_error)?;
+            if integrated {
+                position_macos_webview_traffic_lights(window)?;
+                schedule_macos_webview_traffic_light_position(window);
+            }
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn apply_initial_main_window_chrome<R: Runtime>(app: &AppHandle<R>) -> Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        if macos_integrated_titlebar_active(app)? {
+            for window in app.webview_windows().values() {
+                if is_main_window_label(window.label()) {
+                    window.set_title("").map_err(to_config_error)?;
+                    position_macos_webview_traffic_lights(window)?;
+                    schedule_macos_webview_traffic_light_position(window);
+                }
+            }
+            return Ok(());
+        }
+    }
+    apply_main_window_chrome(app)
+}
+
+#[cfg(target_os = "macos")]
+fn position_macos_webview_traffic_lights<R: Runtime>(window: &WebviewWindow<R>) -> Result<()> {
+    let ns_window = window.ns_window().map_err(to_config_error)? as *mut NSWindow;
+    position_macos_traffic_lights(ns_window)
+}
+
+#[cfg(target_os = "macos")]
+fn schedule_macos_webview_traffic_light_position<R: Runtime>(window: &WebviewWindow<R>) {
+    let window = window.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(250));
+        let window_for_main = window.clone();
+        let _ = window.run_on_main_thread(move || {
+            let _ = position_macos_webview_traffic_lights(&window_for_main);
+        });
+    });
+}
+
+#[cfg(target_os = "macos")]
+fn position_macos_window_traffic_lights<R: Runtime>(window: &Window<R>) -> Result<()> {
+    let ns_window = window.ns_window().map_err(to_config_error)? as *mut NSWindow;
+    position_macos_traffic_lights(ns_window)
+}
+
+#[cfg(target_os = "macos")]
+fn position_macos_traffic_lights(ns_window: *mut NSWindow) -> Result<()> {
+    let Some(ns_window) = (unsafe { ns_window.as_ref() }) else {
+        return Err(invalid_error(
+            "main window native handle is not an NSWindow",
+        ));
+    };
+    let Some(close) = ns_window.standardWindowButton(NSWindowButton::CloseButton) else {
+        return Ok(());
+    };
+    let Some(miniaturize) = ns_window.standardWindowButton(NSWindowButton::MiniaturizeButton)
+    else {
+        return Ok(());
+    };
+    let zoom = ns_window.standardWindowButton(NSWindowButton::ZoomButton);
+    let Some(title_bar_container_view) =
+        (unsafe { close.superview() }).and_then(|view| unsafe { view.superview() })
+    else {
+        return Ok(());
+    };
+    let window_frame = ns_window.frame();
+    title_bar_container_view.setFrame(NSRect::new(
+        NSPoint::new(
+            NSView::frame(&title_bar_container_view).origin.x,
+            window_frame.size.height - MACOS_TRAFFIC_LIGHT_CONTAINER_HEIGHT,
+        ),
+        NSSize::new(
+            NSView::frame(&title_bar_container_view).size.width,
+            MACOS_TRAFFIC_LIGHT_CONTAINER_HEIGHT,
+        ),
+    ));
+    let close_frame = NSView::frame(&close);
+    let space_between = NSView::frame(&miniaturize).origin.x - close_frame.origin.x;
+
+    for (index, button) in [Some(close), Some(miniaturize), zoom]
+        .into_iter()
+        .flatten()
+        .enumerate()
+    {
+        let frame = NSView::frame(&button);
+        button.setFrameOrigin(NSPoint::new(
+            MACOS_TRAFFIC_LIGHT_X + (index as f64 * space_between),
+            MACOS_TRAFFIC_LIGHT_BUTTON_Y,
+        ));
+        button.setFrameSize(frame.size);
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn macos_integrated_titlebar_active<R: Runtime>(app: &AppHandle<R>) -> Result<bool> {
+    Ok(config::effective_macos_integrated_titlebar(app)?
+        && config::effective_horizontal_tab_bar(app)?)
+}
+
+#[cfg(target_os = "macos")]
+fn apply_main_window_builder_chrome<'a, R, M>(
+    integrated: bool,
+    builder: WebviewWindowBuilder<'a, R, M>,
+) -> WebviewWindowBuilder<'a, R, M>
+where
+    R: Runtime,
+    M: Manager<R>,
+{
+    if integrated {
+        builder
+            .title_bar_style(TitleBarStyle::Overlay)
+            .hidden_title(true)
+    } else {
+        builder.title_bar_style(TitleBarStyle::Visible)
     }
 }
 
@@ -1574,14 +1730,15 @@ fn open_host_manager<R: Runtime>(app: &AppHandle<R>) -> Result<()> {
 fn open_main_window_route<R: Runtime>(app: &AppHandle<R>, route: Option<&str>) -> Result<()> {
     let label = next_main_window_label(app);
     let route = route.unwrap_or_default().trim_start_matches('/');
-    let window = WebviewWindowBuilder::new(app, label, WebviewUrl::App(route.into()))
+    let builder = WebviewWindowBuilder::new(app, label, WebviewUrl::App(route.into()))
         .title("Nocturne")
         .inner_size(DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT)
         .min_inner_size(MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT)
         .resizable(true)
-        .center()
-        .build()
-        .map_err(to_config_error)?;
+        .center();
+    #[cfg(target_os = "macos")]
+    let builder = apply_main_window_builder_chrome(macos_integrated_titlebar_active(app)?, builder);
+    let window = builder.build().map_err(to_config_error)?;
     focus_window(&window)
 }
 
