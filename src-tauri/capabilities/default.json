@@ -9,6 +9,7 @@
     "clipboard-manager:allow-write-text",
     "dialog:allow-open",
     "dialog:allow-message",
+    "log:default",
     "opener:default"
   ]
 }
