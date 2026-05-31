@@ -1095,6 +1095,7 @@
   function handleWindowBlur() {
     if (dragState || pointerDrag) cancelDragInteraction();
     resizeDrag = null;
+    closeHostPicker();
   }
 
   function handleVisibilityChange() {
@@ -2141,20 +2142,37 @@
     hostPickerOpen = !hostPickerOpen;
   }
 
+  function closeHostPicker() {
+    hostPickerOpen = false;
+    hostPickerSubmenus = [];
+  }
+
   function openHostPicker(event: MouseEvent) {
     openHostPickerAtElement(event.currentTarget instanceof HTMLElement ? event.currentTarget : null);
   }
 
   async function runHostPickerHost(id: string) {
-    hostPickerOpen = false;
-    hostPickerSubmenus = [];
+    closeHostPicker();
     await createHostSession(id);
   }
 
   async function openHostManagerFromPicker() {
-    hostPickerOpen = false;
-    hostPickerSubmenus = [];
+    closeHostPicker();
     if (hasTauriRuntime()) await unwrapCommand(commands.openHostManagerWindow());
+  }
+
+  function isInsideHostPickerBoundary(target: EventTarget | null) {
+    return target instanceof Element && target.closest("[data-host-picker-root], [data-host-picker-trigger]") !== null;
+  }
+
+  function closeHostPickerOnExternalPointer(event: PointerEvent) {
+    if (!hostPickerOpen || isInsideHostPickerBoundary(event.target)) return;
+    closeHostPicker();
+  }
+
+  function closeHostPickerOnExternalFocus(event: FocusEvent) {
+    if (!hostPickerOpen || isInsideHostPickerBoundary(event.target)) return;
+    closeHostPicker();
   }
 
   function showHostPickerSubmenu(node: HostFolderTreeNode, level: number, event: MouseEvent | FocusEvent) {
@@ -2650,7 +2668,9 @@
     window.addEventListener("pointercancel", handlePointerCancel, { capture: true });
     window.addEventListener("blur", handleWindowBlur);
     window.addEventListener("focus", syncTerminalMenuState);
+    document.addEventListener("pointerdown", closeHostPickerOnExternalPointer, { capture: true });
     document.addEventListener("beforeinput", handleTextInputBeforeInput);
+    document.addEventListener("focusin", closeHostPickerOnExternalFocus, { capture: true });
     document.addEventListener("input", handleTextInputInput);
     document.addEventListener("focusin", handleTextInputFocus);
     document.addEventListener("focusout", syncTerminalMenuState);
@@ -2665,7 +2685,9 @@
       window.removeEventListener("pointercancel", handlePointerCancel, { capture: true });
       window.removeEventListener("blur", handleWindowBlur);
       window.removeEventListener("focus", syncTerminalMenuState);
+      document.removeEventListener("pointerdown", closeHostPickerOnExternalPointer, { capture: true });
       document.removeEventListener("beforeinput", handleTextInputBeforeInput);
+      document.removeEventListener("focusin", closeHostPickerOnExternalFocus, { capture: true });
       document.removeEventListener("input", handleTextInputInput);
       document.removeEventListener("focusin", handleTextInputFocus);
       document.removeEventListener("focusout", syncTerminalMenuState);
@@ -2786,7 +2808,12 @@
   {/if}
 
   {#if hostPickerOpen}
-    <section class="connection-picker" style={`--picker-left: ${hostPickerPosition.left}px; --picker-top: ${hostPickerPosition.top}px;`} aria-label="Hosts">
+    <section
+      class="connection-picker"
+      style={`--picker-left: ${hostPickerPosition.left}px; --picker-top: ${hostPickerPosition.top}px;`}
+      aria-label="Hosts"
+      data-host-picker-root="true"
+    >
       <OverlayScrollbarsComponent
         element="div"
         class="connection-picker-scroll"
@@ -2826,6 +2853,7 @@
         class="connection-picker picker-submenu"
         style={`--picker-left: ${menu.left}px; --picker-top: ${menu.top}px;`}
         aria-label={menu.node.name}
+        data-host-picker-root="true"
         onmouseenter={() => trimHostPickerSubmenus(index + 1)}
       >
         <OverlayScrollbarsComponent
