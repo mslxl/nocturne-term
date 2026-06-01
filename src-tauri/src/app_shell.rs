@@ -1307,6 +1307,39 @@ pub(crate) fn open_main_window(app: AppHandle, route: Option<String>) -> Result<
 
 #[tauri::command]
 #[specta::specta]
+pub(crate) fn open_workspace_floating_window(
+    app: AppHandle,
+    floating_window_id: String,
+) -> Result<()> {
+    if floating_window_id.trim().is_empty() {
+        return Err(invalid_error("floating window id cannot be empty"));
+    }
+    let label = format!("workspace-floating-{floating_window_id}");
+    if let Some(window) = app.get_webview_window(&label) {
+        return focus_window(&window);
+    }
+    let route = format!(
+        "/?floating_window={}",
+        urlencoding::encode(&floating_window_id)
+    );
+    let builder = WebviewWindowBuilder::new(
+        &app,
+        label,
+        WebviewUrl::App(route.trim_start_matches('/').into()),
+    )
+    .title("Nocturne")
+    .inner_size(760.0, 520.0)
+    .min_inner_size(420.0, 320.0)
+    .resizable(true)
+    .center();
+    #[cfg(target_os = "macos")]
+    let builder = apply_main_window_builder_chrome(macos_integrated_titlebar_active(&app)?, builder);
+    let window = builder.build().map_err(to_config_error)?;
+    focus_window(&window)
+}
+
+#[tauri::command]
+#[specta::specta]
 pub(crate) fn show_pane_context_menu(app: AppHandle, input: PaneContextMenuInput) -> Result<()> {
     let labels = menu_text(resolve_ui_language(&app));
     let copy = MenuItem::with_id(

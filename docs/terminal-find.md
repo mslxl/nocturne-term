@@ -1,25 +1,25 @@
 # Terminal Find
 
-This document defines Nocturne's terminal find bar behavior, scope, and implementation notes.
+This document defines Nocturne's Terminal ToolTab find behavior.
 
 ## Goals
 
-Terminal find is a compact, keyboard-first way to search the current pane's visible buffer and scrollback. It should feel like a native terminal find affordance, not a web page search field.
+Terminal find is a compact, keyboard-first way to search the active Terminal ToolTab's visible buffer and scrollback. It should feel like a native terminal find affordance, not a web page search field.
 
-The first implementation intentionally searches only the active pane. It does not search every pane in a split tab, search inactive tabs, export scrollback, save session output, or copy ANSI-styled text.
+The first implementation searches only the active Terminal ToolTab. It does not search every Terminal ToolTab in a Workspace, inactive Workspaces, Files content, transfer logs, export scrollback, save session output, or copy ANSI-styled text.
 
 ## Scope
 
 Search scope:
 
-- current active pane only
+- current active Terminal ToolTab only
 - visible screen plus scrollback
 - plain text content, not ANSI escape/control sequences
 
 Out of scope:
 
-- all-panes search
-- all-tabs search
+- all-terminal search
+- all-workspace search
 - persistent session transcript recording
 - scrollback export or save-to-file flows
 - copying with ANSI styling
@@ -29,7 +29,7 @@ These can be added later as separate features, but should not be hidden inside t
 
 ## Find Bar
 
-The find bar is an overlay or compact toolbar attached to the terminal content area. It should remain visually restrained and should not resize terminal panes.
+The find bar is an overlay or compact toolbar attached to the active Terminal ToolTab content area. It should remain visually restrained and should not resize Dock groups or terminal containers.
 
 Controls:
 
@@ -44,17 +44,16 @@ Controls:
 
 Behavior:
 
-- `Cmd+F` on macOS and `Ctrl+F` on Windows/Linux are the default values for `terminal.find` in terminal keybindings.
+- `Cmd+F` on macOS and `Ctrl+F` on Windows/Linux are the default values for `terminal.find`.
 - `Cmd+G` / `Ctrl+G` and `Cmd+Shift+G` / `Ctrl+Shift+G` are the default values for `terminal.findNext` and `terminal.findPrevious`.
-- The frontend keyboard handler should route these through the shared terminal keybinding registry instead of page-local hard-coded shortcuts.
-- Native menu Find commands should emit the same command path so menu and keyboard behavior stay aligned.
-- Opening the find bar seeds the query from the active pane selection when the selection is not empty.
+- The frontend keyboard handler routes these through the shared keybinding registry.
+- Native menu Find commands emit the same command path so menu and keyboard behavior stay aligned.
+- Opening the find bar seeds the query from the active terminal selection when the selection is not empty.
 - Input changes update highlights without moving keyboard focus out of the input.
 - `Enter` moves to the next match.
 - `Shift+Enter` moves to the previous match.
 - `Esc` closes the find bar, clears find highlights, and returns focus to the terminal.
-- Closing the find bar must clear both `SearchAddon` decorations and xterm's active selection. The active match is represented as a real xterm selection, so `clearDecorations()` alone leaves a visible highlight behind.
-- After the find bar is removed from the DOM, refresh the pane presentation and Nocturne-owned terminal scrollbar across animation frames before restoring terminal focus. In WKWebView, search decoration cleanup and focus restoration can otherwise leave the custom scrollbar out of sync with xterm's `baseY`, `viewportY`, and `rows`.
+- Closing the find bar clears both `SearchAddon` decorations and xterm's active selection.
 - Previous/next buttons move the active match and return focus to the terminal.
 - The close button closes the bar, clears highlights, and returns focus to the terminal.
 
@@ -85,7 +84,7 @@ The active match count should update after:
 - query changes
 - case/regex toggles change
 - previous/next navigation
-- active pane changes while the find bar is open
+- active Terminal ToolTab changes while the find bar is open
 - new terminal output arrives while the find bar is open
 
 ## Copy Matching Line
@@ -102,13 +101,15 @@ Rules:
 
 The button tooltip is exactly `Copy matching line`.
 
-## Pane State
+## State
 
-The query and find options are window-level state so the user can keep searching for the same term after switching panes.
+The query and find options are workspace/window-level state so the user can keep searching for the same term after switching Terminal ToolTabs.
 
-The active match belongs to the current pane. Switching panes while the find bar is open should apply the same query/options to the new active pane and reset navigation to that pane's first match.
+The active match belongs to the current Terminal ToolTab. Switching Terminal ToolTabs while the find bar is open applies the same query/options to the new active terminal and resets navigation to that terminal's first match.
 
-Closing the find bar clears find decorations for the active pane. If later implementations keep decorations on inactive panes, they must clear all decorated panes when the bar closes.
+Closing the find bar clears find decorations for the active terminal. If later implementations keep decorations on inactive terminals, they must clear all decorated terminals when the bar closes.
+
+Mirror display uses the shared terminal business state, but find overlay focus and scroll behavior are view-local.
 
 ## Native Feel Caveats
 
@@ -121,9 +122,9 @@ Closing the find bar clears find decorations for the active pane. If later imple
 
 ## Implementation Notes
 
-Each terminal pane already owns an xterm `SearchAddon` and `SerializeAddon`. The find bar should use the active pane's `SearchAddon` for highlighting and navigation.
+Each Terminal ToolTab owns an xterm `SearchAddon` and `SerializeAddon`. The find bar should use the active terminal's `SearchAddon` for highlighting and navigation.
 
-The active-pane-only scope should stay explicit in helper names and docs so future all-panes work does not accidentally overload the current state.
+The active-terminal-only scope should stay explicit in helper names and docs so future all-terminal search does not accidentally overload the current state.
 
 Match counting and copying the matching logical line need access to plain terminal buffer text. Prefer xterm buffer APIs when possible instead of parsing serialized ANSI output.
 
@@ -139,12 +140,13 @@ After implementation, run the real Tauri app and verify:
 - match-case toggle changes results
 - regex toggle accepts valid regex and reports invalid regex
 - copy matching line writes the active match's logical line to the system clipboard
-- `Esc` closes the bar, clears highlights, and returns focus to the terminal
+- `Esc` closes the find bar, clears highlights, and returns focus to the terminal
 - search includes scrollback, not only visible rows
-- split panes still search only the active pane
+- switching Terminal ToolTabs while find is open searches only the newly active terminal
+- Dock split and floating terminal layouts keep find usable
 - dark and light themes keep the find bar legible
 
-Record any Tauri-specific caveats found during verification in this document.
+Record any Tauri-specific caveats found during verification in this document before considering the feature complete.
 
 ## Tauri Verification Notes
 
@@ -154,10 +156,3 @@ Record any Tauri-specific caveats found during verification in this document.
 - xterm search highlighting depends on the xterm decoration API, so terminals must be constructed with `allowProposedApi: true`. Without it, match counting and navigation can appear to work while highlights fail to render.
 - Real macOS automation can be confused by multiple dev windows sharing the executable/process name `nocturne`, even when the Tauri product name and identifier are unique. Verify the window title in screenshots before trusting keyboard automation.
 - IME composition can intercept scripted typing into the find input. Paste test query text from the clipboard or cancel composition with `Esc` before continuing scripted verification.
-
-May 29, 2026 verification in an isolated Tauri dev instance (`productName` `Nocturne Find Test`, identifier `com.mslxl.nocturne.findtest`, `NOCTURNE_DEV_PORT=1437`):
-
-- `Cmd+F` opened the find bar in the real Tauri window.
-- Pasting `alpha` highlighted matches in terminal output after enabling xterm proposed APIs.
-- `Esc` followed by `Cmd+F` reopened the find bar without throwing.
-- The test process exposed a macOS automation caveat where another dev window named `nocturne` could cover the isolated test window; screenshots were used to confirm which window was under test.

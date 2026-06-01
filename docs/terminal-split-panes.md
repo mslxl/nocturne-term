@@ -1,248 +1,104 @@
-# Terminal Split Panes
+# Terminal ToolTabs And Dock Splits
 
-This document defines Nocturne's terminal split-pane model, interaction rules, and implementation notes.
+This document defines Nocturne's terminal model after the Host Workspace and Dock architecture.
 
 ## Goals
 
-Split panes let one terminal tab contain multiple terminal sessions in an i3-like tree layout. The tab remains the unit shown in the tab bar. Panes are the terminals inside that tab.
+Terminal sessions are ToolTabs inside a Host Workspace. The shared Dock system owns layout splitting, floating windows, mirrors, tab groups, and restore. Terminal code owns terminal process/session lifecycle, xterm rendering, terminal input/output, and terminal-specific commands.
 
-The implementation should prioritize a stable tree model, predictable focus, native-feeling menus, resize behavior, drag-and-drop rules that do not conflict with terminal mouse input, and strong tests.
+The target model is:
 
-The feature is not just a visual split of one terminal element. It changes the terminal model from one tab owning one terminal session to one tab owning a pane tree, where each leaf owns its own terminal session and xterm instance.
+- one Terminal ToolTab owns one terminal session
+- top-level tabs are Host Workspaces
+- inner dock groups contain ToolTabs
+- split commands create Dock splits with additional Terminal ToolTabs
+- terminal sessions do not own layout trees
+
+See [Workspace Tabs](workspace-tabs.md) and [Dock Layout](dock-layout.md).
 
 ## Terminology
 
-- Tab: the tab bar item. A tab owns one pane tree.
-- Pane: one terminal session inside a tab.
-- Split node: an internal tree node with a direction and child ratios.
-- Leaf node: a pane/session leaf.
-- Active pane: the pane that receives keyboard input and supplies the tab title.
+- Workspace: a top-level host-bound tab.
+- ToolTab: a dockable tool inside a Workspace.
+- Terminal ToolTab: a ToolTab that owns one terminal session.
+- Dock group: a group of ToolTabs in the shared Dock layout.
+- Dock split: a row or column split in the shared Dock layout.
+- Active terminal: the Terminal ToolTab that receives keyboard input.
+- Transport session: the backend local PTY process, SSH channel, or future protocol connection.
 
-Keep these concepts separate in code:
+Keep these concepts separate:
 
-- Tab state: `id`, title, active pane id, pane list, and tree.
-- Pane state: PTY session id, xterm instance, mount container, cwd/title/status, output queue, and resize bookkeeping.
-- Tree state: layout only. It stores pane ids and split ratios, not terminal instances.
-- Transport session state: the backend local PTY process, SSH channel, or future protocol connection and its session id.
-
-Most split-pane bugs come from accidentally treating one of these as another. A tree reorder must not recreate terminal sessions. A pane move must update the owning tab and pane `tabId`. A tab title refresh must read the active pane, not the first pane. Remote transports such as SSH must behave like ordinary pane sessions once connected.
-
-The tree shape is:
-
-```ts
-type PaneTree = SplitNode | PaneLeaf;
-type SplitNode = {
-  kind: "split";
-  direction: "row" | "column";
-  children: PaneTree[];
-  ratios: number[];
-};
-type PaneLeaf = {
-  kind: "leaf";
-  paneId: string;
-};
-```
-
-`row` lays children left-to-right. `column` lays children top-to-bottom.
+- Workspace state: host id, title, owned tool tabs, dock layout.
+- Dock state: group/split layout, slot placement, floating displays, active slot ids.
+- Terminal tool state: terminal session id, title/alias, xterm instance, cwd/status, output queue, resize bookkeeping.
+- Transport state: backend local PTY, SSH channel, or future terminal transport.
 
 ## Split Commands
 
-Use direction commands instead of ambiguous horizontal/vertical wording:
+Terminal split commands are Dock operations.
+
+Commands:
 
 - `Split Right`
 - `Split Down`
 - `Split Left`
 - `Split Up`
 
-The native context menu exposes all four directions.
+Running a split command while a Terminal ToolTab is active should:
 
-Splitting a pane should create a new session from the selected host. Generic split commands may use the default host, while explicit host-picker split flows may choose any host.
+1. create a new terminal transport session for the workspace host
+2. create a new Terminal ToolTab for that session
+3. insert the new ToolTab into the Dock layout at the requested side
+4. focus the new Terminal ToolTab
 
-Local hosts may inherit the source pane's current working directory when known. The first implementation can inherit configured environment plus application process environment; inheriting shell-local dynamic environment variables requires shell integration and is not part of the current contract.
+Generic split commands use the workspace host. Choosing a different host is a Workspace creation action, not a Terminal ToolTab action, because ToolTabs cannot move across host ownership.
 
-After split creation, focus moves to the new pane.
-
-The backend command accepts a runtime cwd override for this reason. The configured terminal cwd remains the default, but split creation can pass the source pane cwd without mutating global settings.
+Local terminal ToolTabs may inherit the active terminal's current working directory when known. The configured terminal cwd remains the default for new sessions, and a split can pass the source cwd as a runtime override without mutating settings.
 
 ## Titles
 
-Tab bar titles should prefer the active pane title:
+Terminal ToolTabs may have a user alias, but the title must still show live context.
+
+Examples:
 
 ```text
-server | 3 panes
+zsh ~/Projects/nocturne
+Build · zsh ~/Projects/nocturne
+Deploy · bash /var/www
 ```
 
-Rules:
+The alias is a prefix or primary label. It must not fully replace the running program or current directory.
 
-- Single-pane tabs use the existing pane title with no suffix.
-- Multi-pane tabs use `<active pane title> | <n> panes`.
-- Pane title bars show each pane's own terminal title/cwd/program-derived title.
-
-## Pane Title Bars
-
-Pane title bars are visible only when a tab has more than one pane. Single-pane tabs must not spend space on pane chrome.
-
-Title bars should be compact, around 22-26px tall. They should contain:
-
-- a drag handle area
-- the pane title
-- a close button
-- a more/menu button when more pane actions exist
-
-The terminal content area must not start pane drag operations. Many terminal applications use mouse input, so split interactions must stay on title bars and splitters.
+Workspace title owns host identity. Terminal ToolTabs should avoid repeating host/user identity unless shown as a mirror in another workspace.
 
 ## Closing
 
-Closing the final pane closes the tab.
+Closing a Terminal ToolTab whose session is still running asks for confirmation by default:
 
-Closing a pane whose terminal is still running asks for confirmation by default. Users can disable that prompt with `terminal.confirm_close = false`. Use a native OS confirmation dialog when possible. Exited or errored panes may close immediately.
+```toml
+[terminal]
+confirm_close = true
+```
 
-When removing a pane leaves a split node with only one child, collapse that node automatically. Ratios should be normalized after removal.
+When set to `false`, running Terminal ToolTabs close immediately. Exited or errored Terminal ToolTabs may close without confirmation.
+
+The confirmation should use the platform dialog path so focus and keyboard handling remain native.
+
+Closing a Workspace must aggregate running Terminal ToolTabs in its risk summary. If the user confirms closing the Workspace, all owned Terminal ToolTabs close according to the Workspace close operation.
+
+Mirrors of a closed Terminal ToolTab become closed-source placeholders. Closing a mirror does not close the owner terminal session.
 
 ## Resizing
 
-Split sizes are stored as ratios, not pixels. Window resizing recomputes pixel sizes from ratios.
-
-Splitter drag updates ratios for the two adjacent children. Every pane has a minimum size so dragging cannot collapse a pane to zero width or height.
-
-Recommended initial minimums:
-
-- width: 160px
-- height: 96px
-
-Resize handlers must schedule xterm fits for the affected panes after the Svelte layout has updated. Do not send backend resize commands from raw DOM measurements until dimensions have been normalized. During mount, split, tab switch, or hidden-pane transitions, xterm can briefly report missing, zero, or non-finite dimensions.
-
-## Context Menus
-
-Pane split actions should be opened from a native context menu on the terminal/pane surface.
-
-Native menu items:
-
-- `Split Right`
-- `Split Down`
-- `Split Left`
-- `Split Up`
-- later: `Move Pane to New Tab`, `Close Pane`
-
-Do not use a WebView-drawn context menu for this interaction. The terminal is a desktop surface and should preserve native menu behavior.
-
-## Keyboard Commands
-
-Split panes should be backed by command IDs so keyboard shortcuts and settings can use the same actions:
-
-- `terminal.newSession`
-- `terminal.closeTab`
-- `terminal.splitLeft`
-- `terminal.splitRight`
-- `terminal.splitUp`
-- `terminal.splitDown`
-- `terminal.closePane`
-- `terminal.focusPaneLeft`
-- `terminal.focusPaneRight`
-- `terminal.focusPaneUp`
-- `terminal.focusPaneDown`
-- `terminal.resizePaneLeft`
-- `terminal.resizePaneRight`
-- `terminal.resizePaneUp`
-- `terminal.resizePaneDown`
-- `terminal.movePaneToNewTab`
-
-Shortcuts are backed by a keybinding registry and exposed on the settings page under `Keybindings`.
-
-Default shortcuts:
-
-- macOS: `Meta+T`, `Meta+W`, `Meta+Alt+D`, `Meta+D`, `Meta+Alt+Shift+D`, `Meta+Shift+D`, `Meta+Shift+W`
-- Windows/Linux: `Ctrl+Shift+T`, `Ctrl+Shift+W`, `Ctrl+Alt+Left`, `Ctrl+Shift+D`, `Ctrl+Alt+Up`, `Ctrl+Alt+D`, `Ctrl+Alt+W`
-
-Config path:
-
-```toml
-[keybindings.terminal]
-newSession = "Meta+T"
-closeTab = "Meta+W"
-splitLeft = "Meta+Alt+D"
-splitRight = "Meta+D"
-splitUp = "Meta+Alt+Shift+D"
-splitDown = "Meta+Shift+D"
-closePane = "Meta+Shift+W"
-```
-
-## Drag-And-Drop Contract
-
-Drag-and-drop behavior:
-
-- Drag from tab bar: `TabDrag`.
-- Drag from pane title bar: `PaneDrag`.
-- Drag from splitter: `ResizeDrag`.
-- Terminal content never starts split drag.
-
-Drop target regions:
-
-- edge regions (`left`, `right`, `top`, `bottom`) move the dragged object into a split at that side
-- center region swaps panes without creating a new split
-- dragging a pane title to the tab bar detaches it into a standalone tab
-
-These drag modes must be mutually exclusive so tab dragging, pane dragging, splitter resizing, and terminal mouse input do not conflict.
-
-Terminal content does not start split drag. Drop zones are pointer-inactive unless a pane or tab drag is active, so terminal mouse applications keep receiving normal input.
-
-Pane dragging is pointer-driven. Do not reintroduce HTML5 drag-and-drop for pane movement. In Tauri/WKWebView, HTML5 DnD, WebKit native drag gestures, xterm mouse handling, and Svelte event propagation interact poorly. Symptoms include intermittent drop-target highlighting, panes remaining in a dragging state after mouseup, terminal mouse input being stolen, or a second click being required to finish a drop.
-
-Important pointer rules:
-
-- Start pane drag only from the pane title bar drag handle.
-- Capture the pointer as soon as a pane or tab drag starts.
-- Listen for `pointermove`, `pointerup`, and `pointercancel` in the capture phase so nested terminal DOM cannot swallow the event.
-- Calculate drop targets from pointer coordinates and visible pane rectangles, not from HTML5 DnD events.
-- Avoid relying on `elementsFromPoint` for complex nested split layouts; overlays, splitters, xterm internals, and title bars can change the DOM hit-test result.
-- Clear drag state on pointer cancel, window blur, and document hide.
-- Keep WebKit native drag disabled on pane title controls. A visual drag handle is fine; `-webkit-user-drag: element` is not.
-
-Drop target geometry should prefer the smallest visible pane rectangle containing the pointer. This keeps nested row/column layouts stable when panes overlap in the DOM tree or when title bars and splitters sit above the terminal surface.
-
-Dragging to the tab bar to detach a pane is part of the product contract, but it should still be implemented through the same pointer model. Do not add a second drag system just for this case.
-
-## Terminal Lifecycle
-
-Pane layout changes must preserve terminal sessions and xterm instances.
-
-When splitting:
-
-- create one backend terminal session
-- create one frontend pane object for that session
-- insert a leaf into the pane tree
-- set the new pane active
-- mount and fit all panes in the active tab after Svelte has rendered
-
-When moving or swapping panes:
-
-- do not create or close backend sessions
-- update `tab.panes`, `tab.tree`, `tab.activePaneId`, and moved pane `tabId`
-- remount existing xterm instances into their current containers
-- refit panes after the DOM has settled
-
-When closing:
-
-- confirm if any affected pane is still running
-- dispose xterm resources before removing the pane object
-- close the backend PTY session for running panes
-- collapse split nodes that are left with a single child
-- close the tab if no pane remains
-
-Hidden inactive tabs keep their pane state but should not receive pointer events. When switching tabs, mount and fit that tab's panes after the tab becomes visible. This avoids stale wrapping and blank panes.
-
-Pane/session failures must stay scoped to their pane. Do not route backend terminal lifecycle errors into global page or settings error state. For example, an SSH connection can fail and remove `term-x` while the frontend still has queued backlog, resize, or write work for that id; the resulting `terminal session term-x not found` is a stale terminal-session condition. It should be ignored if the pane is already gone, or translated into that pane's disconnected/error presentation if the pane still exists. If this leaks into a global error placeholder, switching tabs or opening a new local session will not clear the stale SSH failure.
-
-## Size Normalization
-
-Terminal sizes cross the Tauri command boundary and eventually reach backend PTY resize calls. They must always be finite integers within backend limits.
+Dock split sizes are stored as ratios. Terminal rendering measures the actual container size after the Dock layout renders.
 
 Practical rules:
 
-- Normalize measured fit sizes before creating sessions or resizing sessions.
-- Never pass `null`, `undefined`, `NaN`, or infinite values to `create_host_terminal_session` or `resize_terminal`.
-- Clamp columns, rows, pixel width, and pixel height before serialization.
-- Treat missing layout measurements as a temporary UI state, not as a valid backend size.
+- measure terminal containers after Svelte has updated the Dock group
+- normalize measured fit sizes before sending backend resize commands
+- never pass `null`, `undefined`, `NaN`, or infinite values to `create_host_terminal_session` or `resize_terminal`
+- clamp columns, rows, pixel width, and pixel height before serialization
+- treat missing layout measurements as temporary UI state
 
 This prevents errors such as:
 
@@ -252,119 +108,142 @@ invalid args input for command resize_terminal: invalid type: null, expected u16
 
 The frontend size helpers are the boundary. Avoid duplicating ad hoc normalization at call sites.
 
-## Settings And Menus
+## Context Menus
 
-Terminal commands are shared by keyboard handling and settings. When adding a terminal action, update the command registry first, then wire UI and native menus to that command.
+Terminal context menus belong to terminal content actions. Dock and ToolTab menus belong to Dock/Workspace actions.
 
-Native menu behavior:
+Terminal content menu actions:
 
-- Tab bar context menus belong to tab-bar actions and settings such as tab placement.
-- Pane context menus belong to pane actions such as copy, paste, reset terminal, read-only state, tab title changes, and split direction.
-- Window menu actions that affect terminal state emit a typed event back to the focused main window.
-- Window menu actions that are purely native window operations, such as minimize, center, fill, fullscreen, and bring all to front, stay in the Tauri shell.
-- Terminal scrollbars are a Nocturne-owned overlay inside the pane's `.terminal-mount`, not a proxy scrolling container. xterm still owns the scroll offset, wheel handling, selection behavior, and fit measurements.
-- Reattach or update the Nocturne-owned scrollbar DOM whenever an existing xterm element is remounted into a new pane container. Pane moves, tab switches, and layout rekeys can reuse the xterm instance while changing the DOM parent.
-- Do not initialize a DOM overflow library with the xterm root as the target. In real Tauri/WKWebView this can rewrite xterm's DOM ownership enough to produce a blank terminal or broken input. xterm scrollback is a terminal buffer state, not ordinary DOM overflow, so the visible scrollbar thumb must be derived from `baseY`, `viewportY`, and `rows`.
-- After every xterm scroll/write/fit update, mirror `baseY`, `viewportY`, and `rows` into the Nocturne-owned vertical scrollbar so the thumb stays visible and positioned without introducing a proxy scroll container.
-- Search UI teardown is also a terminal presentation update. Closing terminal find clears xterm decorations/selection and changes focus while the overlay DOM is being removed, so it must explicitly refresh the pane presentation and scrollbar after the DOM has settled. Do not rely on `ResizeObserver` for this path because the find bar is fixed-position and intentionally does not resize the terminal pane.
-- Custom scrollbar pointer interactions must also route back through xterm. Map track/handle pointer positions to `scrollToLine`; otherwise dragging or clicking the generated thumb can mutate DOM scroll state without updating xterm's buffer viewport, leaving the thumb hidden or stuck at the top.
-- Wheel handling for terminal scrollback must use xterm's `attachCustomWheelEventHandler` and public scroll API (`scrollToLine`) instead of separate DOM wheel listeners. In Tauri/WKWebView, duplicate capture/bubble listeners can leave boundary wheel gestures in WebKit's scroll chain; after scrolling to the top, the opposite wheel or trackpad gesture may stop reaching xterm. For the normal buffer with no terminal mouse tracking, consume vertical wheel events even at the top and bottom so the scroll chain stays anchored to the terminal. When the alternate buffer is active, or `term.modes.mouseTrackingMode` is not `none`, return the event to xterm so TUI applications such as vim, less, fzf, and tmux can receive wheel input.
-- During Tauri debug development, do not let Svelte HMR cleanup close running terminal sessions. HMR can remount the page component during CSS or route edits; treating that as a real app close can leave the window in an empty Nocturne state and make input look broken.
-- In real Tauri/WebKit validation, verify the scrollbar visually after long output and after opening/closing terminal find. The Nocturne-owned thumb should remain visible whenever xterm reports scrollback.
-- Before trusting a Tauri validation screenshot, confirm the active Nocturne process is the current worktree's `target/debug/nocturne`. macOS can still have an older bundled `nocturne.app` running under the same process name, and AppleScript activation may target that stale app instead of the debug dev window.
-- When validating screenshots inside Codex, crop or inspect the Tauri window region rather than the full desktop. The host Codex window can have its own visible scrollbar behind the Tauri window, and full-screen pixel scans can accidentally measure the wrong thumb.
-- Synthetic macOS wheel events are easy to read backwards: in the CGEvent validation used here, a positive `wheel1` moved from the bottom of scrollback toward earlier lines, while a negative `wheel1` moved back toward later lines. Validate by visible line numbers, not by the sign alone.
-- User-set tab titles override derived terminal titles until the custom title is cleared.
-- Moving a tab to a new window must preserve backend PTY sessions. The source window may dispose xterm renderers for moved panes, but it must not close the moved terminal sessions.
-- `src/lib/bindings.ts` is generated from Rust Specta exports. Do not edit it manually.
+- Copy
+- Paste
+- Paste Selection
+- Select All
+- Reset Terminal
+- Toggle Terminal Read-only
+- Find
 
-Settings behavior:
+ToolTab/Dock menu actions:
 
-- Keybindings live under `keybindings.terminal`.
-- Defaults are platform-aware.
-- Existing shortcuts should be represented in the settings page instead of living as hard-coded keyboard checks in the terminal page.
+- Split Left
+- Split Right
+- Split Up
+- Split Down
+- Float
+- Restore Floating
+- Close
+- Close Others
+- Close to the Right
 
-## Persistence
+Use native Tauri popup menus where possible. Do not draw browser-style context menus over terminal content.
 
-Nocturne does not need to restore split layouts after app restart at this stage.
+## Keyboard Commands
 
-Closing a tab discards its pane tree and terminates its pane sessions according to the normal close-confirmation rules.
+Terminal commands should be backed by command IDs so keyboard shortcuts, settings, menus, and the command palette share action paths.
 
-## Implementation Risks
+Terminal-specific command IDs include:
 
-This area is high-risk because it sits at the boundary between layout, process lifecycle, xterm rendering, native menus, and pointer input.
+- `terminal.newSession`
+- `terminal.copy`
+- `terminal.paste`
+- `terminal.pasteSelection`
+- `terminal.selectAll`
+- `terminal.find`
+- `terminal.findNext`
+- `terminal.findPrevious`
+- `terminal.hideFindBar`
+- `terminal.resetFontSize`
+- `terminal.increaseFontSize`
+- `terminal.decreaseFontSize`
+- `terminal.toggleReadOnly`
 
-Common regressions:
+Dock split/focus/float/close commands use Dock or Tool command IDs, not terminal-layout-specific IDs. See [Dock Layout](dock-layout.md).
 
-- A pane frame appears but has no xterm content because the existing terminal was not remounted.
-- A pane cannot receive input because focus still points to a removed or inactive pane.
-- Resize sends invalid dimensions to Rust because a hidden or not-yet-mounted container was measured.
-- A tab close or pane close button does nothing because pointer drag handlers stole the click.
-- Drop target highlighting flickers in mixed row/column layouts because hit-testing depends on overlay DOM order.
-- Drag state remains active after mouseup because the event was swallowed by nested content.
-- A new split steals terminal mouse input because dragging can start from terminal content instead of chrome.
-- Tab titles become stale because active pane changes do not refresh the tab title.
+## Drag And Drop
 
-If a bug involves one of these symptoms, check event capture, pointer capture, pane mount state, and size normalization before changing tree algorithms.
+Terminal content must not start Dock drag operations. Terminal applications use mouse input, so drag handles and tab dragging must stay on ToolTab chrome and Dock surfaces.
 
-## Testing Notes
+Dock movement uses pointer capture and geometry hit testing. Do not use HTML5 drag-and-drop for Dock operations.
 
-The tree manipulation layer should have focused tests for:
+Pointer rules:
 
-- creating a root leaf
-- splitting right/down/left/up
-- preserving and normalizing ratios
-- collapse after pane removal
-- active pane title derivation
-- finding panes and counting leaves
-- ratio updates with minimum sizes
+- start Dock drag only from ToolTab chrome
+- capture the pointer as soon as drag starts
+- listen for `pointermove`, `pointerup`, and `pointercancel` in capture phase
+- calculate drop targets from geometry, not HTML5 DnD events
+- clear drag state on pointer cancel, window blur, and document hide
+- keep WebKit native drag disabled on ToolTab chrome
 
-UI-level testing should verify:
+## Terminal Lifecycle
 
-- single-pane tabs hide pane title bars
-- multi-pane tabs show title bars
-- splitters resize without producing zero-size panes
-- closing running panes asks for confirmation
-- xterm fit/resize events still reach the correct backend session
-- terminal scrollbars still scroll the xterm viewport without changing fit dimensions, text selection, or mouse input behavior
-- tab close and pane close buttons are not intercepted by drag handling
-- multiple splits leave every pane mounted with xterm content
-- typing goes to the active pane after split, move, close, and tab switch
-- drag targets are stable in mixed horizontal and vertical layouts
-- pointerup clears drag state and completes the drop without a second click
-- new tabs and split panes do not show spurious white bars or unnecessary scrollbars
+Creating a Terminal ToolTab:
 
-Before merging changes in this area, run:
+1. create one backend terminal session
+2. create one frontend terminal tool object for that session
+3. insert one ToolSlot into the Dock layout
+4. mount xterm after the Dock group is visible
+5. fit and resize after the DOM has settled
 
-```sh
-pnpm check
-pnpm test
-```
+Moving a Terminal ToolTab between Dock groups:
 
-For UI behavior changes, also run Playwright coverage against a dev server. At minimum cover:
+- does not create or close backend sessions
+- may remount the xterm instance into a different container
+- must refit after mount
 
-- split right/down/left/up
-- repeated split in the same direction
-- mixed row/column split layout
-- splitter resize
-- pane drag to another pane edge
-- pane drag to center swap
-- pane close and tab close
-- new tab activation
+Floating a Terminal ToolTab:
 
-Real Tauri validation is still important because WKWebView and native menus can differ from browser behavior. When automated system drag injection is unreliable, verify at least that the Tauri window can create mixed split layouts through real commands and manually test pane dragging before release.
+- keeps the owner Workspace unchanged
+- hides the owner slot behind a floating placeholder
+- remounts or mirrors the terminal renderer into the floating window display
+- restores to the owner slot when the floating display closes
 
-## Maintenance Checklist
+Mirror display:
 
-When changing split panes, ask these questions:
+- shares terminal business state and backend session
+- has view-local scroll/focus details where possible
+- writes input to the same backend session
+- receives the same output stream
 
-- Am I changing tree layout, terminal session lifecycle, or pointer interaction?
-- Does the change preserve pane ids and backend session ids?
-- Does every path update `tab.panes`, `tab.tree`, `tab.activePaneId`, and pane `tabId` consistently?
-- Does the active pane still own keyboard focus after the operation?
-- Are all backend size inputs normalized?
-- Can xterm still use normal mouse input inside terminal content?
-- Does the change avoid HTML5 DnD for pane movement?
-- Are native menus and keybindings still backed by shared command ids?
-- Do existing pane title bars remain hidden for single-pane tabs?
-- Did tests cover the exact behavior being changed?
+If the owner closes, mirrors become closed-source placeholders and stop accepting input.
+
+## Failure Handling
+
+Terminal/session failures must stay scoped to the Terminal ToolTab.
+
+An SSH connection can fail and remove `term-x` while the frontend still has queued backlog, resize, or write work for that id. The resulting `terminal session term-x not found` is a stale terminal-session condition. It should be ignored if the ToolTab is already gone, or translated into that ToolTab's disconnected/error presentation if the ToolTab still exists.
+
+Stale terminal-session errors must never be written into global page or settings error state because they can obscure unrelated Workspaces and future local sessions.
+
+## Scrollbars
+
+Terminal scrollbars are a Nocturne-owned overlay inside the terminal mount, not a proxy scrolling container. xterm still owns scroll offset, wheel handling, selection behavior, and fit measurements.
+
+Reattach or update the Nocturne-owned scrollbar DOM whenever an existing xterm element is remounted into a new Dock group or floating window container.
+
+## Find Integration
+
+Terminal find is scoped to the active Terminal ToolTab. See [Terminal Find](terminal-find.md).
+
+Closing terminal find clears xterm decorations/selection and changes focus while overlay DOM is being removed. It must explicitly refresh terminal presentation and scrollbar after the DOM has settled. Do not rely on `ResizeObserver` for this path because the find bar is fixed-position and intentionally does not resize the terminal container.
+
+## Validation
+
+Unit tests should cover:
+
+- terminal size normalization
+- terminal title derivation with aliases
+- terminal session stale-error classification
+- command registry mapping for terminal and Dock split commands
+- close confirmation decisions
+
+Playwright/Tauri validation should cover:
+
+- creating a default Workspace with Terminal ToolTab
+- splitting a Terminal ToolTab through Dock split
+- moving a Terminal ToolTab between Dock groups
+- floating and restoring a Terminal ToolTab
+- displaying a Terminal ToolTab mirror
+- source close turning mirrors into closed-source placeholders
+- typing goes to the active Terminal ToolTab
+- resizing Dock groups refits xterm
+- terminal context menu actions still work
+- dark and light themes keep terminal chrome legible

@@ -768,20 +768,20 @@ fn emit_terminal_exit(
     );
 }
 
-struct SshWorkerInput {
-    app: Option<AppHandle>,
-    session_id: String,
-    display_name: String,
-    host_id: String,
-    ssh: SshConnectionConfig,
-    proxy_jump_chain: Option<Vec<SshConnectionConfig>>,
-    username: String,
-    size: PtySize,
-    trust_path: PathBuf,
-    accept_new_host_key: bool,
-    update_changed_host_key: bool,
-    credential: Option<SshCredentialInput>,
-    save_credential: bool,
+pub(crate) struct SshWorkerInput {
+    pub(crate) app: Option<AppHandle>,
+    pub(crate) session_id: String,
+    pub(crate) display_name: String,
+    pub(crate) host_id: String,
+    pub(crate) ssh: SshConnectionConfig,
+    pub(crate) proxy_jump_chain: Option<Vec<SshConnectionConfig>>,
+    pub(crate) username: String,
+    pub(crate) size: PtySize,
+    pub(crate) trust_path: PathBuf,
+    pub(crate) accept_new_host_key: bool,
+    pub(crate) update_changed_host_key: bool,
+    pub(crate) credential: Option<SshCredentialInput>,
+    pub(crate) save_credential: bool,
 }
 
 struct PreparedSshSession {
@@ -789,9 +789,9 @@ struct PreparedSshSession {
     jump_guards: Vec<thread::JoinHandle<()>>,
 }
 
-struct ProxyJumpChain {
-    stream: TcpStream,
-    guards: Vec<thread::JoinHandle<()>>,
+pub(crate) struct ProxyJumpChain {
+    pub(crate) stream: TcpStream,
+    pub(crate) guards: Vec<thread::JoinHandle<()>>,
 }
 
 fn spawn_ssh_worker(
@@ -891,7 +891,7 @@ struct ProxyBridge {
     guard: thread::JoinHandle<()>,
 }
 
-fn connect_proxy_jump_chain(
+pub(crate) fn connect_proxy_jump_chain(
     input: &SshWorkerInput,
     jumps: &[SshConnectionConfig],
 ) -> Result<ProxyJumpChain> {
@@ -1053,7 +1053,7 @@ fn parse_proxy_jump_hop(value: &str) -> Result<SshConnectionConfig> {
     })
 }
 
-fn ssh_network_hostname(hostname: &str) -> &str {
+pub(crate) fn ssh_network_hostname(hostname: &str) -> &str {
     hostname
         .strip_prefix('[')
         .and_then(|rest| rest.strip_suffix(']'))
@@ -1229,7 +1229,7 @@ fn drain_tcp_pending_writes(
     Ok(progressed)
 }
 
-fn authenticate_ssh_session(session: &Session, input: &SshWorkerInput) -> Result<()> {
+pub(crate) fn authenticate_ssh_session(session: &Session, input: &SshWorkerInput) -> Result<()> {
     let username = &input.username;
     if session.userauth_agent(username).is_ok() && session.authenticated() {
         return Ok(());
@@ -1330,7 +1330,7 @@ fn authenticate_ssh_session(session: &Session, input: &SshWorkerInput) -> Result
     )))
 }
 
-fn verify_ssh_host_key(session: &Session, input: &SshWorkerInput) -> Result<()> {
+pub(crate) fn verify_ssh_host_key(session: &Session, input: &SshWorkerInput) -> Result<()> {
     let (algorithm, fingerprint) = ssh_host_key_fingerprint(session)?;
     let key = format!("{algorithm} {fingerprint}");
     let target = ssh_trust_target(&input.ssh.hostname, input.ssh.port);
@@ -1425,7 +1425,7 @@ fn write_ssh_secret_to_keyring(
     entry.set_password(value).map_err(terminal_error)
 }
 
-fn default_ssh_username(config: &SshConnectionConfig) -> Result<String> {
+pub(crate) fn default_ssh_username(config: &SshConnectionConfig) -> Result<String> {
     let username = config.username.clone().unwrap_or_else(|| {
         env::var("USER")
             .or_else(|_| env::var("USERNAME"))

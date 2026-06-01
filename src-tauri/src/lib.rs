@@ -1,11 +1,14 @@
 mod app_shell;
 mod config;
 mod error;
+mod files;
 mod logging;
 mod ssh_trust;
 mod terminal;
 mod terminal_schemes;
+mod transfers;
 mod types;
+mod workspace;
 
 #[cfg(debug_assertions)]
 use specta_typescript::Typescript;
@@ -37,6 +40,22 @@ pub fn run() {
             terminal_schemes::delete_terminal_color_scheme,
             terminal_schemes::export_terminal_color_scheme,
             terminal_schemes::export_terminal_color_scheme_to_path,
+            files::list_files,
+            files::search_files,
+            files::create_directory,
+            files::rename_file,
+            files::chmod_file,
+            files::delete_file,
+            files::remote_trash_info,
+            files::remote_search_helper_info,
+            files::trash_file,
+            files::preview_file,
+            transfers::get_transfer_queue_snapshot,
+            transfers::create_transfer_task,
+            transfers::cancel_transfer_task,
+            transfers::retry_transfer_task,
+            workspace::get_workspace_layout_snapshot,
+            workspace::workspace_dispatch,
             config::list_profiles,
             config::read_profile,
             config::create_profile,
@@ -62,12 +81,14 @@ pub fn run() {
             app_shell::open_host_manager_window,
             app_shell::open_profile_new_dialog,
             app_shell::open_main_window,
+            app_shell::open_workspace_floating_window,
             app_shell::refresh_app_menu,
             app_shell::update_terminal_menu_state,
             config::watch_config_command
         ])
         .typ::<types::TerminalMenuEvent>()
-        .typ::<types::PaneMenuEvent>();
+        .typ::<types::PaneMenuEvent>()
+        .typ::<types::WorkspaceChangedEvent>();
 
     #[cfg(debug_assertions)]
     builder

@@ -17,11 +17,11 @@ Host icons are identity markers for saved connection targets. They should help u
 
 ## Non-Goals
 
-- Do not show host icons in terminal tab bars by default.
-- Do not show host icons in split-pane title bars.
+- Do not show host icons in ordinary ToolTab titles by default.
+- Do not show host icons in terminal content.
 - Do not render icons inside the xterm content surface.
 - Do not import React or use `emoji-picker-react` directly.
-- Do not keep compatibility with the old `icon_pack` field.
+- Do not keep compatibility with `icon_pack`.
 
 ## Storage Model
 
@@ -57,7 +57,7 @@ Rules:
 - `type = "catalog"` stores a stable Iconify-style icon id, such as `lucide:server`, `simple-icons:nixos`, or `devicon:postgresql`.
 - `type = "image"` stores `mime` and `data_base64`. Supported MIME types should start with `image/png`, `image/jpeg`, or `image/webp`.
 - `type = "svg"` stores SVG text directly. SVG does not need base64 encoding.
-- The old `icon_pack` field is discarded. Do not read it, write it, migrate it, or preserve it.
+- The `icon_pack` field is discarded. Do not read it, write it, migrate it, or preserve it.
 - If a user host has no `icon` table, the app should infer a catalog fallback from the protocol and host metadata.
 
 ## Source Rules
@@ -85,21 +85,21 @@ Host icons must appear in exactly these host-facing surfaces:
 1. Host Manager left-side host rows.
 2. Host Manager detail header beside the selected host name.
 3. Host Manager detail header icon for editable user hosts.
-4. Main-window new-session host picker rows, including submenu rows.
+4. Main-window new-workspace host picker rows, including submenu rows.
 5. Command palette `connection-host` results.
 
-Terminal tab bar items may show host icons only when the user enables:
+Workspace tab bar items may show host icons only when the user enables:
 
 ```toml
-[terminal]
+[workspace]
 show_host_icons_in_tabs = true
 ```
 
-This setting defaults to `false`. When enabled, each terminal tab shows the icon for its active pane's saved connection host. Tabs without host metadata remain text-only.
+This setting defaults to `false`. When enabled, each Workspace tab shows the icon for its bound host. Tool tabs do not show host icons by default because the Workspace already carries host identity. Mirror tool tabs show source identity through a badge/border treatment, not by duplicating host icons in ordinary tool tabs.
 
 Do not add host icons to:
 
-- split-pane title bars
+- ordinary ToolTab titles
 - xterm content
 - folder rows
 - SSH trust or credential prompt copy

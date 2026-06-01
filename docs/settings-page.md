@@ -51,7 +51,7 @@ theme = "system" # system | light | dark
 
 `system` follows `prefers-color-scheme`. The frontend applies the resolved theme to `document.documentElement.dataset.theme`, and windows listen for config changes so the main terminal, settings window, and profile dialogs refresh immediately.
 
-The app theme owns shared chrome: settings pages, profile dialogs, terminal tab bars, section backgrounds, and error surfaces use the shared app palette. Terminal content uses a theme-specific terminal color scheme.
+The app theme owns shared chrome: settings pages, profile dialogs, workspace tab bars, dock groups, tool tab bars, section backgrounds, and error surfaces use the shared app palette. Terminal content uses a theme-specific terminal color scheme.
 
 ## Terminal Color Schemes
 
@@ -93,16 +93,16 @@ User-facing frontend text should use the lightweight dictionary under `src/lib/i
 
 ## macOS Integrated Title Bar
 
-On macOS, the main terminal window can place the horizontal tab bar in the native title bar:
+On macOS, the main window can place the horizontal workspace tab bar in the native title bar:
 
 ```toml
 [ui]
 macos_integrated_titlebar = true
 ```
 
-The setting defaults to `true` on macOS and is ignored on other platforms. It is only applied when the terminal tab bar is horizontal; vertical tab placements keep the standard native title bar so the traffic-light controls do not cover terminal content.
+The setting defaults to `true` on macOS and is ignored on other platforms. It is only applied when the workspace tab bar can safely share the title bar; layouts that would collide with traffic-light controls keep the standard native title bar.
 
-The integrated tab bar must leave a draggable margin around the controls. The tab bar root owns `data-tauri-drag-region="deep"` only in this mode, while tab buttons remain normal interactive controls.
+The integrated tab bar must leave a draggable margin around the controls. The workspace tab bar root owns `data-tauri-drag-region="deep"` only in this mode, while tab buttons remain normal interactive controls.
 
 ## Immediate Refresh
 
@@ -112,8 +112,8 @@ The main terminal window refreshes:
 
 - app theme
 - terminal settings
-- xterm options for existing tabs where xterm supports live option updates
-- tab bar orientation
+- xterm options for existing Terminal ToolTabs where xterm supports live option updates
+- workspace, dock, and Files settings that are designed for live refresh
 
 Some settings, such as terminal command, args, cwd, and environment-related values, only affect new terminal sessions because existing PTY processes cannot be safely mutated.
 
@@ -122,7 +122,7 @@ Some settings, such as terminal command, args, cwd, and environment-related valu
 Settings rows use small reusable Svelte components under `src/lib/settings/components/`:
 
 - `SettingRow.svelte` owns the label/help/inheritance layout for a single row.
-- `SegmentedControl.svelte` is for compact mutually exclusive choices such as theme, renderer, and tab bar placement.
+- `SegmentedControl.svelte` is for compact mutually exclusive choices such as theme, renderer, and view modes.
 - Language uses a native select so the control scales better as more locales are added.
 - `SwitchControl.svelte` is for boolean settings.
 - `HostDirsControl.svelte` is for editable path lists, with `+` opening the native file/directory picker and `-` removing the selected row. It is used for host directories and OpenSSH config files.
@@ -134,7 +134,7 @@ Keep these controls visually restrained. They should feel like compact desktop s
 
 The Hosts category manages connection hosts. See `docs/connection-hosts.md` for the full storage, security, and protocol contract.
 
-Connection host CRUD is not part of the settings window. The settings Hosts category only manages host-directory, OpenSSH config file, session click behavior, and display preferences. Default host selection belongs in Host Manager as a per-host switch backed by the single `default_host` config value.
+Connection host CRUD is not part of the settings window. The settings Hosts category only manages host-directory, OpenSSH config file, and display preferences. Default host selection belongs in Host Manager as a per-host switch backed by the single `default_host` config value.
 
 OpenSSH and editable Nocturne host entries are managed in the dedicated Host Manager window. The Host Manager should explain that configured OpenSSH files are shared by other tools and are therefore read-only in Nocturne. It should offer a copy action that creates an editable Nocturne host in a selected writable host directory.
 
@@ -142,41 +142,64 @@ The OpenSSH config file list defaults to `~/.ssh/config`. Users may add or remov
 
 Duplicate UUIDs are configuration errors; show them persistently in Host Manager and disable connection until repaired. Settings may also surface a terse warning when host directories contain blocking diagnostics.
 
-The Host Manager can be opened from the command palette and from the host picker used when creating a new session.
+The Host Manager can be opened from the command palette and from the host picker used when creating a new workspace.
 
 Host Manager's left side is a TreeView over virtual host folders, not grouped sections. Host rows should show only the display name and connection address subtitle; storage path/source details belong in the inspector or diagnostics, not the list row.
 
-## Terminal Tab Bar
+## Workspace And Dock
 
-The terminal tab bar supports:
+The main window uses Host Workspace tabs and a shared IDE-style Dock system. See [Workspace Tabs](workspace-tabs.md) and [Dock Layout](dock-layout.md).
 
-- `horizontal`
-- `vertical_left`
-- `vertical_right`
+Settings should expose:
 
-The legacy value `vertical` is accepted by Rust and treated as `vertical_right`.
+- workspace restore strategy: visible auto reconnect, manual reconnect, safe auto restore
+- dock and workspace keybindings
+- macOS integrated title bar behavior
 
-Host icons in terminal tabs are controlled by:
+Top-level Workspace tabs represent host-bound workspaces. Inner Tool tabs represent Files, Terminal, and Transfers surfaces. Do not add settings that describe top-level tabs as terminal sessions.
+
+## Files And Transfers
+
+Files and transfer settings belong in a dedicated Files or File Transfer category. See [Files ToolTab](files-tooltab.md) and [File Transfers](file-transfers.md).
+
+Settings should expose:
+
+- default Files view mode: Tree or Columns
+- show hidden files default
+- delete behavior: direct delete or try remote Trash
+- copy/cut/paste mode: Windows-style or Finder-style
+- remote helper policy: Ask, Never, Allow
+- remote helper policy currently only controls whether Files may probe for `rg` on the remote host before falling back to `SFTP scan`; it does not upload a helper binary yet
+- text preview size threshold, default 1 MiB
+- image preview size threshold, default 10 MiB
+- global transfer concurrency, default 3
+- per-host transfer concurrency, default 2
+
+Host-specific Files default paths belong in Host Manager as `[files].default_path`, not in global Files settings.
+
+## Workspace Tab Bar
+
+Host icons in top-level workspace tabs are controlled by:
 
 ```toml
-[terminal]
+[workspace]
 show_host_icons_in_tabs = false
 ```
 
-The setting defaults to `false`. When enabled, tab items show the saved-host icon for the active pane in that tab; tabs without host metadata stay text-only. Split-pane title bars do not show host icons.
+The setting defaults to `false`. When enabled, workspace tab items show the saved-host icon for their bound host. Tool tabs do not show host icons unless they are mirrors and need source identity.
 
-Right-clicking the tab bar opens a native Tauri popup menu, not a WebView-drawn menu. This preserves native context-menu behavior and avoids browser-style chrome. Menu selections update the active settings target: profile config when the active profile already overrides `terminal.tab_bar_orientation`, otherwise main config.
+Right-clicking the workspace tab bar opens a native Tauri popup menu, not a WebView-drawn menu. This preserves native context-menu behavior and avoids browser-style chrome.
 
 ## Terminal Close Confirmation
 
-Closing a running terminal tab or pane asks for confirmation by default:
+Closing a running Terminal ToolTab asks for confirmation by default:
 
 ```toml
 [terminal]
 confirm_close = true
 ```
 
-When set to `false`, running tabs and panes close immediately. Exited or errored panes already close without confirmation. The confirmation uses the platform dialog path so close behavior keeps native focus and keyboard handling.
+When set to `false`, running Terminal ToolTabs close immediately. Exited or errored terminal sessions already close without confirmation. The confirmation uses the platform dialog path so close behavior keeps native focus and keyboard handling.
 
 ## Implementation Notes
 

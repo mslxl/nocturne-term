@@ -5,6 +5,7 @@ node_modules
 /.direnv/
 /.svelte-kit
 /package
+/output
 .env
 .env.*
 !.env.example
