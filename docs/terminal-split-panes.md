@@ -227,7 +227,7 @@ Closing terminal find clears xterm decorations/selection and changes focus while
 
 ## Validation
 
-Vitest tests should cover pure terminal and Dock logic that can run without a real Tauri runtime:
+Vitest unit tests should cover pure terminal and Dock frontend logic that can run without a real Tauri runtime:
 
 - terminal size normalization
 - terminal title derivation with aliases
@@ -235,7 +235,9 @@ Vitest tests should cover pure terminal and Dock logic that can run without a re
 - command registry mapping for terminal and Dock split commands
 - close confirmation decisions
 
-Tauri end-to-end tests should cover behavior that requires the real Tauri app, WebView, PTY, native input, or window lifecycle:
+Rust unit tests should cover Rust-side terminal command and service logic that does not require a real WebView, PTY process, or native window.
+
+Tauri unit tests should cover real-app workflows that require the real Tauri app, WebView, PTY, native input, or window lifecycle:
 
 - creating a default Workspace with Terminal ToolTab
 - splitting a Terminal ToolTab through Dock split

@@ -30,9 +30,11 @@ src/lib/workspace/dock/
   components/
 ```
 
-Pure layout operations and hit testing must have focused Vitest coverage. Use Vitest for deterministic TypeScript/Svelte state, model operations, hit-testing math, validation, and persistence serialization that do not require a real Tauri runtime.
+Pure layout operations and hit testing must have focused Vitest unit-test coverage. Use Vitest for deterministic TypeScript/Svelte state, model operations, hit-testing math, validation, and persistence serialization that do not require a real Tauri runtime.
 
-Use Tauri end-to-end tests for behavior that depends on the real desktop shell: WebView rendering, native pointer/keyboard dispatch, Tauri window lifecycle, floating windows, persisted restore across app windows, or IPC with Rust-owned state.
+Use Rust unit tests for Rust-side Tauri command and service logic, including workspace snapshot validation, persistence decisions, and command intent handling that do not require a real WebView or native window.
+
+Use Tauri unit tests for workflows that launch the real Tauri app and depend on the real desktop shell: WebView rendering, native pointer/keyboard dispatch, Tauri window lifecycle, floating windows, persisted restore across app windows, or IPC behavior visible through the running app.
 
 ## Authority And State
 
@@ -170,7 +172,7 @@ Follow-up work should complete floating-window-internal multi-ToolTab drag compo
 
 ## Tests
 
-Vitest tests should cover:
+Vitest unit tests should cover:
 
 - split insertion
 - ratio normalization
@@ -184,7 +186,7 @@ Vitest tests should cover:
 - close others and close to the right
 - invalid layout rejection
 
-Tauri end-to-end tests should cover:
+Tauri unit tests should cover real-app workflows such as:
 
 - drag to split targets
 - drag to another workspace creates a mirror

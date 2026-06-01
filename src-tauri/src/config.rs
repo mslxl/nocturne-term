@@ -20,10 +20,10 @@ use crate::{
     types::{
         AppConfigSnapshot, ConfigDocumentTarget, ConfigKeyPathInput, ConfigRootInfo, ConfigTable,
         ConfigValue, ConnectionDiagnosticSeverity, ConnectionHostDiagnostic,
-        ConnectionHostDocument, ConnectionHostDocumentInput, ConnectionHostEntry, ConnectionHostIcon,
-        ConnectionHostSource, EffectiveConfigDocument, HostDirsInput, LocalConnectionConfig,
-        MainConfigDocument, ProfileConfigDocument, ProfileDocumentInput, ProfileEntry,
-        SshConnectionConfig, TabBarOrientation,
+        ConnectionHostDocument, ConnectionHostDocumentInput, ConnectionHostEntry,
+        ConnectionHostIcon, ConnectionHostSource, EffectiveConfigDocument, HostDirsInput,
+        LocalConnectionConfig, MainConfigDocument, ProfileConfigDocument, ProfileDocumentInput,
+        ProfileEntry, SshConnectionConfig, TabBarOrientation,
     },
 };
 
@@ -852,7 +852,9 @@ fn validate_connection_host_icon(icon: &ConnectionHostIcon) -> Result<()> {
         ConnectionHostIcon::Catalog { name } => {
             let trimmed = name.trim();
             if trimmed.is_empty() {
-                return Err(invalid_error("connection host catalog icon name cannot be empty"));
+                return Err(invalid_error(
+                    "connection host catalog icon name cannot be empty",
+                ));
             }
             if !trimmed.contains(':') {
                 return Err(invalid_error(
@@ -869,10 +871,13 @@ fn validate_connection_host_icon(icon: &ConnectionHostIcon) -> Result<()> {
                 ));
             }
             if data_base64.trim().is_empty() {
-                return Err(invalid_error("connection host image icon data cannot be empty"));
+                return Err(invalid_error(
+                    "connection host image icon data cannot be empty",
+                ));
             }
-            let decoded = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, data_base64)
-                .map_err(|_| invalid_error("connection host image icon data must be base64"))?;
+            let decoded =
+                base64::Engine::decode(&base64::engine::general_purpose::STANDARD, data_base64)
+                    .map_err(|_| invalid_error("connection host image icon data must be base64"))?;
             if decoded.len() > CUSTOM_HOST_ICON_MAX_BYTES {
                 return Err(invalid_error(format!(
                     "connection host image icon must be at most {} bytes",
@@ -892,7 +897,9 @@ fn validate_connection_host_svg_icon(svg: &str) -> Result<()> {
     }
     let lower = trimmed.to_ascii_lowercase();
     if !lower.contains("<svg") {
-        return Err(invalid_error("connection host SVG icon must contain an svg element"));
+        return Err(invalid_error(
+            "connection host SVG icon must contain an svg element",
+        ));
     }
     if lower.contains("<script")
         || lower.contains("<foreignobject")
@@ -1881,6 +1888,7 @@ pub(crate) fn effective_application_config(app: &AppHandle<impl Runtime>) -> Res
     Ok(deep_merge(&main_value, &profile_value))
 }
 
+#[cfg(target_os = "macos")]
 pub(crate) fn effective_macos_integrated_titlebar(app: &AppHandle<impl Runtime>) -> Result<bool> {
     let config = effective_application_config(app)?;
     let Some(table) = config.as_table() else {
@@ -1901,6 +1909,7 @@ pub(crate) fn effective_macos_integrated_titlebar(app: &AppHandle<impl Runtime>)
     }
 }
 
+#[cfg(target_os = "macos")]
 pub(crate) fn effective_horizontal_tab_bar(app: &AppHandle<impl Runtime>) -> Result<bool> {
     let config = effective_application_config(app)?;
     let Some(table) = config.as_table() else {
