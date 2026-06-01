@@ -84,7 +84,7 @@ Each user-created connection host is stored in its own TOML file inside one of t
 
 User-created host folders are represented by file location, not by a TOML field. For example, `hosts/work/prod/<uuid>.toml` appears in folder `work/prod`. Editing a folder in Host Manager moves the TOML file under the same configured host directory, and the backend creates missing directories automatically. Absolute paths and `..` segments are invalid folder values.
 
-User-created host TOML may include organizational metadata such as `icon_pack`. `folder` is part of the typed frontend-facing document so the UI can display and edit it, but Rust skips it during TOML serialization.
+User-created host TOML may include an optional `[icon]` table. `folder` is part of the typed frontend-facing document so the UI can display and edit it, but Rust skips it during TOML serialization. Host icon storage, custom image/SVG handling, and OpenSSH read-only icon rules are defined in [Host Icons](host-icons.md).
 
 Application config may also specify one or more OpenSSH config files through `openssh_config_files`.
 
@@ -206,6 +206,15 @@ Terminal color scheme commands manage the standalone scheme files in `terminal-c
 The app theme to scheme mapping lives in config under `terminal.color_scheme.light` and
 `terminal.color_scheme.dark`. The terminal content area uses the mapped scheme, while the app
 chrome, settings window, and profile dialogs keep following `ui.theme`.
+
+The terminal tab bar can optionally show saved-host icons:
+
+```toml
+[terminal]
+show_host_icons_in_tabs = false
+```
+
+The default is `false`; when absent, tabs remain text-only.
 
 ## Frontend Data Contract
 
@@ -384,6 +393,10 @@ id = "018f6eb4-3da8-73c8-9b2d-fca30a256196"
 name = "Project Shell"
 protocol = "local"
 
+[icon]
+type = "catalog"
+name = "lucide:terminal"
+
 [local]
 command = "zsh"
 args = ["-l"]
@@ -397,6 +410,10 @@ version = 1
 id = "018f6eb3-6f91-7410-bc43-f927b2236d94"
 name = "Production API"
 protocol = "ssh"
+
+[icon]
+type = "catalog"
+name = "devicon:amazonwebservices"
 
 [ssh]
 hostname = "prod.example.com"

@@ -1,4 +1,5 @@
 import type { ConnectionHostDocument, ConnectionProtocol, ConnectionHostEntry, LocalConnectionConfig, SshConnectionConfig } from "$lib/bindings";
+import { catalogIcon } from "$lib/hosts/icons";
 
 export type HostFolderTreeNode = {
   key: string;
@@ -14,7 +15,7 @@ export function emptySshHostDocument(id = ""): ConnectionHostDocument {
     id,
     name: "New Host",
     folder: null,
-    icon_pack: "ssh",
+    icon: catalogIcon("lucide:server"),
     protocol: "ssh",
     local: null,
     ssh: {
@@ -36,7 +37,7 @@ export function emptyLocalHostDocument(id = ""): ConnectionHostDocument {
     id,
     name: "Local Shell",
     folder: null,
-    icon_pack: "shell",
+    icon: catalogIcon("lucide:terminal"),
     protocol: "local",
     local: {
       command: null,
@@ -136,15 +137,6 @@ export function hostFolderPaths(tree: HostFolderTreeNode): string[] {
   }
   visit(tree);
   return paths;
-}
-
-export function hostIconPackLabel(value: string | null | undefined): string {
-  if (value === "shell") return "Shell";
-  if (value === "server") return "Server";
-  if (value === "database") return "Database";
-  if (value === "network") return "Network";
-  if (value === "ssh") return "SSH";
-  return "Default";
 }
 
 export function hostSourceLabel(entry: ConnectionHostEntry): string {

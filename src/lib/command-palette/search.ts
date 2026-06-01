@@ -1,3 +1,4 @@
+import type { ConnectionHostIcon } from "$lib/bindings";
 import type { AppLanguage } from "$lib/config/document";
 
 export type PaletteItemKind = "command" | "tab" | "profile" | "theme" | "connection-host";
@@ -8,6 +9,7 @@ export type PaletteItem = {
   title: string;
   scope: string;
   keywords: string[];
+  icon?: ConnectionHostIcon;
   shortcut?: string;
   disabledReason?: string;
   contextScore?: number;

@@ -112,7 +112,7 @@ For OpenSSH-derived hosts, `folder` is derived from the OpenSSH config file name
 
 Folder editing is a virtual directory operation. The editor should provide completion or a picker based on existing Nocturne/OpenSSH folder paths; it must not open the OS filesystem picker because folders here are logical host groups, not arbitrary directories.
 
-Each host may also have an `icon_pack` value. This is an app-defined icon pack identifier used by the UI when rendering the host. For Nocturne user hosts it is editable and stored in the host TOML file. For virtual and OpenSSH-derived hosts it is app-controlled/read-only unless the host is copied into a Nocturne user host.
+Host icons are defined in [Host Icons](host-icons.md). Nocturne user hosts may store an explicit `[icon]` table in their TOML file. OpenSSH-derived and virtual hosts use app-assigned read-only icons. The old `icon_pack` field is discarded and must not be read, written, migrated, or preserved.
 
 ## Host Row Display
 
@@ -139,8 +139,11 @@ Example SSH host:
 version = 1
 id = "018f6eb3-6f91-7410-bc43-f927b2236d94"
 name = "Production API"
-icon_pack = "server"
 protocol = "ssh"
+
+[icon]
+type = "catalog"
+name = "devicon:amazonwebservices"
 
 [ssh]
 hostname = "prod.example.com"
@@ -158,8 +161,11 @@ Example local host:
 version = 1
 id = "018f6eb4-3da8-73c8-9b2d-fca30a256196"
 name = "Project Shell"
-icon_pack = "shell"
 protocol = "local"
+
+[icon]
+type = "catalog"
+name = "lucide:terminal"
 
 [local]
 command = "zsh"
@@ -356,6 +362,7 @@ Search should index:
 - configured hostname
 - username
 - protocol
+- icon catalog id or inferred icon name
 - folder path
 - tags, if added later
 
@@ -375,6 +382,8 @@ The Host Manager window should use native-feeling list/detail behavior:
 - copy-to-Nocturne action for OpenSSH entries
 - directory selector when creating a new user host
 - virtual folder completion or picker in the Folder field
+- icon picker for editable Nocturne user hosts
+- read-only app-assigned icon display for OpenSSH-derived hosts
 - a single Default switch for connectable hosts; enabling it for one host clears default from every other host because `default_host` stores one host ID
 - protocol selection through a dropdown menu inside the editor, not separate New Local/New SSH buttons
 - visible duplicate UUID warnings

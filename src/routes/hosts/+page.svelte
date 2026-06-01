@@ -7,7 +7,10 @@
   import "overlayscrollbars/overlayscrollbars.css";
   import { commands, type ConnectionHostDocument, type ConnectionHostEntry, type ConnectionProtocol } from "$lib/bindings";
   import { applyAppPreferences } from "$lib/config/document";
-  import { buildHostFolderTree, compactOptional, cloneHostDocument, emptySshHostDocument, hostAddress, hostFolderPaths, hostHasBlockingDiagnostics, hostIconPackLabel, hostSourceLabel, hostSubtitle, setHostProtocol, type HostFolderTreeNode } from "$lib/hosts/model";
+  import HostIcon from "$lib/hosts/HostIcon.svelte";
+  import HostIconPicker from "$lib/hosts/HostIconPicker.svelte";
+  import { inferHostIcon, resolveHostIcon } from "$lib/hosts/icons";
+  import { buildHostFolderTree, compactOptional, cloneHostDocument, emptySshHostDocument, hostAddress, hostFolderPaths, hostHasBlockingDiagnostics, hostSourceLabel, hostSubtitle, setHostProtocol, type HostFolderTreeNode } from "$lib/hosts/model";
   import { hasTauriRuntime } from "$lib/tauri/runtime";
   import { unwrapCommand } from "$lib/terminal/commands";
 
@@ -27,12 +30,15 @@
   let errorMessage = $state("");
   let expandedFolders = $state<Record<string, boolean>>({});
   let folderPickerOpen = $state(false);
+  let iconPickerOpen = $state(false);
+  let iconPickerMode = $state<"quick" | "full">("quick");
   let unlistenConfig: undefined | (() => void);
 
   const snapshot = $derived(snapshotQuery.data);
   const hosts = $derived(snapshot?.hosts ?? []);
   const selectedHost = $derived(editorMode === "existing" ? selectedConnectionHost(hosts, selectedId) : null);
   const editable = $derived(selectedHost?.source === "user" && !selectedHost.read_only);
+  const iconEditable = $derived(editorMode === "new" || editable);
   const hostDirs = $derived(snapshot?.root.host_dirs ?? []);
   const defaultHostId = $derived(snapshot?.root.default_host ?? "");
   const visibleDefaultHostId = $derived(pendingDefaultHostId ?? defaultHostId);
@@ -42,14 +48,7 @@
   const hostTree = $derived(buildHostFolderTree(hosts));
   const existingFolders = $derived(hostFolderPaths(hostTree));
   const folderSuggestions = $derived(folderMatches(existingFolders, draft?.folder ?? ""));
-  const iconPacks = [
-    { id: "", label: "Default" },
-    { id: "shell", label: "Shell" },
-    { id: "ssh", label: "SSH" },
-    { id: "server", label: "Server" },
-    { id: "database", label: "Database" },
-    { id: "network", label: "Network" },
-  ];
+  const draftIcon = $derived(draft ? (draft.icon ?? inferHostIcon(draft)) : null);
 
   $effect(() => {
     if (snapshot?.effective_config.root) applyAppPreferences(snapshot.effective_config.root);
@@ -66,6 +65,7 @@
     draft = cloneHostDocument(selectedHost.document);
     pendingDefaultHostId = null;
     selectedDirectory = selectedHost.path ? directoryName(selectedHost.path) : hostDirs[0] ?? "";
+    iconPickerOpen = false;
   });
 
   function selectHost(host: ConnectionHostEntry) {
@@ -75,6 +75,7 @@
     pendingDefaultHostId = null;
     selectedDirectory = host.path ? directoryName(host.path) : hostDirs[0] ?? "";
     errorMessage = "";
+    iconPickerOpen = false;
   }
 
   function newHost() {
@@ -84,6 +85,7 @@
     pendingDefaultHostId = null;
     selectedDirectory = hostDirs[0] ?? "";
     errorMessage = "";
+    iconPickerOpen = false;
   }
 
   function copyOpenSshHost(host: ConnectionHostEntry) {
@@ -96,6 +98,7 @@
     pendingDefaultHostId = null;
     selectedDirectory = hostDirs[0] ?? "";
     errorMessage = "";
+    iconPickerOpen = false;
   }
 
   async function saveHost() {
@@ -125,6 +128,7 @@
         draft = null;
       }
       pendingDefaultHostId = null;
+      iconPickerOpen = false;
     } catch (error) {
       errorMessage = error instanceof Error ? error.message : String(error);
     }
@@ -133,6 +137,17 @@
   function updateDefaultHost(checked: boolean) {
     if (!selectedHost || hostHasBlockingDiagnostics(selectedHost)) return;
     pendingDefaultHostId = checked ? selectedHost.id : null;
+  }
+
+  function toggleIconPicker() {
+    if (!iconEditable) return;
+    iconPickerMode = "quick";
+    iconPickerOpen = !iconPickerOpen;
+  }
+
+  function updateDraftIcon(icon: ConnectionHostDocument["icon"]) {
+    if (!draft || !iconEditable) return;
+    draft.icon = icon;
   }
 
   async function deleteHost() {
@@ -171,7 +186,6 @@
   function normalizeDraft(document: ConnectionHostDocument): ConnectionHostDocument {
     const next = cloneHostDocument(document);
     next.name = next.name.trim();
-    next.icon_pack = compactOptional(next.icon_pack ?? "");
     if (next.protocol === "local") {
       if (!next.local) next.local = { command: null, args: [], cwd: null, env: {} };
       next.local.command = compactOptional(next.local.command ?? "");
@@ -300,9 +314,12 @@
               type="button"
               onclick={() => selectHost(host)}
             >
-              <span>
-                <strong>{host.document.name}</strong>
-                <small>{hostSubtitle(host)}</small>
+              <span class="host-row-main">
+                <HostIcon icon={resolveHostIcon(host)} />
+                <span>
+                  <strong>{host.document.name}</strong>
+                  <small>{hostSubtitle(host)}</small>
+                </span>
               </span>
               <em>{host.id === defaultHostId ? "DEFAULT" : host.document.protocol.toUpperCase()}</em>
             </button>
@@ -340,8 +357,42 @@
       {#if draft}
         <header class="detail-header">
           <div>
-            <h2>{draft.name || "Host"}</h2>
-            <p>{selectedHost ? hostSourceLabel(selectedHost) : "New Nocturne host"}</p>
+            <div class="detail-title">
+              {#if draftIcon}
+                <div class="detail-icon-control">
+                  <button
+                    class="detail-icon-button"
+                    class:editable={iconEditable}
+                    class:open={iconPickerOpen}
+                    type="button"
+                    disabled={!iconEditable}
+                    aria-expanded={iconPickerOpen}
+                    aria-label={iconEditable ? "Change host icon" : "Host icon"}
+                    title={iconEditable ? "Change host icon" : "Host icon"}
+                    onclick={toggleIconPicker}
+                  >
+                    <HostIcon icon={draftIcon} size="large" />
+                  </button>
+                  {#if iconPickerOpen}
+                    <div class="detail-icon-popover">
+                      <HostIconPicker
+                        value={draft.icon}
+                        fallbackIcon={draftIcon}
+                        mode={iconPickerMode}
+                        disabled={!iconEditable}
+                        onChange={updateDraftIcon}
+                        onClose={() => (iconPickerOpen = false)}
+                        onOpenFull={() => (iconPickerMode = "full")}
+                      />
+                    </div>
+                  {/if}
+                </div>
+              {/if}
+              <div>
+                <h2>{draft.name || "Host"}</h2>
+                <p>{selectedHost ? hostSourceLabel(selectedHost) : "New Nocturne host"}</p>
+              </div>
+            </div>
           </div>
           <div class="actions">
             {#if selectedHost?.source === "open_ssh_config"}
@@ -398,17 +449,6 @@
                 </div>
               {/if}
             </div>
-          </label>
-          <label>
-            <span>Icon Pack</span>
-            <select value={draft.icon_pack ?? ""} disabled={selectedHost?.read_only} onchange={(event) => (draft!.icon_pack = event.currentTarget.value || null)}>
-              {#each iconPacks as pack}
-                <option value={pack.id}>{pack.label}</option>
-              {/each}
-            </select>
-            {#if selectedHost?.read_only}
-              <small>{selectedHost.source === "open_ssh_config" ? "OpenSSH hosts use an app-assigned icon pack until copied into a Nocturne host." : `${hostIconPackLabel(draft.icon_pack)} is managed by Nocturne.`}</small>
-            {/if}
           </label>
           <label>
             <span>Type</span>
@@ -503,9 +543,12 @@
         type="button"
         onclick={() => selectHost(host)}
       >
-        <span>
-          <strong>{host.document.name}</strong>
-          <small>{hostSubtitle(host)}</small>
+        <span class="host-row-main">
+          <HostIcon icon={resolveHostIcon(host)} />
+          <span>
+            <strong>{host.document.name}</strong>
+            <small>{hostSubtitle(host)}</small>
+          </span>
         </span>
         <em>{host.id === defaultHostId ? "DEFAULT" : host.document.protocol.toUpperCase()}</em>
       </button>
@@ -625,6 +668,14 @@
     font-weight: 600;
   }
 
+  .host-row-main {
+    min-width: 0;
+    display: grid;
+    grid-template-columns: 20px minmax(0, 1fr);
+    gap: 8px;
+    align-items: center;
+  }
+
   .tree-folder em {
     color: var(--hosts-muted);
     font-size: 11px;
@@ -655,6 +706,14 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+
+  .rows .host-row-main {
+    min-width: 0;
+    display: grid;
+    grid-template-columns: 20px minmax(0, 1fr);
+    gap: 8px;
+    align-items: center;
   }
 
   .rows small,
@@ -699,6 +758,72 @@
 
   .detail-header > div:first-child {
     min-width: 0;
+  }
+
+  .detail-title {
+    min-width: 0;
+    display: grid;
+    grid-template-columns: 40px minmax(0, 1fr);
+    gap: 10px;
+    align-items: center;
+  }
+
+  .detail-icon-control {
+    position: relative;
+    width: 40px;
+    height: 40px;
+    z-index: 20;
+  }
+
+  .detail-icon-button {
+    position: relative;
+    width: 40px;
+    height: 40px;
+    min-height: 40px;
+    display: grid;
+    place-items: center;
+    border: 0;
+    border-radius: 10px;
+    padding: 0;
+    background: transparent;
+    color: inherit;
+  }
+
+  .detail-icon-button.editable:hover,
+  .detail-icon-button.editable:focus-visible,
+  .detail-icon-button.editable.open {
+    background: color-mix(in srgb, var(--hosts-active) 72%, transparent);
+    outline: none;
+  }
+
+  .detail-icon-button.editable::after {
+    content: "";
+    position: absolute;
+    right: 3px;
+    bottom: 3px;
+    width: 9px;
+    height: 9px;
+    border: 1.5px solid var(--hosts-bg);
+    border-radius: 999px;
+    background: var(--hosts-fg);
+    opacity: 0;
+    transform: scale(0.78);
+    transition:
+      opacity 0.12s ease-out,
+      transform 0.12s ease-out;
+  }
+
+  .detail-icon-button.editable:hover::after,
+  .detail-icon-button.editable:focus-visible::after {
+    opacity: 1;
+    transform: scale(1);
+  }
+
+  .detail-icon-popover {
+    position: absolute;
+    z-index: 50;
+    top: calc(100% + 8px);
+    left: 0;
   }
 
   .detail-header h2,
