@@ -1625,13 +1625,16 @@ fn parse_openssh_proxy_jump_reference(value: &str) -> Result<OpenSshProxyJumpRef
 
 fn parse_openssh_proxy_jump_host_port(value: &str) -> Result<(String, Option<u16>)> {
     if let Some(rest) = value.strip_prefix('[') {
-        let (host, port_text) = rest
-            .split_once("]:")
-            .ok_or_else(|| invalid_error("invalid bracketed ProxyJump host:port"))?;
-        let port = port_text
-            .parse::<u16>()
-            .map_err(|_| invalid_error("invalid ProxyJump port"))?;
-        return Ok((host.to_string(), Some(port)));
+        if let Some((host, port_text)) = rest.split_once("]:") {
+            let port = port_text
+                .parse::<u16>()
+                .map_err(|_| invalid_error("invalid ProxyJump port"))?;
+            return Ok((host.to_string(), Some(port)));
+        }
+        if let Some(host) = rest.strip_suffix(']').filter(|host| host.contains(':')) {
+            return Ok((host.to_string(), None));
+        }
+        return Err(invalid_error("invalid bracketed ProxyJump host:port"));
     }
     if let Some((host, port_text)) = value.rsplit_once(':') {
         if !host.contains(':') {
@@ -2913,6 +2916,21 @@ mod tests {
         assert_eq!(hops[1].hostname, "127.0.0.2");
         assert_eq!(hops[1].username.as_deref(), Some("relay"));
         assert_eq!(hops[1].port, 2200);
+    }
+
+    #[test]
+    fn openssh_proxy_jump_parses_bracketed_ipv6_with_and_without_port() {
+        let default_port =
+            parse_openssh_proxy_jump_reference("ops@[2001:db8::10]").expect("valid ipv6 jump");
+        assert_eq!(default_port.username.as_deref(), Some("ops"));
+        assert_eq!(default_port.alias, "2001:db8::10");
+        assert_eq!(default_port.port, None);
+
+        let explicit_port =
+            parse_openssh_proxy_jump_reference("ops@[2001:db8::10]:2200").expect("valid ipv6 jump");
+        assert_eq!(explicit_port.username.as_deref(), Some("ops"));
+        assert_eq!(explicit_port.alias, "2001:db8::10");
+        assert_eq!(explicit_port.port, Some(2200));
     }
 
     #[test]

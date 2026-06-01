@@ -844,7 +844,8 @@ fn prepare_ssh_session(input: &SshWorkerInput) -> Result<PreparedSshSession> {
         jump_guards = chain.guards;
         chain.stream
     } else {
-        TcpStream::connect((input.ssh.hostname.as_str(), input.ssh.port)).map_err(terminal_error)?
+        TcpStream::connect((ssh_network_hostname(&input.ssh.hostname), input.ssh.port))
+            .map_err(terminal_error)?
     };
     tcp.set_nodelay(true).map_err(terminal_error)?;
     let tcp_mode = tcp.try_clone().map_err(terminal_error)?;
@@ -898,7 +899,8 @@ fn connect_proxy_jump_chain(
     let mut current_stream: Option<TcpStream> = None;
     for (index, jump) in jumps.iter().enumerate() {
         let jump_stream = if index == 0 {
-            TcpStream::connect((jump.hostname.as_str(), jump.port)).map_err(terminal_error)?
+            TcpStream::connect((ssh_network_hostname(&jump.hostname), jump.port))
+                .map_err(terminal_error)?
         } else {
             current_stream
                 .take()
@@ -950,7 +952,7 @@ fn connect_proxy_jump_hop(
     verify_ssh_host_key(&jump_session, &jump_input)?;
     authenticate_ssh_session(&jump_session, &jump_input)?;
     let remote = jump_session
-        .channel_direct_tcpip(&target.hostname, target.port, None)
+        .channel_direct_tcpip(ssh_network_hostname(&target.hostname), target.port, None)
         .map_err(terminal_error)?;
     jump_session.set_blocking(false);
     jump_tcp_mode
@@ -1051,15 +1053,26 @@ fn parse_proxy_jump_hop(value: &str) -> Result<SshConnectionConfig> {
     })
 }
 
+fn ssh_network_hostname(hostname: &str) -> &str {
+    hostname
+        .strip_prefix('[')
+        .and_then(|rest| rest.strip_suffix(']'))
+        .filter(|inner| inner.contains(':'))
+        .unwrap_or(hostname)
+}
+
 fn parse_host_port(value: &str, default_port: u16) -> Result<(String, u16)> {
     if let Some(rest) = value.strip_prefix('[') {
-        let (host, port_text) = rest
-            .split_once("]:")
-            .ok_or_else(|| invalid_error("invalid bracketed host:port"))?;
-        let port = port_text
-            .parse::<u16>()
-            .map_err(|_| invalid_error("invalid ProxyJump port"))?;
-        return Ok((host.to_string(), port));
+        if let Some((host, port_text)) = rest.split_once("]:") {
+            let port = port_text
+                .parse::<u16>()
+                .map_err(|_| invalid_error("invalid ProxyJump port"))?;
+            return Ok((host.to_string(), port));
+        }
+        if let Some(host) = rest.strip_suffix(']').filter(|host| host.contains(':')) {
+            return Ok((host.to_string(), default_port));
+        }
+        return Err(invalid_error("invalid bracketed host:port"));
     }
     if let Some((host, port_text)) = value.rsplit_once(':') {
         if !host.contains(':') {
@@ -1882,6 +1895,22 @@ mod tests {
         assert_eq!(config.username.as_deref(), Some("ops"));
         assert_eq!(config.hostname, "2001:db8::10");
         assert_eq!(config.port, 2222);
+    }
+
+    #[test]
+    fn parses_proxy_jump_ipv6_bracket_host_with_default_port() {
+        let config = parse_proxy_jump_hop("ops@[2001:db8::10]").expect("valid ipv6 jump");
+
+        assert_eq!(config.username.as_deref(), Some("ops"));
+        assert_eq!(config.hostname, "2001:db8::10");
+        assert_eq!(config.port, 22);
+    }
+
+    #[test]
+    fn strips_brackets_from_ipv6_hostname_for_network_connections() {
+        assert_eq!(ssh_network_hostname("[2001:db8::1]"), "2001:db8::1");
+        assert_eq!(ssh_network_hostname("2001:db8::1"), "2001:db8::1");
+        assert_eq!(ssh_network_hostname("prod.example.com"), "prod.example.com");
     }
 
     #[test]
