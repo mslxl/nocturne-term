@@ -95,7 +95,7 @@ The terminal content area must not start pane drag operations. Many terminal app
 
 Closing the final pane closes the tab.
 
-Closing a pane whose terminal is still running requires confirmation. Use a native OS confirmation dialog when possible. Exited or errored panes may close immediately.
+Closing a pane whose terminal is still running asks for confirmation by default. Users can disable that prompt with `terminal.confirm_close = false`. Use a native OS confirmation dialog when possible. Exited or errored panes may close immediately.
 
 When removing a pane leaves a split node with only one child, collapse that node automatically. Ratios should be normalized after removal.
 

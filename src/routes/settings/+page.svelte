@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { listen } from "@tauri-apps/api/event";
+  import { openPath } from "@tauri-apps/plugin-opener";
   import { createQuery, useQueryClient } from "@tanstack/svelte-query";
   import { commands } from "$lib/bindings";
   import {
@@ -123,6 +124,18 @@
     }
   }
 
+  async function openConfigDirectory() {
+    if (!snapshot) return;
+    const path = snapshot.root.root_dir;
+    if (!path) throw new Error("config root directory is missing");
+    errorMessage = "";
+    try {
+      await openPath(path);
+    } catch (error) {
+      errorMessage = error instanceof Error ? error.message : String(error);
+    }
+  }
+
   $effect(() => {
     if (!effectiveRoot) return;
     applyAppPreferences(effectiveRoot);
@@ -193,6 +206,15 @@
     {:else}
       <div class="settings-list">
         {#if activeCategory === "profiles" && snapshot}
+          <SettingRow title={t("configDirectory")} help={t("configDirectoryHelp")}>
+            <div class="config-directory">
+              <code title={snapshot.root.root_dir}>{snapshot.root.root_dir}</code>
+              <button class="default-button" type="button" disabled={!hasTauriRuntime()} onclick={() => openConfigDirectory()}>
+                {t("openConfigDirectory")}
+              </button>
+            </div>
+          </SettingRow>
+
           <SettingRow title={t("activeProfile")}>
             <select value={snapshot.root.active_profile} onchange={(event) => switchProfile(event.currentTarget.value)}>
               {#each snapshot.profiles as profile}
@@ -430,6 +452,10 @@
     background: color-mix(in srgb, var(--settings-control) 72%, var(--settings-bg));
   }
 
+  .default-button:disabled {
+    opacity: 0.52;
+  }
+
   .default-button:active,
   .back:active {
     background: color-mix(in srgb, var(--settings-accent) 18%, var(--settings-control));
@@ -449,6 +475,31 @@
   .empty {
     padding: 28px;
     color: var(--settings-muted);
+  }
+
+  .config-directory {
+    min-width: 0;
+    width: min(100%, 420px);
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .config-directory code {
+    display: block;
+    flex: 1 1 auto;
+    min-width: 0;
+    padding: 4px 7px;
+    border: 1px solid var(--settings-border);
+    border-radius: 6px;
+    overflow: hidden;
+    color: var(--settings-fg);
+    background: color-mix(in srgb, var(--settings-control) 78%, var(--settings-bg));
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    font-size: 12px;
+    line-height: 1.35;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   @media (max-width: 640px) {
@@ -484,6 +535,11 @@
     textarea,
     select {
       width: 100%;
+    }
+
+    .config-directory {
+      align-items: stretch;
+      flex-direction: column;
     }
   }
 </style>

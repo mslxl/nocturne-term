@@ -235,6 +235,17 @@ export const settingsSchema: SettingDefinition[] = [
     get: (root) => tabBarOrientationValue(valueAt(root, ["terminal", "tab_bar_orientation"])),
     toConfigValue: (value) => configString(String(value)),
   },
+  {
+    key: "terminal.confirm_close",
+    category: "terminal",
+    label: "confirmClose",
+    path: ["terminal", "confirm_close"],
+    kind: "boolean",
+    defaultValue: true,
+    help: "confirmCloseHelp",
+    get: (root) => booleanValue(valueAt(root, ["terminal", "confirm_close"])) ?? true,
+    toConfigValue: (value) => configBoolean(Boolean(value)),
+  },
   ...(["top", "right", "bottom", "left"] as const).map((edge) => ({
     key: `terminal.padding.${edge}`,
     category: "terminal" as const,

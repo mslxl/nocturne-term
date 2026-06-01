@@ -12,6 +12,13 @@
     "core:window:allow-internal-toggle-maximize",
     "core:window:allow-start-dragging",
     "log:default",
-    "opener:default"
+    "opener:default",
+    {
+      "identifier": "opener:allow-open-path",
+      "allow": [
+        { "path": "$APPCONFIG/nocturne" },
+        { "path": "$APPCONFIG/nocturne/**" }
+      ]
+    }
   ]
 }

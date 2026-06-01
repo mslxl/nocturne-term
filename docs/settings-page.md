@@ -38,6 +38,8 @@ Inherited rows are visually muted. Overridden rows expose a `Use Default` button
 
 Do not show main/profile/effective values as three separate columns. The menu entry determines the editing context.
 
+The Profiles category shows the current configuration root directory from `ConfigRootInfo.root_dir`. The row is read-only and includes an Open button that uses the platform file manager through the Tauri opener plugin. Keep this as a native open action, not an in-app file browser.
+
 ## Theme
 
 The app-level theme is stored at:
@@ -155,6 +157,17 @@ The terminal tab bar supports:
 The legacy value `vertical` is accepted by Rust and treated as `vertical_right`.
 
 Right-clicking the tab bar opens a native Tauri popup menu, not a WebView-drawn menu. This preserves native context-menu behavior and avoids browser-style chrome. Menu selections update the active settings target: profile config when the active profile already overrides `terminal.tab_bar_orientation`, otherwise main config.
+
+## Terminal Close Confirmation
+
+Closing a running terminal tab or pane asks for confirmation by default:
+
+```toml
+[terminal]
+confirm_close = true
+```
+
+When set to `false`, running tabs and panes close immediately. Exited or errored panes already close without confirmation. The confirmation uses the platform dialog path so close behavior keeps native focus and keyboard handling.
 
 ## Implementation Notes
 
