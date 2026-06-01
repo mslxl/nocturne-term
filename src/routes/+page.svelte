@@ -15,8 +15,13 @@
     type TabBarOrientation,
     type TerminalSessionInfo,
     type TerminalSettings,
+    type WorkspaceDockLayout,
+    type WorkspaceFloatingWindowState,
+    type WorkspaceTabState,
+    type WorkspaceToolSlot,
+    type WorkspaceToolTab,
   } from "$lib/bindings";
-  import { appLanguageFromConfig, appThemeFromConfig, applyAppPreferences, booleanValue, configString, readValue, resolveTheme, writeValue } from "$lib/config/document";
+  import { appLanguageFromConfig, appThemeFromConfig, applyAppPreferences, booleanValue, configString, integerValue, readValue, resolveTheme, stringValue, writeValue } from "$lib/config/document";
   import CommandPalette from "$lib/command-palette/CommandPalette.svelte";
   import { staticPaletteCommands } from "$lib/command-palette/commands";
   import { localizeCommand, searchPaletteItems, type PaletteItem, type PaletteSearchResult } from "$lib/command-palette/search";
@@ -26,7 +31,11 @@
   import { hasTauriRuntime } from "$lib/tauri/runtime";
   import TerminalPaneTree from "$lib/terminal/components/TerminalPaneTree.svelte";
   import TerminalTabBar from "$lib/terminal/components/TerminalTabBar.svelte";
+  import WorkspaceTabBar from "$lib/workspace/components/WorkspaceTabBar.svelte";
+  import { createWorkspaceStore } from "$lib/workspace/state.svelte";
   import { unwrapCommand } from "$lib/terminal/commands";
+  import FilesToolTab from "$lib/files/FilesToolTab.svelte";
+  import TransfersToolTab from "$lib/transfers/TransfersToolTab.svelte";
   import { isTerminalSessionInactiveMessage } from "$lib/terminal/errors";
   import {
     clearTerminalFindEffects,
@@ -231,6 +240,26 @@
       }
     | CloseTabAction
     | ClosePaneAction;
+  type TerminalWorkspaceRuntime = {
+    activeId: string;
+    tabs: TerminalTab[];
+  };
+  type TerminalRenderMode = {
+    workspace: WorkspaceTabState;
+  };
+  type ToolTabContextMenu = {
+    workspaceId: string;
+    slotId: string;
+    toolTabId: string | null;
+    groupId: string;
+    left: number;
+    top: number;
+  };
+  type ToolTabDropTarget =
+    | { kind: "group"; workspaceId: string; groupId: string }
+    | { kind: "split"; workspaceId: string; slotId: string; side: "left" | "right" | "up" | "down" }
+    | { kind: "workspace"; workspaceId: string }
+    | { kind: "float"; workspaceId: string };
 
   let settings = $state<TerminalSettings | null>(null);
   let lastConfigSnapshot = $state<AppConfigSnapshot | null>(null);
@@ -238,6 +267,8 @@
   let settingsError = $state("");
   let tabs = $state<TerminalTab[]>([]);
   let activeId = $state("");
+  let terminalRuntimeByWorkspaceId = new Map<string, TerminalWorkspaceRuntime>();
+  let activeTerminalWorkspaceId = "";
   let tabBarOrientation = $state<TabBarOrientation>("horizontal");
   let outputUnlisten: undefined | (() => void);
   let exitUnlisten: undefined | (() => void);
@@ -262,9 +293,14 @@
   let hostPickerOpen = $state(false);
   let hostPickerPosition = $state({ left: 10, top: 44 });
   let hostPickerSubmenus = $state<HostPickerMenu[]>([]);
-  let secondaryClickOpensDefault = $state(false);
+  let toolTabContextMenu = $state<ToolTabContextMenu | null>(null);
   let macosIntegratedTitlebar = $state(false);
   let showHostIconsInTabs = $state(false);
+  let defaultFilesViewMode = $state<"tree" | "columns">("tree");
+  let showHiddenFiles = $state(true);
+  let filesDeleteBehavior = $state<"direct" | "try_remote_trash">("direct");
+  let textPreviewLimitBytes = $state(1_048_576);
+  let imagePreviewLimitBytes = $state(10_485_760);
   let pendingSshCredential = $state<PendingSshCredential | null>(null);
   let hostSessionRetryByPaneId = $state<Record<string, HostSessionRetry>>({});
   let commandPaletteLastFocus: HTMLElement | null = null;
@@ -285,6 +321,8 @@
     containerPixels: number;
   } | null>(null);
   let dragState = $state<{ kind: "pane" | "tab"; id: string } | null>(null);
+  let toolTabDragState = $state<{ workspaceId: string; slotId: string; toolTabId: string | null; active: boolean } | null>(null);
+  let toolTabDropTarget = $state<ToolTabDropTarget | null>(null);
   let dropTarget = $state<{ paneId: string; zone: PaneDropZone } | null>(null);
   let pointerDrag = $state<{
     kind: "pane" | "tab";
@@ -295,9 +333,28 @@
     active: boolean;
     target: HTMLElement;
   } | null>(null);
+  let toolTabPointerDrag = $state<{
+    workspaceId: string;
+    slotId: string;
+    toolTabId: string | null;
+    pointerId: number;
+    startX: number;
+    startY: number;
+    active: boolean;
+    target: HTMLElement;
+  } | null>(null);
   const isHotModuleReplacement = import.meta.hot !== undefined;
+  const workspaceStore = createWorkspaceStore();
 
   let activeTab = $derived(tabs.find((tab) => tab.id === activeId));
+  let workspaceSnapshot = $derived(workspaceStore.snapshot);
+  let activeWorkspace = $derived(workspaceSnapshot?.workspaces.find((workspace) => workspace.id === workspaceSnapshot?.active_workspace_id) ?? null);
+  let floatingWindowId = $state<string | null>(null);
+  let activeFloatingWindow = $derived(
+    floatingWindowId
+      ? (workspaceSnapshot?.floating_windows.find((window) => window.id === floatingWindowId) ?? null)
+      : null,
+  );
   let isVertical = $derived(tabBarOrientation !== "horizontal");
   let tabsOnLeft = $derived(tabBarOrientation === "vertical_left");
   let integratedTitlebar = $derived(isMacPlatform() && macosIntegratedTitlebar && !isVertical);
@@ -324,15 +381,55 @@
 
   async function loadSettings() {
     settingsError = "";
+    if (!hasTauriRuntime()) {
+      const root = { values: {} };
+      const snapshot: AppConfigSnapshot = {
+        root: {
+          root_dir: "/demo",
+          active_profile: "default",
+          main_config_path: "/demo/nocturne.toml",
+          profile_config_path: "/demo/profiles/default.toml",
+          state_path: "/demo/state.toml",
+          host_dirs: [],
+          openssh_config_files: [],
+          default_host: "demo-local",
+        },
+        main_config: { root },
+        profile_config: { root },
+        effective_config: { root },
+        profiles: [],
+        hosts: [],
+      };
+      lastConfigSnapshot = snapshot;
+      applyAppPreferences(snapshot.effective_config.root);
+      setLanguage(appLanguageFromConfig(readValue(snapshot.effective_config.root, ["ui", "language"])));
+      appTheme = resolveTheme(appThemeFromConfig(readValue(snapshot.effective_config.root, ["ui", "theme"])));
+      keybindings = readKeybindingMap(snapshot.effective_config.root, navigator.platform.toLowerCase().includes("mac"));
+      macosIntegratedTitlebar = true;
+      showHostIconsInTabs = false;
+      defaultFilesViewMode = "tree";
+      showHiddenFiles = true;
+      filesDeleteBehavior = "direct";
+      textPreviewLimitBytes = 1_048_576;
+      imagePreviewLimitBytes = 10_485_760;
+      settings = demoTerminalSettings();
+      tabBarOrientation = settings.tab_bar_orientation;
+      syncSettingsVariables(settings);
+      return;
+    }
     const snapshot = await unwrapCommand(commands.getConfigSnapshot());
     lastConfigSnapshot = snapshot;
     applyAppPreferences(snapshot.effective_config.root);
     setLanguage(appLanguageFromConfig(readValue(snapshot.effective_config.root, ["ui", "language"])));
     appTheme = resolveTheme(appThemeFromConfig(readValue(snapshot.effective_config.root, ["ui", "theme"])));
     keybindings = readKeybindingMap(snapshot.effective_config.root, navigator.platform.toLowerCase().includes("mac"));
-    secondaryClickOpensDefault = booleanValue(readValue(snapshot.effective_config.root, ["session", "secondary_click_opens_default"])) ?? false;
     macosIntegratedTitlebar = booleanValue(readValue(snapshot.effective_config.root, ["ui", "macos_integrated_titlebar"])) ?? true;
-    showHostIconsInTabs = booleanValue(readValue(snapshot.effective_config.root, ["terminal", "show_host_icons_in_tabs"])) ?? false;
+    showHostIconsInTabs = booleanValue(readValue(snapshot.effective_config.root, ["workspace", "show_host_icons_in_tabs"])) ?? false;
+    defaultFilesViewMode = filesViewModeFromConfig(readValue(snapshot.effective_config.root, ["files", "default_view_mode"]));
+    showHiddenFiles = booleanValue(readValue(snapshot.effective_config.root, ["files", "show_hidden"])) ?? true;
+    filesDeleteBehavior = filesDeleteBehaviorFromConfig(readValue(snapshot.effective_config.root, ["files", "delete_behavior"]));
+    textPreviewLimitBytes = integerValue(readValue(snapshot.effective_config.root, ["files", "text_preview_limit_bytes"])) ?? 1_048_576;
+    imagePreviewLimitBytes = integerValue(readValue(snapshot.effective_config.root, ["files", "image_preview_limit_bytes"])) ?? 10_485_760;
     const next = await unwrapCommand(commands.getTerminalSettingsForTheme({ resolved_theme: appTheme }));
     settings = next;
     tabBarOrientation = next.tab_bar_orientation;
@@ -343,6 +440,217 @@
         terminalTabs.scheduleFit(pane.id);
       }
     }
+  }
+
+  function filesViewModeFromConfig(value: Parameters<typeof stringValue>[0]): "tree" | "columns" {
+    const mode = stringValue(value);
+    return mode === "columns" ? "columns" : "tree";
+  }
+
+  function filesDeleteBehaviorFromConfig(value: Parameters<typeof stringValue>[0]): "direct" | "try_remote_trash" {
+    const mode = stringValue(value);
+    return mode === "try_remote_trash" ? "try_remote_trash" : "direct";
+  }
+
+  function demoTerminalSettings(): TerminalSettings {
+    return {
+      command: null,
+      args: [],
+      cwd: null,
+      font_family: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+      font_size: 13,
+      scrollback: 10_000,
+      renderer: "dom",
+      cursor_blink: true,
+      cursor_style: "block",
+      theme: {
+        background: "#111111",
+        foreground: "#f1f1f1",
+        cursor: "#f1f1f1",
+        selection_background: "#4c6fff66",
+        black: "#1c1c1c",
+        red: "#d75f5f",
+        green: "#87af5f",
+        yellow: "#d7af5f",
+        blue: "#5f87d7",
+        magenta: "#af87d7",
+        cyan: "#5fafaf",
+        white: "#d0d0d0",
+        bright_black: "#666666",
+        bright_red: "#ff8787",
+        bright_green: "#afd787",
+        bright_yellow: "#ffd787",
+        bright_blue: "#87afff",
+        bright_magenta: "#d7afff",
+        bright_cyan: "#87d7d7",
+        bright_white: "#ffffff",
+      },
+      padding: {
+        top: 8,
+        right: 10,
+        bottom: 8,
+        left: 10,
+      },
+      tab_bar_orientation: "horizontal",
+    };
+  }
+
+  function workspaceToolById(toolTabId: string): WorkspaceToolTab | null {
+    return workspaceSnapshot?.tool_tabs.find((tool) => tool.id === toolTabId) ?? null;
+  }
+
+  function slotTool(slot: WorkspaceToolSlot): WorkspaceToolTab | null {
+    if (slot.kind === "closed_source") return null;
+    return workspaceToolById(slot.tool_tab_id);
+  }
+
+  function activeGroupSlot(layout: Extract<WorkspaceDockLayout, { kind: "group" }>): WorkspaceToolSlot | null {
+    return layout.slots.find((slot) => slot.id === layout.active_slot_id) ?? layout.slots[0] ?? null;
+  }
+
+  function workspaceById(workspaceId: string): WorkspaceTabState | null {
+    return workspaceSnapshot?.workspaces.find((workspace) => workspace.id === workspaceId) ?? null;
+  }
+
+  function slotToolTitle(slot: WorkspaceToolSlot) {
+    if (slot.kind === "closed_source") return slot.previous_title;
+    const tool = slotTool(slot);
+    if (tool) return tool.title;
+    return "Missing ToolTab";
+  }
+
+  function ownerWorkspaceTitle(slot: WorkspaceToolSlot) {
+    if (slot.kind === "closed_source") return slot.owner_workspace_title;
+    if (slot.kind !== "mirror") return "";
+    return workspaceById(slot.owner_workspace_id)?.title ?? "Closed workspace";
+  }
+
+  function splitStyle(layout: Extract<WorkspaceDockLayout, { kind: "split" }>) {
+    const ratios = normalizedWorkspaceRatios(layout.children.length, layout.ratios);
+    const tracks = ratios.map((ratio) => `${Math.max(0.08, ratio)}fr`).join(" ");
+    return layout.direction === "row" ? `grid-template-columns: ${tracks};` : `grid-template-rows: ${tracks};`;
+  }
+
+  function normalizedWorkspaceRatios(length: number, values: Array<number | null>) {
+    const fallback = Array.from({ length }, () => 1 / Math.max(1, length));
+    if (values.length !== length) return fallback;
+    const numeric = values.map((value) => (typeof value === "number" && Number.isFinite(value) && value > 0 ? value : 0));
+    const total = numeric.reduce((sum, value) => sum + value, 0);
+    if (total <= 0) return fallback;
+    return numeric.map((value) => value / total);
+  }
+
+  async function activateWorkspaceSlot(workspace: WorkspaceTabState, slotId: string) {
+    await workspaceStore.dispatch({
+      kind: "activate_tool_slot",
+      workspace_id: workspace.id,
+      slot_id: slotId,
+    });
+  }
+
+  async function closeWorkspaceSlot(workspaceId: string, slotId: string) {
+    await workspaceStore.dispatch({ kind: "close_tool_slot", workspace_id: workspaceId, slot_id: slotId });
+  }
+
+  async function closeOtherWorkspaceSlots(workspaceId: string, slotId: string) {
+    await workspaceStore.dispatch({ kind: "close_other_tool_slots", workspace_id: workspaceId, slot_id: slotId });
+  }
+
+  async function closeWorkspaceSlotsToRight(workspaceId: string, slotId: string) {
+    await workspaceStore.dispatch({ kind: "close_tool_slots_to_right", workspace_id: workspaceId, slot_id: slotId });
+  }
+
+  async function mirrorToolTabToWorkspace(toolTabId: string, targetWorkspaceId: string, targetGroupId: string) {
+    await workspaceStore.dispatch({
+      kind: "mirror_tool_tab",
+      source_tool_tab_id: toolTabId,
+      target_workspace_id: targetWorkspaceId,
+      target_group_id: targetGroupId,
+    });
+  }
+
+  async function floatWorkspaceSlot(workspaceId: string, slotId: string) {
+    const before = workspaceStore.snapshot?.floating_windows.map((window) => window.id) ?? [];
+    await workspaceStore.dispatch({ kind: "float_tool_slot", workspace_id: workspaceId, slot_id: slotId });
+    const after = workspaceStore.snapshot?.floating_windows ?? [];
+    const created = after.find((window) => !before.includes(window.id));
+    if (created && hasTauriRuntime()) {
+      await unwrapCommand(commands.openWorkspaceFloatingWindow(created.id));
+    }
+  }
+
+  async function restoreFloatingWindow(floatingWindowId: string) {
+    await workspaceStore.dispatch({ kind: "restore_floating_window", floating_window_id: floatingWindowId });
+  }
+
+  function openToolTabContextMenu(
+    event: MouseEvent,
+    workspace: WorkspaceTabState,
+    group: Extract<WorkspaceDockLayout, { kind: "group" }>,
+    slot: WorkspaceToolSlot,
+  ) {
+    event.preventDefault();
+    event.stopPropagation();
+    const tool = slotTool(slot);
+    toolTabContextMenu = {
+      workspaceId: workspace.id,
+      slotId: slot.id,
+      toolTabId: tool?.id ?? null,
+      groupId: group.id,
+      left: event.clientX,
+      top: event.clientY,
+    };
+  }
+
+  function closeToolTabContextMenu() {
+    toolTabContextMenu = null;
+  }
+
+  function otherMirrorTargets(menu: ToolTabContextMenu) {
+    const sourceTool = menu.toolTabId ? workspaceToolById(menu.toolTabId) : null;
+    if (!sourceTool) return [];
+    return (workspaceSnapshot?.workspaces ?? [])
+      .filter((workspace) => workspace.id !== sourceTool.owner_workspace_id)
+      .map((workspace) => ({ workspace, groupId: firstDockGroupId(workspace.layout) }))
+      .filter((item): item is { workspace: WorkspaceTabState; groupId: string } => item.groupId !== null);
+  }
+
+  function firstDockGroupId(layout: WorkspaceDockLayout): string | null {
+    if (layout.kind === "group") return layout.id;
+    return layout.children.map(firstDockGroupId).find((id): id is string => id !== null) ?? null;
+  }
+
+  async function moveWorkspaceSlotToGroup(workspaceId: string, slotId: string, targetGroupId: string) {
+    await workspaceStore.dispatch({
+      kind: "move_tool_slot_to_group",
+      workspace_id: workspaceId,
+      slot_id: slotId,
+      target_group_id: targetGroupId,
+    });
+  }
+
+  async function moveWorkspaceSlotToSplit(
+    workspaceId: string,
+    slotId: string,
+    targetSlotId: string,
+    side: "left" | "right" | "up" | "down",
+  ) {
+    await workspaceStore.dispatch({
+      kind: "move_tool_slot_to_split",
+      workspace_id: workspaceId,
+      slot_id: slotId,
+      target_slot_id: targetSlotId,
+      side,
+    });
+  }
+
+  function terminalRenderMode(workspace: WorkspaceTabState | null, effectiveWorkspace: WorkspaceTabState): TerminalRenderMode | null {
+    if (!workspace && effectiveWorkspace.id !== activeTerminalWorkspaceId) {
+      return null;
+    }
+    return {
+      workspace: effectiveWorkspace,
+    };
   }
 
   function currentWindowLabel() {
@@ -506,32 +814,146 @@
     }
   }
 
-  async function openDefaultSession({ recordHistory = true }: { recordHistory?: boolean } = {}) {
+  function activeWorkspaceHostId() {
+    const hostId = activeWorkspace?.host_id;
+    if (!hostId) throw new Error("active workspace host is not loaded");
+    return hostId;
+  }
+
+  async function openWorkspaceTerminalSession({ recordHistory = true }: { recordHistory?: boolean } = {}) {
+    if (!hasTauriRuntime()) return;
+    await createHostSession(activeWorkspaceHostId(), { recordHistory });
+  }
+
+  async function openDefaultWorkspace() {
     const defaultHostId = lastConfigSnapshot?.root.default_host ?? "";
-    await createHostSession(defaultHostId, { recordHistory });
+    await createWorkspaceForHost(defaultHostId);
+  }
+
+  async function createWorkspaceForHost(hostId: string) {
+    await workspaceStore.dispatch({ kind: "create_workspace", host_id: hostId });
+  }
+
+  async function activateWorkspace(id: string) {
+    const current = workspaceSnapshot;
+    if (!current || current.active_workspace_id === id) return;
+    saveActiveTerminalRuntime();
+    await workspaceStore.dispatch({ kind: "activate_workspace", workspace_id: id });
+    await restoreTerminalRuntimeForWorkspace(id);
+  }
+
+  async function closeWorkspace(id: string) {
+    const canClose = await confirmWorkspaceTransferClose(id);
+    if (!canClose) return;
+    if (activeTerminalWorkspaceId === id) {
+      saveActiveTerminalRuntime();
+    }
+    await workspaceStore.dispatch({ kind: "close_workspace", workspace_id: id });
+    terminalRuntimeByWorkspaceId.delete(id);
+    const nextWorkspaceId = workspaceStore.snapshot?.active_workspace_id;
+    if (nextWorkspaceId) await restoreTerminalRuntimeForWorkspace(nextWorkspaceId);
+  }
+
+  async function closeOtherWorkspaces(id: string) {
+    const ids = workspaceSnapshot?.workspaces.map((workspace) => workspace.id).filter((workspaceId) => workspaceId !== id) ?? [];
+    for (const workspaceId of ids) {
+      const canClose = await confirmWorkspaceTransferClose(workspaceId);
+      if (!canClose) return;
+    }
+    saveActiveTerminalRuntime();
+    await workspaceStore.dispatch({ kind: "close_other_workspaces", workspace_id: id });
+    for (const workspaceId of ids) {
+      terminalRuntimeByWorkspaceId.delete(workspaceId);
+    }
+    await restoreTerminalRuntimeForWorkspace(id);
+  }
+
+  async function closeWorkspacesToRight(id: string) {
+    const workspaces = workspaceSnapshot?.workspaces ?? [];
+    const index = workspaces.findIndex((workspace) => workspace.id === id);
+    if (index < 0) return;
+    const ids = workspaces.slice(index + 1).map((workspace) => workspace.id);
+    for (const workspaceId of ids) {
+      const canClose = await confirmWorkspaceTransferClose(workspaceId);
+      if (!canClose) return;
+    }
+    saveActiveTerminalRuntime();
+    await workspaceStore.dispatch({ kind: "close_workspaces_to_right", workspace_id: id });
+    for (const workspaceId of ids) {
+      terminalRuntimeByWorkspaceId.delete(workspaceId);
+    }
+    const nextWorkspaceId = workspaceStore.snapshot?.active_workspace_id;
+    if (nextWorkspaceId) await restoreTerminalRuntimeForWorkspace(nextWorkspaceId);
+  }
+
+  async function confirmWorkspaceTransferClose(workspaceId: string) {
+    if (!hasTauriRuntime()) return true;
+    const queue = await unwrapCommand(commands.getTransferQueueSnapshot());
+    const related = queue.tasks.filter(
+      (task) =>
+        (task.status === "queued" || task.status === "running") &&
+        (task.initiator_workspace_id === workspaceId || task.related_workspace_ids.includes(workspaceId)),
+    );
+    if (related.length === 0) return true;
+    const confirmed = await ask(
+      related.length === 1
+        ? "Close this workspace and cancel 1 related transfer?"
+        : `Close this workspace and cancel ${related.length} related transfers?`,
+      {
+        title: "Close Workspace",
+        kind: "warning",
+      },
+    );
+    if (!confirmed) return false;
+    for (const task of related) {
+      await unwrapCommand(commands.cancelTransferTask({ task_id: task.id }));
+    }
+    return true;
   }
 
   async function newSession({ recordHistory = true }: { recordHistory?: boolean } = {}) {
-    if (secondaryClickOpensDefault) {
-      openHostPickerAtElement(document.querySelector<HTMLElement>("[data-testid='new-session']"));
-      return;
-    }
-    await openDefaultSession({ recordHistory });
+    await openWorkspaceTerminalSession({ recordHistory });
   }
 
-  async function handleNewSessionSecondaryClick(event: MouseEvent) {
+  async function newWorkspace() {
+    await openDefaultWorkspace();
+  }
+
+  async function handleNewWorkspaceSecondaryClick(event: MouseEvent) {
     event.preventDefault();
     event.stopPropagation();
-    if (secondaryClickOpensDefault) {
-      await openDefaultSession();
-      return;
-    }
     openHostPicker(event);
   }
 
   async function ensureStartupSession(restored: boolean) {
     if (restored || tabs.length > 0) return;
-    await openDefaultSession({ recordHistory: false });
+    await openWorkspaceTerminalSession({ recordHistory: false });
+  }
+
+  function saveActiveTerminalRuntime() {
+    if (!activeTerminalWorkspaceId) return;
+    for (const tab of tabs) {
+      for (const pane of tab.panes) detachTerminalPane(pane);
+    }
+    terminalRuntimeByWorkspaceId.set(activeTerminalWorkspaceId, {
+      activeId,
+      tabs,
+    });
+  }
+
+  async function restoreTerminalRuntimeForWorkspace(workspaceId: string) {
+    if (activeTerminalWorkspaceId === workspaceId) return;
+    if (activeTerminalWorkspaceId) saveActiveTerminalRuntime();
+    const runtime = terminalRuntimeByWorkspaceId.get(workspaceId);
+    tabs = runtime?.tabs ?? [];
+    activeId = runtime?.activeId ?? "";
+    activeTerminalWorkspaceId = workspaceId;
+    await tick();
+    if (activeId) {
+      const tab = tabs.find((item) => item.id === activeId);
+      if (tab) await mountAndFitTabPanes(tab);
+    }
+    syncTerminalMenuState();
   }
 
   async function flushTerminalOutputBacklog(paneId: string) {
@@ -660,10 +1082,10 @@
       if (!settings) await loadSettings();
       await tick();
       const cwd = sourcePane.currentDirectory.trim() || null;
-      const defaultHostId = lastConfigSnapshot?.root.default_host ?? "";
-      const info = await createHostPaneSession(defaultHostId, cwd);
+      const workspaceHostId = activeWorkspaceHostId();
+      const info = await createHostPaneSession(workspaceHostId, cwd);
       const nextPane = createTerminalPane(info, tab.id);
-      nextPane.connectionHostId = defaultHostId;
+      nextPane.connectionHostId = workspaceHostId;
       tab.panes = [...tab.panes, nextPane];
       tab.tree = splitPane(tab.tree, paneId, nextPane.id, side);
       tab.activePaneId = nextPane.id;
@@ -884,7 +1306,7 @@
   }
 
   async function restoreCreatedTabForRedo(): Promise<TerminalUndoAction> {
-    await openDefaultSession({ recordHistory: false });
+    await openWorkspaceTerminalSession({ recordHistory: false });
     const tab = tabs.find((item) => item.id === activeId);
     if (!tab) throw new Error("redo did not create a terminal tab");
     return { kind: "create_tab", tabId: tab.id };
@@ -977,6 +1399,10 @@
   }
 
   function handlePointerMove(event: PointerEvent) {
+    if (toolTabPointerDrag) {
+      updateToolTabPointerDrag(event);
+      return;
+    }
     const drag = resizeDrag;
     if (drag) {
       const tab = tabs.find((item) => item.id === drag.tabId);
@@ -1000,6 +1426,10 @@
   }
 
   function handlePointerUp(event: PointerEvent) {
+    if (toolTabPointerDrag) {
+      void finishToolTabPointerDrag(event);
+      return;
+    }
     const wasResizing = resizeDrag !== null;
     resizeDrag = null;
     if (wasResizing) return;
@@ -1007,6 +1437,7 @@
   }
 
   function handlePointerCancel(event: PointerEvent) {
+    if (toolTabPointerDrag?.pointerId === event.pointerId) cancelToolTabDragInteraction();
     if (resizeDrag) resizeDrag = null;
     if (pointerDrag?.pointerId === event.pointerId) cancelDragInteraction();
   }
@@ -1017,6 +1448,24 @@
 
   function startTabPointerDrag(event: PointerEvent, tabId: string) {
     startPointerDrag(event, "tab", tabId);
+  }
+
+  function startToolTabPointerDrag(event: PointerEvent, workspace: WorkspaceTabState, slot: WorkspaceToolSlot) {
+    if (event.button !== 0) return;
+    if (slot.kind === "closed_source" || slot.kind === "floating_placeholder") return;
+    const target = event.currentTarget;
+    if (!(target instanceof HTMLElement)) return;
+    toolTabPointerDrag = {
+      workspaceId: workspace.id,
+      slotId: slot.id,
+      toolTabId: slot.tool_tab_id,
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      active: false,
+      target,
+    };
+    target.setPointerCapture(event.pointerId);
   }
 
   function startPointerDrag(event: PointerEvent, kind: "pane" | "tab", id: string) {
@@ -1043,6 +1492,12 @@
     dropTarget = null;
   }
 
+  function cancelToolTabDragInteraction() {
+    toolTabPointerDrag = null;
+    toolTabDragState = null;
+    toolTabDropTarget = null;
+  }
+
   function updatePointerDrag(event: PointerEvent) {
     const drag = pointerDrag;
     if (!drag || drag.pointerId !== event.pointerId) return;
@@ -1056,6 +1511,28 @@
       }
     }
     dropTarget = paneDropTargetFromPoint(event.clientX, event.clientY);
+    event.preventDefault();
+    event.stopPropagation();
+  }
+
+  function updateToolTabPointerDrag(event: PointerEvent) {
+    const drag = toolTabPointerDrag;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    if (!drag.active) {
+      const distance = Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY);
+      if (distance < 6) return;
+      drag.active = true;
+      toolTabDragState = {
+        workspaceId: drag.workspaceId,
+        slotId: drag.slotId,
+        toolTabId: drag.toolTabId,
+        active: true,
+      };
+      if (!drag.target.hasPointerCapture(drag.pointerId)) {
+        drag.target.setPointerCapture(drag.pointerId);
+      }
+    }
+    toolTabDropTarget = toolTabDropTargetFromPoint(event.clientX, event.clientY, drag);
     event.preventDefault();
     event.stopPropagation();
   }
@@ -1080,6 +1557,53 @@
     }
   }
 
+  async function finishToolTabPointerDrag(event: PointerEvent) {
+    const drag = toolTabPointerDrag;
+    toolTabPointerDrag = null;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    const target = toolTabDropTargetFromPoint(event.clientX, event.clientY, drag);
+    const wasActive = drag.active;
+    toolTabDragState = null;
+    toolTabDropTarget = null;
+    if (!wasActive || !target) return;
+    try {
+      await applyToolTabDrop(drag, target);
+    } catch (error) {
+      settingsError = error instanceof Error ? error.message : String(error);
+    }
+  }
+
+  async function applyToolTabDrop(
+    drag: NonNullable<typeof toolTabPointerDrag>,
+    target: ToolTabDropTarget,
+  ) {
+    if (target.kind === "float") {
+      await floatWorkspaceSlot(drag.workspaceId, drag.slotId);
+      return;
+    }
+    if (target.kind === "workspace") {
+      if (!drag.toolTabId || target.workspaceId === drag.workspaceId) return;
+      const targetWorkspace = workspaceById(target.workspaceId);
+      const groupId = targetWorkspace ? firstDockGroupId(targetWorkspace.layout) : null;
+      if (!groupId) throw new Error(`workspace ${target.workspaceId} has no dock group`);
+      await mirrorToolTabToWorkspace(drag.toolTabId, target.workspaceId, groupId);
+      return;
+    }
+    if (target.workspaceId !== drag.workspaceId) {
+      if (!drag.toolTabId) return;
+      const targetWorkspace = workspaceById(target.workspaceId);
+      const groupId = target.kind === "group" ? target.groupId : targetWorkspace ? firstDockGroupId(targetWorkspace.layout) : null;
+      if (!groupId) throw new Error(`workspace ${target.workspaceId} has no dock group`);
+      await mirrorToolTabToWorkspace(drag.toolTabId, target.workspaceId, groupId);
+      return;
+    }
+    if (target.kind === "group") {
+      await moveWorkspaceSlotToGroup(drag.workspaceId, drag.slotId, target.groupId);
+      return;
+    }
+    await moveWorkspaceSlotToSplit(drag.workspaceId, drag.slotId, target.slotId, target.side);
+  }
+
   function paneDropTargetFromPoint(x: number, y: number): { paneId: string; zone: PaneDropZone } | null {
     const panes = [...document.querySelectorAll<HTMLElement>(".terminal-pane.active [data-pane-id]")];
     const containing = panes
@@ -1089,6 +1613,64 @@
     const match = containing[0];
     const paneId = match?.pane.dataset.paneId;
     return match && paneId ? { paneId, zone: dropZoneForRect(match.rect, x, y) } : null;
+  }
+
+  function toolTabDropTargetFromPoint(
+    x: number,
+    y: number,
+    drag: NonNullable<typeof toolTabPointerDrag>,
+  ): ToolTabDropTarget | null {
+    const workspaceTabs = [...document.querySelectorAll<HTMLElement>("[data-workspace-id]")];
+    const workspaceTarget = workspaceTabs.find((tab) => {
+      const rect = tab.getBoundingClientRect();
+      return x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
+    });
+    const workspaceId = workspaceTarget?.dataset.workspaceId;
+    if (workspaceId && workspaceId !== drag.workspaceId) return { kind: "workspace", workspaceId };
+
+    const dockGroups = [...document.querySelectorAll<HTMLElement>("[data-dock-group-id]")];
+    const containingGroup = dockGroups
+      .map((element) => ({ element, rect: element.getBoundingClientRect() }))
+      .filter(({ rect }) => x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom)
+      .sort((a, b) => a.rect.width * a.rect.height - b.rect.width * b.rect.height)[0];
+    if (containingGroup) {
+      const targetWorkspaceId = containingGroup.element.dataset.workspaceId;
+      const groupId = containingGroup.element.dataset.dockGroupId;
+      if (!targetWorkspaceId || !groupId) return null;
+      const slotTarget = toolTabSlotDropTargetFromPoint(x, y, targetWorkspaceId);
+      if (slotTarget) return slotTarget;
+      return { kind: "group", workspaceId: targetWorkspaceId, groupId };
+    }
+
+    const workspaceBody = document.querySelector<HTMLElement>(".workspace-body");
+    if (workspaceBody) {
+      const rect = workspaceBody.getBoundingClientRect();
+      if (x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom) return null;
+    }
+    return { kind: "float", workspaceId: drag.workspaceId };
+  }
+
+  function toolTabSlotDropTargetFromPoint(x: number, y: number, workspaceId: string): ToolTabDropTarget | null {
+    const slots = [...document.querySelectorAll<HTMLElement>("[data-tool-slot-id]")];
+    const match = slots
+      .map((element) => ({ element, rect: element.getBoundingClientRect() }))
+      .filter(({ rect }) => x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom)
+      .sort((a, b) => a.rect.width * a.rect.height - b.rect.width * b.rect.height)[0];
+    const slotId = match?.element.dataset.toolSlotId;
+    if (!match || !slotId) return null;
+    return { kind: "split", workspaceId, slotId, side: dockSideForRect(match.rect, x, y) };
+  }
+
+  function dockSideForRect(rect: DOMRect, x: number, y: number): "left" | "right" | "up" | "down" {
+    const relativeX = (x - rect.left) / rect.width;
+    const relativeY = (y - rect.top) / rect.height;
+    const distances = [
+      { side: "left" as const, distance: relativeX },
+      { side: "right" as const, distance: 1 - relativeX },
+      { side: "up" as const, distance: relativeY },
+      { side: "down" as const, distance: 1 - relativeY },
+    ];
+    return distances.reduce((best, item) => (item.distance < best.distance ? item : best)).side;
   }
 
   function dropZoneForRect(rect: DOMRect, x: number, y: number): PaneDropZone {
@@ -1106,6 +1688,7 @@
 
   function handleWindowBlur() {
     if (dragState || pointerDrag) cancelDragInteraction();
+    if (toolTabDragState || toolTabPointerDrag) cancelToolTabDragInteraction();
     resizeDrag = null;
     closeHostPicker();
   }
@@ -1998,14 +2581,14 @@
 
   function connectionHostPaletteItems(): PaletteItem[] {
     return (lastConfigSnapshot?.hosts ?? []).map((host) => {
-      const id = `connection.connect:${host.id}`;
+      const id = `workspace.new:${host.id}`;
       const ssh = host.document.ssh;
       const local = host.document.local;
       const folder = hostFolderLabel(host);
       return {
         id,
         kind: "connection-host",
-        title: `${host.document.protocol === "local" ? "Start" : "Connect"}: ${host.document.name}`,
+        title: `Open Workspace: ${host.document.name}`,
         scope: host.source === "open_ssh_config" ? folder : `${t("hosts")} / ${folder}`,
         icon: resolveHostIcon(host),
         keywords: [
@@ -2019,16 +2602,22 @@
           ssh?.username ?? "",
           ssh?.proxy_jump ?? "",
           hostSubtitle(host),
-          "session",
+          "workspace",
           "host",
+          "open",
           "connect",
           "connection",
           "local",
           "ssh",
-          "会话",
+          "工作区",
+          "打开",
           "连接",
           "主机",
           "本地",
+          "gongzuoqu",
+          "gzq",
+          "dakai",
+          "dk",
           "lianjie",
           "lj",
           "zhuji",
@@ -2176,7 +2765,7 @@
 
   async function runHostPickerHost(id: string) {
     closeHostPicker();
-    await createHostSession(id);
+    await createWorkspaceForHost(id);
   }
 
   async function openHostManagerFromPicker() {
@@ -2196,6 +2785,12 @@
   function closeHostPickerOnExternalFocus(event: FocusEvent) {
     if (!hostPickerOpen || isInsideHostPickerBoundary(event.target)) return;
     closeHostPicker();
+  }
+
+  function closeToolTabContextMenuOnExternalPointer(event: PointerEvent) {
+    if (!toolTabContextMenu) return;
+    if (event.target instanceof Element && event.target.closest("[data-tooltab-menu]")) return;
+    closeToolTabContextMenu();
   }
 
   function showHostPickerSubmenu(node: HostFolderTreeNode, level: number, event: MouseEvent | FocusEvent) {
@@ -2253,8 +2848,8 @@
       await switchActiveProfile(id.slice("profile.switch:".length));
       return;
     }
-    if (id.startsWith("connection.connect:")) {
-      await createHostSession(id.slice("connection.connect:".length));
+    if (id.startsWith("workspace.new:")) {
+      await createWorkspaceForHost(id.slice("workspace.new:".length));
       return;
     }
     if (id.startsWith("ui.theme.")) {
@@ -2517,7 +3112,7 @@
       return;
     }
     if (command === "new_tab") {
-      await openDefaultSession();
+      await openWorkspaceTerminalSession();
       return;
     }
     if (command === "split_right") return splitActivePane("right");
@@ -2604,7 +3199,7 @@
       return;
     }
     if (command === "terminal.newSession") {
-      void openDefaultSession();
+      void openWorkspaceTerminalSession();
       return;
     }
     if (command === "terminal.closeTab" && activeId) {
@@ -2646,6 +3241,7 @@
 
   onMount(() => {
     let mounted = true;
+    floatingWindowId = new URL(window.location.href).searchParams.get("floating_window");
     void (async () => {
       if (hasTauriRuntime()) {
         const [outputDispose, exitDispose, transportStateDispose, configDispose, paneMenuDispose, terminalMenuDispose] = await Promise.all([
@@ -2684,7 +3280,12 @@
         paneMenuUnlisten = paneMenuDispose;
         terminalMenuUnlisten = terminalMenuDispose;
       }
+      await workspaceStore.subscribe();
       await loadSettings();
+      await workspaceStore.load();
+      if (workspaceStore.snapshot?.active_workspace_id) {
+        await restoreTerminalRuntimeForWorkspace(workspaceStore.snapshot.active_workspace_id);
+      }
       const restored = (await restoreTabHandoff()) || (await restoreHotTabs());
       await ensureStartupSession(restored);
     })().catch((error) => {
@@ -2697,6 +3298,7 @@
     window.addEventListener("blur", handleWindowBlur);
     window.addEventListener("focus", syncTerminalMenuState);
     document.addEventListener("pointerdown", closeHostPickerOnExternalPointer, { capture: true });
+    document.addEventListener("pointerdown", closeToolTabContextMenuOnExternalPointer, { capture: true });
     document.addEventListener("beforeinput", handleTextInputBeforeInput);
     document.addEventListener("focusin", closeHostPickerOnExternalFocus, { capture: true });
     document.addEventListener("input", handleTextInputInput);
@@ -2714,6 +3316,7 @@
       window.removeEventListener("blur", handleWindowBlur);
       window.removeEventListener("focus", syncTerminalMenuState);
       document.removeEventListener("pointerdown", closeHostPickerOnExternalPointer, { capture: true });
+      document.removeEventListener("pointerdown", closeToolTabContextMenuOnExternalPointer, { capture: true });
       document.removeEventListener("beforeinput", handleTextInputBeforeInput);
       document.removeEventListener("focusin", closeHostPickerOnExternalFocus, { capture: true });
       document.removeEventListener("input", handleTextInputInput);
@@ -2727,6 +3330,7 @@
       configUnlisten?.();
       paneMenuUnlisten?.();
       terminalMenuUnlisten?.();
+      workspaceStore.dispose();
       if (isHotModuleReplacement) {
         storeHotTabsSnapshot();
         for (const tab of tabs) disposeTerminalTab(tab);
@@ -2740,6 +3344,12 @@
         }
       }
     };
+  });
+
+  $effect(() => {
+    const workspaceId = workspaceSnapshot?.active_workspace_id ?? "";
+    if (!workspaceId || workspaceId === activeTerminalWorkspaceId) return;
+    void restoreTerminalRuntimeForWorkspace(workspaceId).then(() => ensureStartupSession(false));
   });
 
   $effect(() => {
@@ -2766,78 +3376,52 @@
 
 </script>
 
-<main class:integrated-titlebar={integratedTitlebar} class:left-tabs={tabsOnLeft} class:vertical={isVertical} class="workspace">
+<main
+  class:floating-workspace={floatingWindowId !== null}
+  class:integrated-titlebar={integratedTitlebar}
+  class:left-tabs={tabsOnLeft}
+  class:vertical={isVertical}
+  class="workspace"
+>
   <div class="terminal-measure-host" aria-hidden="true">
     <div class="terminal-mount" bind:this={terminalMeasureContainer}></div>
   </div>
 
-  {#if !isVertical || tabsOnLeft}
-    <TerminalTabBar
-      {tabs}
-      {activeId}
-      placement={tabBarOrientation}
+  {#if workspaceSnapshot && !floatingWindowId}
+    <WorkspaceTabBar
+      workspaces={workspaceSnapshot.workspaces}
+      activeWorkspaceId={workspaceSnapshot.active_workspace_id}
       {integratedTitlebar}
       showHostIcons={showHostIconsInTabs}
       {hostIconById}
-      {activateTab}
-      {closeTab}
-      {newSession}
-      openHostPicker={openHostPicker}
-      {handleNewSessionSecondaryClick}
-      openContextMenu={tabContextMenu}
-      {startTabPointerDrag}
+      {activateWorkspace}
+      {closeWorkspace}
+      {closeOtherWorkspaces}
+      {closeWorkspacesToRight}
+      {newWorkspace}
+      {openHostPicker}
+      {handleNewWorkspaceSecondaryClick}
     />
+  {:else}
+    <div class="workspace-tabbar-loading" data-tauri-drag-region={integratedTitlebar ? "deep" : undefined}>
+      <span>{workspaceStore.loading ? "Loading workspace..." : "Workspace"}</span>
+    </div>
   {/if}
 
-  <section class="content" aria-label="Terminal content">
-    {#if settingsError}
-      <div class="placeholder error-state">
-        <img src="/favicon.png" alt="" />
-        <h1>Nocturne</h1>
-        <p>{settingsError}</p>
+  <section class="workspace-body" aria-label={activeFloatingWindow ? "Floating ToolTabs" : (activeWorkspace?.title ?? "Workspace")}>
+    {#if activeFloatingWindow}
+      {@render floatingDockLayout(activeFloatingWindow)}
+    {:else if floatingWindowId}
+      <div class="dock-empty">
+        <strong>Floating window closed</strong>
+        <span>The floating ToolTab source is no longer available.</span>
       </div>
-    {:else if tabs.length === 0}
-      <div class="placeholder">
-        <img src="/favicon.png" alt="" />
-        <h1>Nocturne</h1>
-      </div>
+    {:else if activeWorkspace}
+      {@render dockLayout(activeWorkspace.layout, activeWorkspace)}
     {:else}
-      {#each tabs as tab (tab.id)}
-        <div class:active={tab.id === activeId} class="terminal-pane">
-          <TerminalPaneTree
-            {tab}
-            tree={tab.tree}
-            activePaneId={tab.activePaneId}
-            {activatePane}
-            {closePane}
-            {openPaneContextMenu}
-            {startResize}
-            {startPanePointerDrag}
-            dragActive={dragState !== null}
-            {dropTarget}
-          />
-        </div>
-      {/each}
+      <div class="dock-empty">Workspace</div>
     {/if}
   </section>
-
-  {#if isVertical && !tabsOnLeft}
-    <TerminalTabBar
-      {tabs}
-      {activeId}
-      placement={tabBarOrientation}
-      {integratedTitlebar}
-      showHostIcons={showHostIconsInTabs}
-      {hostIconById}
-      {activateTab}
-      {closeTab}
-      {newSession}
-      openHostPicker={openHostPicker}
-      {handleNewSessionSecondaryClick}
-      openContextMenu={tabContextMenu}
-      {startTabPointerDrag}
-    />
-  {/if}
 
   {#if hostPickerOpen}
     <section
@@ -3037,7 +3621,236 @@
     onRun={(item) => void runPaletteResult(item)}
   />
 
+  {#if toolTabContextMenu}
+    <section
+      class="tooltab-context-menu"
+      style={`left: ${toolTabContextMenu.left}px; top: ${toolTabContextMenu.top}px;`}
+      role="menu"
+      data-tooltab-menu="true"
+    >
+      <button type="button" role="menuitem" onclick={() => void closeWorkspaceSlot(toolTabContextMenu!.workspaceId, toolTabContextMenu!.slotId).finally(closeToolTabContextMenu)}>
+        Close
+      </button>
+      <button type="button" role="menuitem" onclick={() => void closeOtherWorkspaceSlots(toolTabContextMenu!.workspaceId, toolTabContextMenu!.slotId).finally(closeToolTabContextMenu)}>
+        Close Others
+      </button>
+      <button type="button" role="menuitem" onclick={() => void closeWorkspaceSlotsToRight(toolTabContextMenu!.workspaceId, toolTabContextMenu!.slotId).finally(closeToolTabContextMenu)}>
+        Close to the Right
+      </button>
+      {#if toolTabContextMenu.toolTabId}
+        <hr />
+        <button type="button" role="menuitem" onclick={() => void floatWorkspaceSlot(toolTabContextMenu!.workspaceId, toolTabContextMenu!.slotId).finally(closeToolTabContextMenu)}>
+          Float ToolTab
+        </button>
+        {#each otherMirrorTargets(toolTabContextMenu) as target (target.workspace.id)}
+          <button
+            type="button"
+            role="menuitem"
+            onclick={() => void mirrorToolTabToWorkspace(toolTabContextMenu!.toolTabId!, target.workspace.id, target.groupId).finally(closeToolTabContextMenu)}
+          >
+            Mirror to {target.workspace.title}
+          </button>
+        {/each}
+      {/if}
+    </section>
+  {/if}
+
 </main>
+
+{#snippet floatingDockLayout(floatingWindow: WorkspaceFloatingWindowState)}
+  <section class="floating-window-shell">
+    <header>
+      <span>Floating ToolTabs</span>
+      <button type="button" onclick={() => void restoreFloatingWindow(floatingWindow.id)}>Restore</button>
+    </header>
+    {@render dockLayout(floatingWindow.layout, null)}
+  </section>
+{/snippet}
+
+{#snippet dockLayout(layout: WorkspaceDockLayout, workspace: WorkspaceTabState | null)}
+  {#if layout.kind === "split"}
+    <section
+      class:column={layout.direction === "column"}
+      class:row={layout.direction === "row"}
+      class="workspace-dock-split"
+      style={splitStyle(layout)}
+    >
+      {#each layout.children as child, index (`${layout.kind}-${index}-${child.kind}`)}
+        {@render dockLayout(child, workspace)}
+      {/each}
+    </section>
+  {:else}
+    <section
+      class:drop-target={toolTabDropTarget?.kind === "group" && toolTabDropTarget.groupId === layout.id}
+      class="workspace-dock-group"
+      aria-label="Tool tabs"
+      data-dock-group-id={layout.id}
+      data-testid={`dock-group-${layout.id}`}
+      data-workspace-id={workspace?.id ?? ""}
+    >
+      <div class="tool-tabbar">
+        {#each layout.slots as slot (slot.id)}
+          {@const tool = slotTool(slot)}
+          <button
+            class:active={slot.id === layout.active_slot_id}
+            class:closed={slot.kind === "closed_source"}
+            class:dragging={toolTabDragState?.slotId === slot.id}
+            class:mirror={slot.kind === "mirror"}
+            class:placeholder={slot.kind === "floating_placeholder"}
+            class:split-target={toolTabDropTarget?.kind === "split" && toolTabDropTarget.slotId === slot.id}
+            type="button"
+            data-testid={`tool-slot-${slot.id}`}
+            data-tool-slot-id={slot.id}
+            title={slotToolTitle(slot)}
+            onclick={() => workspace ? void activateWorkspaceSlot(workspace, slot.id) : undefined}
+            oncontextmenu={(event) => workspace ? openToolTabContextMenu(event, workspace, layout, slot) : undefined}
+            onpointerdown={(event) => workspace ? startToolTabPointerDrag(event, workspace, slot) : undefined}
+          >
+            <span>{slotToolTitle(slot)}</span>
+            {#if slot.kind === "mirror"}
+              <small>{ownerWorkspaceTitle(slot)}</small>
+            {:else if slot.kind === "floating_placeholder"}
+              <small>Floating</small>
+            {:else if slot.kind === "closed_source"}
+              <small>Closed</small>
+            {/if}
+          </button>
+          {#if workspace}
+            <button
+              class="tool-close"
+              type="button"
+              aria-label={`Close ${slotToolTitle(slot)}`}
+              title="Close ToolTab"
+              onclick={(event) => {
+                event.stopPropagation();
+                void closeWorkspaceSlot(workspace.id, slot.id);
+              }}
+            >
+              ×
+            </button>
+          {/if}
+        {/each}
+      </div>
+      {#if true}
+        {@const activeSlot = activeGroupSlot(layout)}
+        <div class="tool-surface">
+          {@render dockSlotContent(activeSlot, workspace)}
+        </div>
+      {/if}
+    </section>
+  {/if}
+{/snippet}
+
+{#snippet dockSlotContent(slot: WorkspaceToolSlot | null, workspace: WorkspaceTabState | null)}
+  {@const tool = slot ? slotTool(slot) : null}
+  {@const effectiveWorkspace = workspace ?? (tool ? workspaceById(tool.owner_workspace_id) : null)}
+  {#if !slot}
+    <div class="dock-empty">No ToolTab</div>
+  {:else if slot.kind === "closed_source"}
+    <div class="dock-empty">
+      <strong>{slot.previous_title}</strong>
+      <span>Source workspace closed: {slot.owner_workspace_title}</span>
+    </div>
+  {:else if slot.kind === "floating_placeholder"}
+    <div class="dock-empty">
+      <strong>{tool?.title ?? "ToolTab"}</strong>
+      <span>Shown in floating window</span>
+    </div>
+  {:else if !tool}
+    <div class="dock-empty">Missing ToolTab</div>
+  {:else if !effectiveWorkspace}
+    <div class="dock-empty">
+      <strong>{tool.title}</strong>
+      <span>Owner workspace is no longer available.</span>
+    </div>
+  {:else if tool.kind === "files"}
+    <FilesToolTab
+      toolTab={tool}
+      workspaceId={effectiveWorkspace.id}
+      defaultViewMode={defaultFilesViewMode}
+      showHidden={showHiddenFiles}
+      deleteBehavior={filesDeleteBehavior}
+      {textPreviewLimitBytes}
+      {imagePreviewLimitBytes}
+    />
+  {:else if tool.kind === "transfers"}
+    <TransfersToolTab workspace={effectiveWorkspace} />
+  {:else}
+    {@const terminalMode = terminalRenderMode(workspace, effectiveWorkspace)}
+    {#if !terminalMode}
+      <div class="dock-empty">
+        <strong>{tool.title}</strong>
+        <span>Terminal is visible in its owner workspace.</span>
+      </div>
+    {:else}
+      <section class:left-tabs={tabsOnLeft} class:vertical={isVertical} class="terminal-tool-area" aria-label="Terminal ToolTabs">
+        {#if !isVertical || tabsOnLeft}
+          <TerminalTabBar
+            {tabs}
+            {activeId}
+            placement={tabBarOrientation}
+            integratedTitlebar={false}
+            showHostIcons={false}
+            {hostIconById}
+            {activateTab}
+            {closeTab}
+            {newSession}
+            openContextMenu={tabContextMenu}
+            {startTabPointerDrag}
+          />
+        {/if}
+
+        <section class="content" aria-label="Terminal content">
+          {#if settingsError || workspaceStore.error}
+            <div class="placeholder error-state">
+              <img src="/favicon.png" alt="" />
+              <h1>Nocturne</h1>
+              <p>{settingsError || workspaceStore.error}</p>
+            </div>
+          {:else if tabs.length === 0}
+            <div class="placeholder">
+              <img src="/favicon.png" alt="" />
+              <h1>Nocturne</h1>
+            </div>
+          {:else}
+            {#each tabs as tab (tab.id)}
+              <div class:active={tab.id === activeId} class="terminal-pane">
+                <TerminalPaneTree
+                  {tab}
+                  tree={tab.tree}
+                  activePaneId={tab.activePaneId}
+                  {activatePane}
+                  {closePane}
+                  {openPaneContextMenu}
+                  {startResize}
+                  {startPanePointerDrag}
+                  dragActive={dragState !== null}
+                  {dropTarget}
+                />
+              </div>
+            {/each}
+          {/if}
+        </section>
+
+        {#if isVertical && !tabsOnLeft}
+          <TerminalTabBar
+            {tabs}
+            {activeId}
+            placement={tabBarOrientation}
+            integratedTitlebar={false}
+            showHostIcons={false}
+            {hostIconById}
+            {activateTab}
+            {closeTab}
+            {newSession}
+            openContextMenu={tabContextMenu}
+            {startTabPointerDrag}
+          />
+        {/if}
+      </section>
+    {/if}
+  {/if}
+{/snippet}
 
 {#snippet pickerFolderRow(node: HostFolderTreeNode, level: number)}
   <button
@@ -3079,7 +3892,7 @@
 
   .terminal-measure-host {
     position: fixed;
-    inset: 0 208px 0 0;
+    inset: 80px 0 0 0;
     z-index: -1;
     padding: var(--terminal-padding-top) var(--terminal-padding-right) var(--terminal-padding-bottom) var(--terminal-padding-left);
     overflow: hidden;
@@ -3087,20 +3900,248 @@
     pointer-events: none;
   }
 
-  .workspace:not(.vertical) .terminal-measure-host {
-    inset: 40px 0 0 0;
+  .workspace.vertical .terminal-measure-host {
+    inset: 40px 208px 0 0;
   }
 
   .workspace.vertical.left-tabs .terminal-measure-host {
-    inset: 0 0 0 208px;
+    inset: 40px 0 0 208px;
   }
 
-  .workspace.vertical {
+  .workspace-body {
+    min-width: 0;
+    min-height: 0;
+    display: block;
+    overflow: hidden;
+  }
+
+  .workspace.floating-workspace {
+    grid-template-rows: minmax(0, 1fr);
+  }
+
+  .floating-window-shell {
+    min-width: 0;
+    min-height: 0;
+    height: 100%;
+    display: grid;
+    grid-template-rows: 34px minmax(0, 1fr);
+    overflow: hidden;
+  }
+
+  .floating-window-shell > header {
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    border-bottom: 1px solid var(--app-border);
+    padding: 0 10px;
+    background: color-mix(in srgb, var(--app-bg) 92%, var(--app-control));
+    color: color-mix(in srgb, var(--app-fg) 72%, transparent);
+    font-size: 12px;
+  }
+
+  .floating-window-shell > header button {
+    height: 24px;
+    border: 1px solid var(--app-border);
+    border-radius: 5px;
+    padding: 0 9px;
+    background: var(--app-control);
+    color: var(--app-fg);
+    font: inherit;
+    font-size: 12px;
+  }
+
+  .workspace-dock-split {
+    min-width: 0;
+    min-height: 0;
+    width: 100%;
+    height: 100%;
+    display: grid;
+    overflow: hidden;
+  }
+
+  .workspace-dock-split.row {
+    grid-auto-flow: column;
+  }
+
+  .workspace-dock-split.column {
+    grid-auto-flow: row;
+  }
+
+  .workspace-dock-group {
+    min-width: 0;
+    min-height: 0;
+    height: 100%;
+    display: grid;
+    grid-template-rows: 31px minmax(0, 1fr);
+    overflow: hidden;
+    border-right: 1px solid var(--app-border);
+    border-bottom: 1px solid var(--app-border);
+    background: color-mix(in srgb, var(--app-bg) 96%, var(--app-control));
+  }
+
+  .workspace-dock-group.drop-target {
+    outline: 2px solid color-mix(in srgb, var(--app-accent) 62%, transparent);
+    outline-offset: -3px;
+  }
+
+  .tool-tabbar {
+    min-width: 0;
+    display: flex;
+    align-items: end;
+    gap: 2px;
+    overflow-x: auto;
+    overflow-y: hidden;
+    border-bottom: 1px solid var(--app-border);
+    padding: 3px 5px 0;
+  }
+
+  .tool-tabbar button {
+    min-width: 0;
+    max-width: 180px;
+    height: 28px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    border: 1px solid transparent;
+    border-bottom: 0;
+    border-radius: 6px 6px 0 0;
+    padding: 0 9px;
+    background: transparent;
+    color: color-mix(in srgb, var(--app-fg) 72%, transparent);
+    font: inherit;
+    font-size: 12px;
+  }
+
+  .tool-tabbar button.tool-close {
+    flex: none;
+    width: 24px;
+    max-width: 24px;
+    justify-content: center;
+    padding: 0;
+    color: color-mix(in srgb, var(--app-fg) 48%, transparent);
+  }
+
+  .tool-tabbar button.tool-close:hover {
+    color: var(--app-fg);
+    background: var(--app-hover);
+  }
+
+  .tool-tabbar button.active {
+    border-color: var(--app-border);
+    background: color-mix(in srgb, var(--app-bg) 88%, var(--app-control));
+    color: var(--app-fg);
+  }
+
+  .tool-tabbar button.dragging {
+    opacity: 0.45;
+  }
+
+  .tool-tabbar button.split-target {
+    border-color: color-mix(in srgb, var(--app-accent) 72%, var(--app-border));
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--app-accent) 45%, transparent);
+  }
+
+  .tool-tabbar button.mirror {
+    border-color: color-mix(in srgb, var(--app-accent) 58%, var(--app-border));
+  }
+
+  .tool-tabbar button.closed,
+  .tool-tabbar button.placeholder {
+    color: color-mix(in srgb, var(--app-fg) 54%, transparent);
+  }
+
+  .tool-tabbar button span {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .tool-tabbar button small {
+    flex: none;
+    border: 1px solid color-mix(in srgb, var(--app-fg) 16%, transparent);
+    border-radius: 999px;
+    padding: 0 5px;
+    color: color-mix(in srgb, var(--app-fg) 60%, transparent);
+    font-size: 10px;
+  }
+
+  .tool-surface {
+    min-width: 0;
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  .tooltab-context-menu {
+    position: fixed;
+    z-index: 90;
+    min-width: 188px;
+    border: 1px solid var(--app-border);
+    border-radius: 6px;
+    padding: 4px;
+    background: color-mix(in srgb, var(--app-bg) 95%, var(--app-control));
+    box-shadow: 0 14px 36px color-mix(in srgb, black 24%, transparent);
+  }
+
+  .tooltab-context-menu button {
+    width: 100%;
+    display: block;
+    border: 0;
+    border-radius: 4px;
+    padding: 6px 8px;
+    background: transparent;
+    color: var(--app-fg);
+    font: inherit;
+    font-size: 12px;
+    text-align: left;
+  }
+
+  .tooltab-context-menu button:hover {
+    background: var(--app-hover);
+  }
+
+  .tooltab-context-menu hr {
+    height: 1px;
+    border: 0;
+    margin: 4px;
+    background: var(--app-border);
+  }
+
+  .dock-empty {
+    min-width: 0;
+    min-height: 0;
+    height: 100%;
+    display: grid;
+    place-content: center;
+    justify-items: center;
+    gap: 5px;
+    padding: 16px;
+    color: color-mix(in srgb, var(--app-fg) 58%, transparent);
+    font-size: 12px;
+    text-align: center;
+  }
+
+  .dock-empty strong,
+  .dock-empty span {
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+
+  .terminal-tool-area {
+    min-width: 0;
+    min-height: 0;
+    display: grid;
+    grid-template-rows: 40px minmax(0, 1fr);
+  }
+
+  .terminal-tool-area.vertical {
     grid-template-columns: minmax(0, 1fr) 208px;
     grid-template-rows: minmax(0, 1fr);
   }
 
-  .workspace.vertical.left-tabs {
+  .terminal-tool-area.vertical.left-tabs {
     grid-template-columns: 208px minmax(0, 1fr);
   }
 
@@ -3544,20 +4585,20 @@
   }
 
   @media (max-width: 720px) {
-    .workspace.vertical {
+    .terminal-tool-area.vertical {
       grid-template-columns: minmax(0, 1fr) 160px;
     }
 
-    .workspace.vertical.left-tabs {
+    .terminal-tool-area.vertical.left-tabs {
       grid-template-columns: 160px minmax(0, 1fr);
     }
 
     .workspace.vertical .terminal-measure-host {
-      inset: 0 160px 0 0;
+      inset: 40px 160px 0 0;
     }
 
     .workspace.vertical.left-tabs .terminal-measure-host {
-      inset: 0 0 0 160px;
+      inset: 40px 0 0 160px;
     }
 
     .find-bar {

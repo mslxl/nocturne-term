@@ -781,6 +781,7 @@ fn default_local_host_document() -> ConnectionHostDocument {
         icon: Some(ConnectionHostIcon::Catalog {
             name: "lucide:terminal".to_string(),
         }),
+        files: None,
         protocol: crate::types::ConnectionProtocol::Local,
         local: Some(LocalConnectionConfig::default()),
         ssh: None,
@@ -1512,6 +1513,7 @@ fn parsed_to_openssh_hosts(parsed: ParsedOpenSshConfig, path: &Path) -> Vec<Conn
                     icon: Some(ConnectionHostIcon::Catalog {
                         name: "devicon:ssh".to_string(),
                     }),
+                    files: None,
                     protocol: crate::types::ConnectionProtocol::Ssh,
                     local: None,
                     ssh: Some(SshConnectionConfig {
@@ -2538,6 +2540,7 @@ mod tests {
                 forward_agent: true,
                 server_alive_interval: Some(30),
             }),
+            files: None,
             telnet: None,
         };
 
@@ -2588,6 +2591,7 @@ mod tests {
                 forward_agent: false,
                 server_alive_interval: None,
             }),
+            files: None,
             telnet: None,
         };
         write_connection_host_document(
@@ -2632,6 +2636,7 @@ mod tests {
             protocol: ConnectionProtocol::Telnet,
             local: None,
             ssh: None,
+            files: None,
             telnet: None,
         };
 
@@ -2654,6 +2659,7 @@ mod tests {
             protocol: ConnectionProtocol::Local,
             local: Some(LocalConnectionConfig::default()),
             ssh: None,
+            files: None,
             telnet: None,
         };
 
@@ -2676,6 +2682,7 @@ mod tests {
             protocol: ConnectionProtocol::Local,
             local: Some(LocalConnectionConfig::default()),
             ssh: None,
+            files: None,
             telnet: None,
         };
 
@@ -2716,6 +2723,7 @@ mod tests {
                 forward_agent: false,
                 server_alive_interval: None,
             }),
+            files: None,
             telnet: None,
         };
         let second = ConnectionHostDocument {
@@ -2729,6 +2737,7 @@ mod tests {
             protocol: ConnectionProtocol::Telnet,
             local: None,
             ssh: None,
+            files: None,
             telnet: Some(TelnetConnectionConfig {
                 hostname: "192.0.2.1".to_string(),
                 port: 23,

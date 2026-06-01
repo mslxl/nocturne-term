@@ -11,11 +11,15 @@ Nocturne stores configuration as TOML files inside Tauri's application config di
 - Main application config
 - Profile config
 - Host/session config
+- Workspace/window state
+- File transfer state
 - Private SSH trust store
 
 Main config and profile config together form the application config. The effective application config is produced by deep-merging the main config and the active profile config, with the profile winning on conflicts.
 
 Host config is stored separately as individual TOML files in configured host directories. User-created hosts use stable UUIDs, not content hashes, because connection history, keyring records, trust repair, default-host selection, and command palette entries need durable identity across edits.
+
+Workspace/window state is automatic IDE-style runtime state. It is separate from user-authored application config. It stores last-open workspaces, owned tool tabs, Dock layout, floating windows, active selections, and restore metadata. It does not store transient view state such as scroll positions, hover, focus, or mirror slots.
 
 OpenSSH config entries from configured OpenSSH config files are read as separate read-only sources. They do not live under the Nocturne config root and Nocturne must not write them. The default configured OpenSSH file is `~/.ssh/config`.
 
@@ -37,6 +41,8 @@ The current layout is:
 - `hosts/<folder>/<uuid>.toml` - user-created hosts organized into nested folders
 - `known-hosts.toml` - private SSH host-key trust store for connection hosts
 - `terminal-color-schemes/<id>.toml` - user terminal color schemes
+- `workspace-state.toml` - automatic workspace, Dock, and floating-window state
+- `transfer-state.toml` - recoverable transfer task state when needed
 
 The system also supports additional connection host directories through application config.
 
@@ -86,6 +92,15 @@ User-created host folders are represented by file location, not by a TOML field.
 
 User-created host TOML may include an optional `[icon]` table. `folder` is part of the typed frontend-facing document so the UI can display and edit it, but Rust skips it during TOML serialization. Host icon storage, custom image/SVG handling, and OpenSSH read-only icon rules are defined in [Host Icons](host-icons.md).
 
+User-created host TOML may include a host-level `[files]` table:
+
+```toml
+[files]
+default_path = "~/Projects"
+```
+
+The default path is used by the Files tool tab. For local hosts it resolves on the local filesystem. For SSH hosts it resolves on the remote filesystem. It is an initial path only, not an access restriction.
+
 Application config may also specify one or more OpenSSH config files through `openssh_config_files`.
 
 If no custom OpenSSH config file list is stored, the default is:
@@ -99,6 +114,8 @@ Application config may specify a default host through `default_host`. Nocturne e
 Terminal color schemes are stored separately from app config under `terminal-color-schemes/`.
 Built-in schemes are provided by Rust and do not live on disk. User schemes are individual TOML files
 that can be previewed, edited, copied, and exported from the settings window.
+
+Workspace state and transfer state are automatic runtime files. They may change frequently and should not be hand-edited.
 
 ### 5. Stable connection host identity
 
@@ -207,14 +224,14 @@ The app theme to scheme mapping lives in config under `terminal.color_scheme.lig
 `terminal.color_scheme.dark`. The terminal content area uses the mapped scheme, while the app
 chrome, settings window, and profile dialogs keep following `ui.theme`.
 
-The terminal tab bar can optionally show saved-host icons:
+The workspace tab bar can optionally show saved-host icons:
 
 ```toml
-[terminal]
+[workspace]
 show_host_icons_in_tabs = false
 ```
 
-The default is `false`; when absent, tabs remain text-only.
+The default is `false`; when absent, workspace tabs remain text-only.
 
 ## Frontend Data Contract
 
@@ -320,6 +337,23 @@ default_host = "00000000-0000-0000-0000-000000000001"
 
 [hosts]
 show_address = true
+
+[files]
+default_view_mode = "tree" # tree | columns
+show_hidden = true
+delete_behavior = "direct" # direct | try_remote_trash
+clipboard_semantics = "windows" # windows | finder
+remote_helper_policy = "ask" # ask | never | allow
+text_preview_limit_bytes = 1048576
+image_preview_limit_bytes = 10485760
+
+[transfers]
+global_concurrency = 3
+per_host_concurrency = 2
+
+[workspace]
+restore_strategy = "visible_auto_reconnect" # visible_auto_reconnect | manual | safe_auto_restore
+show_host_icons_in_tabs = false
 ```
 
 ### Profile config
@@ -349,27 +383,37 @@ vertical = 8
 left = 12
 ```
 
-### Terminal tab bar placement
+### Workspace and Dock state
 
-Terminal tab placement is configured under `terminal.tab_bar_orientation`:
+Workspace and Dock layout are not configured through profile TOML. They are automatic runtime state stored separately in `workspace-state.toml`.
 
-```toml
-[terminal]
-tab_bar_orientation = "horizontal" # horizontal | vertical_left | vertical_right
-```
+The runtime state stores:
 
-Older configs that use `"vertical"` remain valid. Rust treats that value as `"vertical_right"` when producing typed settings.
+- workspace order and active workspace
+- workspace host ids and user-renamed workspace titles
+- owned tool tabs
+- Dock layout tree and split ratios
+- floating windows that contain owned tool tabs
+- active dock groups and active tool tabs
+
+It does not store:
+
+- mirror slots
+- scroll positions
+- hover or focus state
+- Tree expansion state
+- temporary drag state
 
 ### macOS integrated title bar
 
-The macOS main window can use an overlay title bar so horizontal terminal tabs sit on the same line as the traffic-light controls:
+The macOS main window can use an overlay title bar so the workspace tab bar can share the line with traffic-light controls:
 
 ```toml
 [ui]
 macos_integrated_titlebar = true
 ```
 
-This defaults to `true` when absent. The setting is macOS-only and applies only with `terminal.tab_bar_orientation = "horizontal"`; vertical tab bar placements keep the normal system title bar.
+This defaults to `true` when absent. The setting is macOS-only and applies only when the workspace tab bar can safely share the title bar.
 
 ### Effective config
 
@@ -422,6 +466,9 @@ username = "deploy"
 identity_file = "~/.ssh/id_ed25519"
 proxy_jump = "bastion"
 forward_agent = true
+
+[files]
+default_path = "/var/www"
 ```
 
 The host file name is derived from the stable UUID, not the host name.

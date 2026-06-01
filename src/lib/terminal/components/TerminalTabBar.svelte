@@ -13,8 +13,6 @@
     activateTab: (id: string) => void | Promise<void>;
     closeTab: (id: string) => void | Promise<void>;
     newSession: () => void | Promise<void>;
-    openHostPicker: (event: MouseEvent) => void | Promise<void>;
-    handleNewSessionSecondaryClick: (event: MouseEvent) => void | Promise<void>;
     openContextMenu: (event: MouseEvent) => void | Promise<void>;
     startTabPointerDrag: (event: PointerEvent, tabId: string) => void;
   };
@@ -29,8 +27,6 @@
     activateTab,
     closeTab,
     newSession,
-    openHostPicker,
-    handleNewSessionSecondaryClick,
     openContextMenu,
     startTabPointerDrag,
   }: Props = $props();
@@ -68,11 +64,6 @@
     startTabPointerDrag(event, id);
   }
 
-  function openPicker(event: MouseEvent) {
-    event.preventDefault();
-    event.stopPropagation();
-    void openHostPicker(event);
-  }
 </script>
 
 <nav
@@ -135,12 +126,10 @@
     <button
       class="new-session"
       data-testid="new-session"
-      data-host-picker-trigger="true"
       type="button"
       aria-label="New session"
       title="New session"
       onclick={newSession}
-      oncontextmenu={handleNewSessionSecondaryClick}
     >
       <span>+</span>
       <small>Session</small>

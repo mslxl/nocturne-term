@@ -43,6 +43,7 @@ glob = "0.3.3"
 keyring-core = "1.0.0"
 tauri-plugin-log = "2.8.0"
 log = "0.4"
+urlencoding = "2.1"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6.4"

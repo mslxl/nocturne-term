@@ -27,6 +27,22 @@ export const commands = {
 	deleteTerminalColorScheme: (id: string) => typedError<null, ConfigError>(__TAURI_INVOKE("delete_terminal_color_scheme", { id })),
 	exportTerminalColorScheme: (id: string) => typedError<string, ConfigError>(__TAURI_INVOKE("export_terminal_color_scheme", { id })),
 	exportTerminalColorSchemeToPath: (input: TerminalColorSchemeExportInput) => typedError<string, ConfigError>(__TAURI_INVOKE("export_terminal_color_scheme_to_path", { input })),
+	listFiles: (input: FileListInput) => typedError<FileListResult, ConfigError>(__TAURI_INVOKE("list_files", { input })),
+	searchFiles: (input: FileSearchInput) => typedError<FileSearchResult, ConfigError>(__TAURI_INVOKE("search_files", { input })),
+	createDirectory: (input: FileCreateDirectoryInput) => typedError<null, ConfigError>(__TAURI_INVOKE("create_directory", { input })),
+	renameFile: (input: FileRenameInput) => typedError<null, ConfigError>(__TAURI_INVOKE("rename_file", { input })),
+	chmodFile: (input: FileChmodInput) => typedError<null, ConfigError>(__TAURI_INVOKE("chmod_file", { input })),
+	deleteFile: (input: FilePathInput) => typedError<null, ConfigError>(__TAURI_INVOKE("delete_file", { input })),
+	remoteTrashInfo: (input: FileTrashInfoInput) => typedError<FileTrashInfo, ConfigError>(__TAURI_INVOKE("remote_trash_info", { input })),
+	remoteSearchHelperInfo: (input: RemoteSearchHelperInput) => typedError<RemoteSearchHelperInfo, ConfigError>(__TAURI_INVOKE("remote_search_helper_info", { input })),
+	trashFile: (input: FilePathInput) => typedError<null, ConfigError>(__TAURI_INVOKE("trash_file", { input })),
+	previewFile: (input: FilePreviewInput) => typedError<FilePreviewResult, ConfigError>(__TAURI_INVOKE("preview_file", { input })),
+	getTransferQueueSnapshot: () => typedError<TransferQueueSnapshot, ConfigError>(__TAURI_INVOKE("get_transfer_queue_snapshot")),
+	createTransferTask: (input: TransferCreateInput) => typedError<TransferQueueSnapshot, ConfigError>(__TAURI_INVOKE("create_transfer_task", { input })),
+	cancelTransferTask: (input: TransferTaskInput) => typedError<TransferQueueSnapshot, ConfigError>(__TAURI_INVOKE("cancel_transfer_task", { input })),
+	retryTransferTask: (input: TransferTaskInput) => typedError<TransferQueueSnapshot, ConfigError>(__TAURI_INVOKE("retry_transfer_task", { input })),
+	getWorkspaceLayoutSnapshot: () => typedError<WorkspaceLayoutSnapshot, ConfigError>(__TAURI_INVOKE("get_workspace_layout_snapshot")),
+	workspaceDispatch: (input: WorkspaceDispatchInput) => typedError<WorkspaceLayoutSnapshot, ConfigError>(__TAURI_INVOKE("workspace_dispatch", { input })),
 	listProfiles: () => typedError<ProfileEntry[], ConfigError>(__TAURI_INVOKE("list_profiles")),
 	readProfile: (name: string) => typedError<ProfileConfigDocument, ConfigError>(__TAURI_INVOKE("read_profile", { name })),
 	createProfile: (input: ProfileDocumentInput) => typedError<ProfileEntry, ConfigError>(__TAURI_INVOKE("create_profile", { input })),
@@ -52,6 +68,7 @@ export const commands = {
 	openHostManagerWindow: () => typedError<null, ConfigError>(__TAURI_INVOKE("open_host_manager_window")),
 	openProfileNewDialog: () => typedError<null, ConfigError>(__TAURI_INVOKE("open_profile_new_dialog")),
 	openMainWindow: (route: string | null) => typedError<null, ConfigError>(__TAURI_INVOKE("open_main_window", { route })),
+	openWorkspaceFloatingWindow: (floatingWindowId: string) => typedError<null, ConfigError>(__TAURI_INVOKE("open_workspace_floating_window", { floatingWindowId })),
 	refreshAppMenu: () => typedError<null, ConfigError>(__TAURI_INVOKE("refresh_app_menu")),
 	updateTerminalMenuState: (input: TerminalMenuStateInput) => typedError<null, ConfigError>(__TAURI_INVOKE("update_terminal_menu_state", { input })),
 	watchConfigCommand: () => typedError<null, ConfigError>(__TAURI_INVOKE("watch_config_command")),
@@ -118,6 +135,7 @@ export type ConnectionHostDocument = {
 	name: string,
 	folder: string | null,
 	icon: ConnectionHostIcon | null,
+	files: HostFilesConfig | null,
 	protocol: ConnectionProtocol,
 	local: LocalConnectionConfig | null,
 	ssh: SshConnectionConfig | null,
@@ -169,8 +187,173 @@ export type ExistingTerminalSessionInput = {
 	session_id: string,
 };
 
+export type FileChmodInput = {
+	host_id: string,
+	path: string,
+	mode: string,
+	accept_new_host_key: boolean,
+	update_changed_host_key: boolean,
+	credential: SshCredentialInput | null,
+	save_credential: boolean,
+};
+
+export type FileCreateDirectoryInput = {
+	host_id: string,
+	parent_path: string,
+	name: string,
+	accept_new_host_key: boolean,
+	update_changed_host_key: boolean,
+	credential: SshCredentialInput | null,
+	save_credential: boolean,
+};
+
+export type FileEntry = {
+	name: string,
+	path: string,
+	kind: FileEntryKind,
+	size: string | null,
+	modified_unix_ms: string | null,
+	permissions: string | null,
+	owner: string | null,
+	group: string | null,
+	symlink_target: string | null,
+};
+
+export type FileEntryKind = "file" | "directory" | "symlink" | "other";
+
+export type FileListInput = {
+	host_id: string,
+	path: string | null,
+	accept_new_host_key: boolean,
+	update_changed_host_key: boolean,
+	credential: SshCredentialInput | null,
+	save_credential: boolean,
+};
+
+export type FileListResult = {
+	provider: FileProviderInfo,
+	entries: FileEntry[],
+};
+
+export type FilePathInput = {
+	host_id: string,
+	path: string,
+	accept_new_host_key: boolean,
+	update_changed_host_key: boolean,
+	credential: SshCredentialInput | null,
+	save_credential: boolean,
+};
+
+export type FilePreviewContent = { kind: "text"; text: string } | { kind: "image"; mime: string; data_base64: string } | { kind: "unsupported"; reason: string } | { kind: "too_large"; limit_bytes: number };
+
+export type FilePreviewInput = {
+	host_id: string,
+	path: string,
+	text_limit_bytes: number,
+	image_limit_bytes: number,
+	accept_new_host_key: boolean,
+	update_changed_host_key: boolean,
+	credential: SshCredentialInput | null,
+	save_credential: boolean,
+};
+
+export type FilePreviewResult = {
+	path: string,
+	name: string,
+	entry_kind: FileEntryKind,
+	size: string | null,
+	modified_unix_ms: string | null,
+	permissions: string | null,
+	content: FilePreviewContent,
+};
+
+export type FileProviderCapabilities = {
+	can_read: boolean,
+	can_write: boolean,
+	can_rename: boolean,
+	can_delete: boolean,
+	can_trash: boolean,
+	can_chmod: boolean,
+	can_symlink: boolean,
+	can_watch: boolean,
+	can_search_by_name: boolean,
+	can_search_content: boolean,
+	can_upload_helper: boolean,
+	supports_server_side_copy: boolean,
+	supports_atomic_rename: boolean,
+	supports_metadata_owner_group: boolean,
+};
+
+export type FileProviderInfo = {
+	kind: FileProviderKind,
+	host_id: string,
+	root_path: string,
+	current_path: string,
+	capabilities: FileProviderCapabilities,
+};
+
+export type FileProviderKind = "local" | "sftp";
+
+export type FileRenameInput = {
+	host_id: string,
+	source_path: string,
+	destination_path: string,
+	accept_new_host_key: boolean,
+	update_changed_host_key: boolean,
+	credential: SshCredentialInput | null,
+	save_credential: boolean,
+};
+
+export type FileSearchInput = {
+	host_id: string,
+	root_path: string,
+	query: string,
+	include_hidden: boolean,
+	follow_symlinks: boolean,
+	max_results: number,
+	accept_new_host_key: boolean,
+	update_changed_host_key: boolean,
+	credential: SshCredentialInput | null,
+	save_credential: boolean,
+};
+
+export type FileSearchMatch = {
+	path: string,
+	name: string,
+	kind: FileEntryKind,
+};
+
+export type FileSearchResult = {
+	provider_label: string,
+	root_path: string,
+	query: string,
+	matches: FileSearchMatch[],
+	diagnostics: string[],
+	truncated: boolean,
+};
+
+export type FileTrashInfo = {
+	available: boolean,
+	home_path: string,
+	files_path: string | null,
+	info_path: string | null,
+	reason: string | null,
+};
+
+export type FileTrashInfoInput = {
+	host_id: string,
+	accept_new_host_key: boolean,
+	update_changed_host_key: boolean,
+	credential: SshCredentialInput | null,
+	save_credential: boolean,
+};
+
 export type HostDirsInput = {
 	dirs: string[],
+};
+
+export type HostFilesConfig = {
+	default_path: string | null,
 };
 
 export type LocalConnectionConfig = {
@@ -213,6 +396,20 @@ export type ProfileDocumentInput = {
 export type ProfileEntry = {
 	name: string,
 	path: string,
+};
+
+export type RemoteSearchHelperInfo = {
+	available: boolean,
+	provider_label: string,
+	reason: string | null,
+};
+
+export type RemoteSearchHelperInput = {
+	host_id: string,
+	accept_new_host_key: boolean,
+	update_changed_host_key: boolean,
+	credential: SshCredentialInput | null,
+	save_credential: boolean,
 };
 
 export type SshConnectionConfig = {
@@ -415,6 +612,99 @@ export type TerminalTheme = {
 export type TerminalTransportKind = "local" | "ssh" | "telnet";
 
 export type TerminalTransportState = "resolving" | "connecting" | "verifying_host_key" | "authenticating" | "connected" | "disconnected" | "failed";
+
+export type TransferCreateInput = {
+	source: TransferEndpoint,
+	destination: TransferEndpoint,
+	initiator_workspace_id: string | null,
+	related_workspace_ids: string[],
+};
+
+export type TransferEndpoint = {
+	kind: TransferEndpointKind,
+	provider_kind: FileProviderKind | null,
+	host_id: string | null,
+	path: string,
+};
+
+export type TransferEndpointKind = "local" | "provider";
+
+export type TransferQueueSnapshot = {
+	version: number,
+	tasks: TransferTask[],
+};
+
+export type TransferTask = {
+	id: string,
+	source: TransferEndpoint,
+	destination: TransferEndpoint,
+	initiator_workspace_id: string | null,
+	related_workspace_ids: string[],
+	status: TransferTaskStatus,
+	bytes_total: string | null,
+	bytes_done: string,
+	error: string | null,
+	created_at_unix_ms: string,
+	updated_at_unix_ms: string,
+};
+
+export type TransferTaskInput = {
+	task_id: string,
+};
+
+export type TransferTaskStatus = "queued" | "running" | "failed" | "completed" | "canceled";
+
+export type WorkspaceChangedEvent = {
+	version: number,
+	reason: string,
+	snapshot: WorkspaceLayoutSnapshot,
+};
+
+export type WorkspaceDispatchInput = {
+	expected_version: number,
+	intent: WorkspaceIntent,
+};
+
+export type WorkspaceDockDirection = "row" | "column";
+
+export type WorkspaceDockLayout = { kind: "split"; direction: WorkspaceDockDirection; children: WorkspaceDockLayout[]; ratios: (number | null)[] } | { kind: "group"; id: string; slots: WorkspaceToolSlot[]; active_slot_id: string };
+
+export type WorkspaceDockSide = "left" | "right" | "up" | "down";
+
+export type WorkspaceFloatingWindowState = {
+	id: string,
+	layout: WorkspaceDockLayout,
+};
+
+export type WorkspaceIntent = { kind: "create_workspace"; host_id: string } | { kind: "activate_workspace"; workspace_id: string } | { kind: "rename_workspace"; workspace_id: string; title: string } | { kind: "close_workspace"; workspace_id: string } | { kind: "close_other_workspaces"; workspace_id: string } | { kind: "close_workspaces_to_right"; workspace_id: string } | { kind: "activate_tool_slot"; workspace_id: string; slot_id: string } | { kind: "close_tool_slot"; workspace_id: string; slot_id: string } | { kind: "close_other_tool_slots"; workspace_id: string; slot_id: string } | { kind: "close_tool_slots_to_right"; workspace_id: string; slot_id: string } | { kind: "mirror_tool_tab"; source_tool_tab_id: string; target_workspace_id: string; target_group_id: string } | { kind: "float_tool_slot"; workspace_id: string; slot_id: string } | { kind: "restore_floating_window"; floating_window_id: string } | { kind: "move_tool_slot_to_group"; workspace_id: string; slot_id: string; target_group_id: string } | { kind: "move_tool_slot_to_split"; workspace_id: string; slot_id: string; target_slot_id: string; side: WorkspaceDockSide } | { kind: "split_tool_slot"; workspace_id: string; target_slot_id: string; tool_tab_id: string; side: WorkspaceDockSide };
+
+export type WorkspaceLayoutSnapshot = {
+	version: number,
+	active_workspace_id: string,
+	workspaces: WorkspaceTabState[],
+	tool_tabs: WorkspaceToolTab[],
+	floating_windows: WorkspaceFloatingWindowState[],
+};
+
+export type WorkspaceTabState = {
+	id: string,
+	host_id: string,
+	title: string,
+	owned_tool_tab_ids: string[],
+	layout: WorkspaceDockLayout,
+};
+
+export type WorkspaceToolKind = "files" | "terminal" | "transfers";
+
+export type WorkspaceToolSlot = { kind: "owned"; id: string; tool_tab_id: string } | { kind: "mirror"; id: string; tool_tab_id: string; owner_workspace_id: string } | { kind: "floating_placeholder"; id: string; tool_tab_id: string; floating_window_id: string } | { kind: "closed_source"; id: string; previous_title: string; owner_workspace_title: string };
+
+export type WorkspaceToolTab = {
+	id: string,
+	kind: WorkspaceToolKind,
+	owner_workspace_id: string,
+	host_id: string,
+	title: string,
+};
 
 /* Tauri Specta runtime */
 async function typedError<T, E>(result: Promise<T>): Promise<{ status: "ok"; data: T } | { status: "error"; error: E }> {

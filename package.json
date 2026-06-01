@@ -7,6 +7,7 @@
     "dev": "vite dev",
     "build": "vite build",
     "test": "node --test --import tsx \"src/**/*.test.ts\"",
+    "test:playwright:dock": "node scripts/playwright-dock-smoke.mjs",
     "preview": "vite preview",
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
     "check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",

@@ -37,6 +37,7 @@ pub struct ConnectionHostDocument {
     pub name: String,
     pub folder: Option<String>,
     pub icon: Option<ConnectionHostIcon>,
+    pub files: Option<HostFilesConfig>,
     pub protocol: ConnectionProtocol,
     pub local: Option<LocalConnectionConfig>,
     pub ssh: Option<SshConnectionConfig>,
@@ -51,6 +52,7 @@ impl Default for ConnectionHostDocument {
             name: String::new(),
             folder: None,
             icon: None,
+            files: None,
             protocol: ConnectionProtocol::Local,
             local: None,
             ssh: None,
@@ -122,6 +124,11 @@ pub struct LocalConnectionConfig {
     pub args: Vec<String>,
     pub cwd: Option<String>,
     pub env: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, Default)]
+pub struct HostFilesConfig {
+    pub default_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
@@ -252,6 +259,425 @@ pub struct ConfigKeyPathInput {
     pub target: ConfigDocumentTarget,
     pub profile: Option<String>,
     pub path: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceToolKind {
+    Files,
+    Terminal,
+    Transfers,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceDockDirection {
+    Row,
+    Column,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceDockSide {
+    Left,
+    Right,
+    Up,
+    Down,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WorkspaceToolSlot {
+    Owned {
+        id: String,
+        tool_tab_id: String,
+    },
+    Mirror {
+        id: String,
+        tool_tab_id: String,
+        owner_workspace_id: String,
+    },
+    FloatingPlaceholder {
+        id: String,
+        tool_tab_id: String,
+        floating_window_id: String,
+    },
+    ClosedSource {
+        id: String,
+        previous_title: String,
+        owner_workspace_title: String,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WorkspaceDockLayout {
+    Split {
+        direction: WorkspaceDockDirection,
+        children: Vec<WorkspaceDockLayout>,
+        ratios: Vec<f64>,
+    },
+    Group {
+        id: String,
+        slots: Vec<WorkspaceToolSlot>,
+        active_slot_id: String,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct WorkspaceToolTab {
+    pub id: String,
+    pub kind: WorkspaceToolKind,
+    pub owner_workspace_id: String,
+    pub host_id: String,
+    pub title: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct WorkspaceTabState {
+    pub id: String,
+    pub host_id: String,
+    pub title: String,
+    pub owned_tool_tab_ids: Vec<String>,
+    pub layout: WorkspaceDockLayout,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct WorkspaceFloatingWindowState {
+    pub id: String,
+    pub layout: WorkspaceDockLayout,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct WorkspaceLayoutSnapshot {
+    pub version: u32,
+    pub active_workspace_id: String,
+    pub workspaces: Vec<WorkspaceTabState>,
+    pub tool_tabs: Vec<WorkspaceToolTab>,
+    pub floating_windows: Vec<WorkspaceFloatingWindowState>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct WorkspaceDispatchInput {
+    pub expected_version: u32,
+    pub intent: WorkspaceIntent,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WorkspaceIntent {
+    CreateWorkspace { host_id: String },
+    ActivateWorkspace { workspace_id: String },
+    RenameWorkspace { workspace_id: String, title: String },
+    CloseWorkspace { workspace_id: String },
+    CloseOtherWorkspaces { workspace_id: String },
+    CloseWorkspacesToRight { workspace_id: String },
+    ActivateToolSlot { workspace_id: String, slot_id: String },
+    CloseToolSlot { workspace_id: String, slot_id: String },
+    CloseOtherToolSlots { workspace_id: String, slot_id: String },
+    CloseToolSlotsToRight { workspace_id: String, slot_id: String },
+    MirrorToolTab {
+        source_tool_tab_id: String,
+        target_workspace_id: String,
+        target_group_id: String,
+    },
+    FloatToolSlot { workspace_id: String, slot_id: String },
+    RestoreFloatingWindow { floating_window_id: String },
+    MoveToolSlotToGroup {
+        workspace_id: String,
+        slot_id: String,
+        target_group_id: String,
+    },
+    MoveToolSlotToSplit {
+        workspace_id: String,
+        slot_id: String,
+        target_slot_id: String,
+        side: WorkspaceDockSide,
+    },
+    SplitToolSlot {
+        workspace_id: String,
+        target_slot_id: String,
+        tool_tab_id: String,
+        side: WorkspaceDockSide,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct WorkspaceChangedEvent {
+    pub version: u32,
+    pub reason: String,
+    pub snapshot: WorkspaceLayoutSnapshot,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum FileProviderKind {
+    Local,
+    Sftp,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum FileEntryKind {
+    File,
+    Directory,
+    Symlink,
+    Other,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct FileProviderCapabilities {
+    pub can_read: bool,
+    pub can_write: bool,
+    pub can_rename: bool,
+    pub can_delete: bool,
+    pub can_trash: bool,
+    pub can_chmod: bool,
+    pub can_symlink: bool,
+    pub can_watch: bool,
+    pub can_search_by_name: bool,
+    pub can_search_content: bool,
+    pub can_upload_helper: bool,
+    pub supports_server_side_copy: bool,
+    pub supports_atomic_rename: bool,
+    pub supports_metadata_owner_group: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct FileProviderInfo {
+    pub kind: FileProviderKind,
+    pub host_id: String,
+    pub root_path: String,
+    pub current_path: String,
+    pub capabilities: FileProviderCapabilities,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct FileEntry {
+    pub name: String,
+    pub path: String,
+    pub kind: FileEntryKind,
+    pub size: Option<String>,
+    pub modified_unix_ms: Option<String>,
+    pub permissions: Option<String>,
+    pub owner: Option<String>,
+    pub group: Option<String>,
+    pub symlink_target: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct FileListInput {
+    pub host_id: String,
+    pub path: Option<String>,
+    pub accept_new_host_key: bool,
+    pub update_changed_host_key: bool,
+    pub credential: Option<SshCredentialInput>,
+    pub save_credential: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct FileListResult {
+    pub provider: FileProviderInfo,
+    pub entries: Vec<FileEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct FilePathInput {
+    pub host_id: String,
+    pub path: String,
+    pub accept_new_host_key: bool,
+    pub update_changed_host_key: bool,
+    pub credential: Option<SshCredentialInput>,
+    pub save_credential: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct FileTrashInfoInput {
+    pub host_id: String,
+    pub accept_new_host_key: bool,
+    pub update_changed_host_key: bool,
+    pub credential: Option<SshCredentialInput>,
+    pub save_credential: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct FileTrashInfo {
+    pub available: bool,
+    pub home_path: String,
+    pub files_path: Option<String>,
+    pub info_path: Option<String>,
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct RemoteSearchHelperInput {
+    pub host_id: String,
+    pub accept_new_host_key: bool,
+    pub update_changed_host_key: bool,
+    pub credential: Option<SshCredentialInput>,
+    pub save_credential: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct RemoteSearchHelperInfo {
+    pub available: bool,
+    pub provider_label: String,
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct FileCreateDirectoryInput {
+    pub host_id: String,
+    pub parent_path: String,
+    pub name: String,
+    pub accept_new_host_key: bool,
+    pub update_changed_host_key: bool,
+    pub credential: Option<SshCredentialInput>,
+    pub save_credential: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct FileRenameInput {
+    pub host_id: String,
+    pub source_path: String,
+    pub destination_path: String,
+    pub accept_new_host_key: bool,
+    pub update_changed_host_key: bool,
+    pub credential: Option<SshCredentialInput>,
+    pub save_credential: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct FileChmodInput {
+    pub host_id: String,
+    pub path: String,
+    pub mode: String,
+    pub accept_new_host_key: bool,
+    pub update_changed_host_key: bool,
+    pub credential: Option<SshCredentialInput>,
+    pub save_credential: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct FilePreviewInput {
+    pub host_id: String,
+    pub path: String,
+    pub text_limit_bytes: u32,
+    pub image_limit_bytes: u32,
+    pub accept_new_host_key: bool,
+    pub update_changed_host_key: bool,
+    pub credential: Option<SshCredentialInput>,
+    pub save_credential: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum FilePreviewContent {
+    Text { text: String },
+    Image { mime: String, data_base64: String },
+    Unsupported { reason: String },
+    TooLarge { limit_bytes: u32 },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct FilePreviewResult {
+    pub path: String,
+    pub name: String,
+    pub entry_kind: FileEntryKind,
+    pub size: Option<String>,
+    pub modified_unix_ms: Option<String>,
+    pub permissions: Option<String>,
+    pub content: FilePreviewContent,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct FileSearchInput {
+    pub host_id: String,
+    pub root_path: String,
+    pub query: String,
+    pub include_hidden: bool,
+    pub follow_symlinks: bool,
+    pub max_results: u32,
+    pub accept_new_host_key: bool,
+    pub update_changed_host_key: bool,
+    pub credential: Option<SshCredentialInput>,
+    pub save_credential: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct FileSearchMatch {
+    pub path: String,
+    pub name: String,
+    pub kind: FileEntryKind,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct FileSearchResult {
+    pub provider_label: String,
+    pub root_path: String,
+    pub query: String,
+    pub matches: Vec<FileSearchMatch>,
+    pub diagnostics: Vec<String>,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum TransferEndpointKind {
+    Local,
+    Provider,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct TransferEndpoint {
+    pub kind: TransferEndpointKind,
+    pub provider_kind: Option<FileProviderKind>,
+    pub host_id: Option<String>,
+    pub path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum TransferTaskStatus {
+    Queued,
+    Running,
+    Failed,
+    Completed,
+    Canceled,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct TransferTask {
+    pub id: String,
+    pub source: TransferEndpoint,
+    pub destination: TransferEndpoint,
+    pub initiator_workspace_id: Option<String>,
+    pub related_workspace_ids: Vec<String>,
+    pub status: TransferTaskStatus,
+    pub bytes_total: Option<String>,
+    pub bytes_done: String,
+    pub error: Option<String>,
+    pub created_at_unix_ms: String,
+    pub updated_at_unix_ms: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct TransferQueueSnapshot {
+    pub version: u32,
+    pub tasks: Vec<TransferTask>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct TransferCreateInput {
+    pub source: TransferEndpoint,
+    pub destination: TransferEndpoint,
+    pub initiator_workspace_id: Option<String>,
+    pub related_workspace_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct TransferTaskInput {
+    pub task_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
