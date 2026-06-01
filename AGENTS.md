@@ -58,7 +58,13 @@ The default goal is a native-feeling experience on each platform, with a polishe
 - Run development, check, test, and build commands inside the Nix devShell. Prefer `nix develop -c sh -lc '<command>'` unless already inside the devShell.
 - Keep async boundaries clear and errors visible.
 - Add logs where they help diagnose lifecycle, platform, IPC, storage, or external-service behavior, and choose an appropriate level: `trace`/`debug` for routine diagnostics, `info` for meaningful state changes, `warn` for recoverable anomalies, and `error` for failures that require attention.
+- Every test file must live under `tests/`, with a file name that reflects the behavior under test.
+- Every test file must start with an English comment that describes the test content, including the feature under test, the operation performed, and the expected result.
+- Tests must not hard-code repository-local absolute paths, generated binary paths, or machine-specific tool paths. Use environment variables, package scripts, or test fixtures to provide paths.
+- Tests must not contain platform-specific implementation details such as directly executing `.exe` files, invoking platform-only process managers, or branching on OS-specific process behavior unless the test is explicitly scoped to that platform.
+- Use Vitest for pure frontend/domain logic that does not require a real Tauri runtime. Use Rust tests for pure Rust-side logic, services, validation, parsing, persistence, and command helpers that do not require a real Tauri WebView or native window. Use Tauri end-to-end tests for Tauri, WebView, PTY, terminal, windowing, and native integration behavior. Do not add tests outside these three categories.
 - Add tests or checks when behavior changes in a way that could regress.
+- After every content change, run every test that can run in the current environment to ensure existing behavior was not broken. If a previously passing test suddenly fails, analyze the failure carefully before changing code or dismissing the result.
 - After finishing code changes, first run `pnpm check` and `cargo check` to validate frontend and backend code. Only after both pass should you attempt build checks, and all checks must pass before considering the work complete.
 - If Tauri command-related types change, regenerate Specta bindings only by running the Tauri `dev` flow in debug mode, for example `pnpm tauri dev` or the repo's equivalent debug dev command. `dev` does not stop automatically, so end it manually after bindings are generated. Never manually edit generated bindings, generated command helper names, or generated TypeScript type shapes.
 - Do not ship broad architectural changes without strong justification.

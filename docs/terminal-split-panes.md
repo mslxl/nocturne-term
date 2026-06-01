@@ -227,7 +227,7 @@ Closing terminal find clears xterm decorations/selection and changes focus while
 
 ## Validation
 
-Unit tests should cover:
+Vitest tests should cover pure terminal and Dock logic that can run without a real Tauri runtime:
 
 - terminal size normalization
 - terminal title derivation with aliases
@@ -235,7 +235,7 @@ Unit tests should cover:
 - command registry mapping for terminal and Dock split commands
 - close confirmation decisions
 
-Playwright/Tauri validation should cover:
+Tauri end-to-end tests should cover behavior that requires the real Tauri app, WebView, PTY, native input, or window lifecycle:
 
 - creating a default Workspace with Terminal ToolTab
 - splitting a Terminal ToolTab through Dock split
