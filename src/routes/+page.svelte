@@ -30,7 +30,6 @@
   import { buildHostFolderTree, hostFolderLabel, hostHasBlockingDiagnostics, hostSubtitle, type HostFolderTreeNode } from "$lib/hosts/model";
   import { hasTauriRuntime } from "$lib/tauri/runtime";
   import TerminalPaneTree from "$lib/terminal/components/TerminalPaneTree.svelte";
-  import TerminalTabBar from "$lib/terminal/components/TerminalTabBar.svelte";
   import WorkspaceTabBar from "$lib/workspace/components/WorkspaceTabBar.svelte";
   import { createWorkspaceStore } from "$lib/workspace/state.svelte";
   import { unwrapCommand } from "$lib/terminal/commands";
@@ -3783,23 +3782,7 @@
         <span>Terminal is visible in its owner workspace.</span>
       </div>
     {:else}
-      <section class:left-tabs={tabsOnLeft} class:vertical={isVertical} class="terminal-tool-area" aria-label="Terminal ToolTabs">
-        {#if !isVertical || tabsOnLeft}
-          <TerminalTabBar
-            {tabs}
-            {activeId}
-            placement={tabBarOrientation}
-            integratedTitlebar={false}
-            showHostIcons={false}
-            {hostIconById}
-            {activateTab}
-            {closeTab}
-            {newSession}
-            openContextMenu={tabContextMenu}
-            {startTabPointerDrag}
-          />
-        {/if}
-
+      <section class="terminal-tool-area" aria-label="Terminal ToolTab">
         <section class="content" aria-label="Terminal content">
           {#if settingsError || workspaceStore.error}
             <div class="placeholder error-state">
@@ -3831,22 +3814,6 @@
             {/each}
           {/if}
         </section>
-
-        {#if isVertical && !tabsOnLeft}
-          <TerminalTabBar
-            {tabs}
-            {activeId}
-            placement={tabBarOrientation}
-            integratedTitlebar={false}
-            showHostIcons={false}
-            {hostIconById}
-            {activateTab}
-            {closeTab}
-            {newSession}
-            openContextMenu={tabContextMenu}
-            {startTabPointerDrag}
-          />
-        {/if}
       </section>
     {/if}
   {/if}
@@ -4133,16 +4100,7 @@
     min-width: 0;
     min-height: 0;
     display: grid;
-    grid-template-rows: 40px minmax(0, 1fr);
-  }
-
-  .terminal-tool-area.vertical {
-    grid-template-columns: minmax(0, 1fr) 208px;
     grid-template-rows: minmax(0, 1fr);
-  }
-
-  .terminal-tool-area.vertical.left-tabs {
-    grid-template-columns: 208px minmax(0, 1fr);
   }
 
   .content {
@@ -4585,14 +4543,6 @@
   }
 
   @media (max-width: 720px) {
-    .terminal-tool-area.vertical {
-      grid-template-columns: minmax(0, 1fr) 160px;
-    }
-
-    .terminal-tool-area.vertical.left-tabs {
-      grid-template-columns: 160px minmax(0, 1fr);
-    }
-
     .workspace.vertical .terminal-measure-host {
       inset: 40px 160px 0 0;
     }

@@ -30,7 +30,9 @@ src/lib/workspace/dock/
   components/
 ```
 
-Pure layout operations and hit testing must have focused unit tests. Browser and Tauri interaction behavior must be covered with Playwright where practical.
+Pure layout operations and hit testing must have focused Vitest coverage. Use Vitest for deterministic TypeScript/Svelte state, model operations, hit-testing math, validation, and persistence serialization that do not require a real Tauri runtime.
+
+Use Tauri end-to-end tests for behavior that depends on the real desktop shell: WebView rendering, native pointer/keyboard dispatch, Tauri window lifecycle, floating windows, persisted restore across app windows, or IPC with Rust-owned state.
 
 ## Authority And State
 
@@ -168,7 +170,7 @@ Follow-up work should complete floating-window-internal multi-ToolTab drag compo
 
 ## Tests
 
-Unit tests should cover:
+Vitest tests should cover:
 
 - split insertion
 - ratio normalization
@@ -182,7 +184,7 @@ Unit tests should cover:
 - close others and close to the right
 - invalid layout rejection
 
-Playwright/Tauri validation should cover:
+Tauri end-to-end tests should cover:
 
 - drag to split targets
 - drag to another workspace creates a mirror
