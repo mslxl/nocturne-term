@@ -156,6 +156,15 @@ The terminal tab bar supports:
 
 The legacy value `vertical` is accepted by Rust and treated as `vertical_right`.
 
+Host icons in terminal tabs are controlled by:
+
+```toml
+[terminal]
+show_host_icons_in_tabs = false
+```
+
+The setting defaults to `false`. When enabled, tab items show the saved-host icon for the active pane in that tab; tabs without host metadata stay text-only. Split-pane title bars do not show host icons.
+
 Right-clicking the tab bar opens a native Tauri popup menu, not a WebView-drawn menu. This preserves native context-menu behavior and avoids browser-style chrome. Menu selections update the active settings target: profile config when the active profile already overrides `terminal.tab_bar_orientation`, otherwise main config.
 
 ## Terminal Close Confirmation

@@ -7,11 +7,21 @@
   import { OverlayScrollbarsComponent } from "overlayscrollbars-svelte";
   import "overlayscrollbars/overlayscrollbars.css";
   import "@xterm/xterm/css/xterm.css";
-  import { commands, type AppConfigSnapshot, type PaneMenuEvent, type TabBarOrientation, type TerminalSessionInfo, type TerminalSettings } from "$lib/bindings";
+  import {
+    commands,
+    type AppConfigSnapshot,
+    type ConnectionHostIcon,
+    type PaneMenuEvent,
+    type TabBarOrientation,
+    type TerminalSessionInfo,
+    type TerminalSettings,
+  } from "$lib/bindings";
   import { appLanguageFromConfig, appThemeFromConfig, applyAppPreferences, booleanValue, configString, readValue, resolveTheme, writeValue } from "$lib/config/document";
   import CommandPalette from "$lib/command-palette/CommandPalette.svelte";
   import { staticPaletteCommands } from "$lib/command-palette/commands";
   import { localizeCommand, searchPaletteItems, type PaletteItem, type PaletteSearchResult } from "$lib/command-palette/search";
+  import HostIcon from "$lib/hosts/HostIcon.svelte";
+  import { resolveHostIcon } from "$lib/hosts/icons";
   import { buildHostFolderTree, hostFolderLabel, hostHasBlockingDiagnostics, hostSubtitle, type HostFolderTreeNode } from "$lib/hosts/model";
   import { hasTauriRuntime } from "$lib/tauri/runtime";
   import TerminalPaneTree from "$lib/terminal/components/TerminalPaneTree.svelte";
@@ -254,6 +264,7 @@
   let hostPickerSubmenus = $state<HostPickerMenu[]>([]);
   let secondaryClickOpensDefault = $state(false);
   let macosIntegratedTitlebar = $state(false);
+  let showHostIconsInTabs = $state(false);
   let pendingSshCredential = $state<PendingSshCredential | null>(null);
   let hostSessionRetryByPaneId = $state<Record<string, HostSessionRetry>>({});
   let commandPaletteLastFocus: HTMLElement | null = null;
@@ -290,6 +301,7 @@
   let isVertical = $derived(tabBarOrientation !== "horizontal");
   let tabsOnLeft = $derived(tabBarOrientation === "vertical_left");
   let integratedTitlebar = $derived(isMacPlatform() && macosIntegratedTitlebar && !isVertical);
+  let hostIconById = $derived(hostIconMap(lastConfigSnapshot));
   let paletteResults = $derived(
     searchPaletteItems(buildPaletteItems(), commandPaletteQuery, {
       language: language(),
@@ -320,6 +332,7 @@
     keybindings = readKeybindingMap(snapshot.effective_config.root, navigator.platform.toLowerCase().includes("mac"));
     secondaryClickOpensDefault = booleanValue(readValue(snapshot.effective_config.root, ["session", "secondary_click_opens_default"])) ?? false;
     macosIntegratedTitlebar = booleanValue(readValue(snapshot.effective_config.root, ["ui", "macos_integrated_titlebar"])) ?? true;
+    showHostIconsInTabs = booleanValue(readValue(snapshot.effective_config.root, ["terminal", "show_host_icons_in_tabs"])) ?? false;
     const next = await unwrapCommand(commands.getTerminalSettingsForTheme({ resolved_theme: appTheme }));
     settings = next;
     tabBarOrientation = next.tab_bar_orientation;
@@ -338,6 +351,10 @@
 
   function isMacPlatform() {
     return navigator.platform.toLowerCase().includes("mac");
+  }
+
+  function hostIconMap(snapshot: AppConfigSnapshot | null): Map<string, ConnectionHostIcon> {
+    return new Map((snapshot?.hosts ?? []).map((host) => [host.id, resolveHostIcon(host)]));
   }
 
   function measureNewTerminal(cwd: string | null = null) {
@@ -646,6 +663,7 @@
       const defaultHostId = lastConfigSnapshot?.root.default_host ?? "";
       const info = await createHostPaneSession(defaultHostId, cwd);
       const nextPane = createTerminalPane(info, tab.id);
+      nextPane.connectionHostId = defaultHostId;
       tab.panes = [...tab.panes, nextPane];
       tab.tree = splitPane(tab.tree, paneId, nextPane.id, side);
       tab.activePaneId = nextPane.id;
@@ -1989,10 +2007,11 @@
         kind: "connection-host",
         title: `${host.document.protocol === "local" ? "Start" : "Connect"}: ${host.document.name}`,
         scope: host.source === "open_ssh_config" ? folder : `${t("hosts")} / ${folder}`,
+        icon: resolveHostIcon(host),
         keywords: [
           host.document.name,
           folder,
-          host.document.icon_pack ?? "",
+          host.document.icon?.type === "catalog" ? host.document.icon.name : "",
           host.document.protocol,
           local?.command ?? "",
           local?.cwd ?? "",
@@ -2758,6 +2777,8 @@
       {activeId}
       placement={tabBarOrientation}
       {integratedTitlebar}
+      showHostIcons={showHostIconsInTabs}
+      {hostIconById}
       {activateTab}
       {closeTab}
       {newSession}
@@ -2806,6 +2827,8 @@
       {activeId}
       placement={tabBarOrientation}
       {integratedTitlebar}
+      showHostIcons={showHostIconsInTabs}
+      {hostIconById}
       {activateTab}
       {closeTab}
       {newSession}
@@ -2842,6 +2865,7 @@
         <div class="connection-picker-content">
           {#each hostPickerGroups().hosts as host}
             <button type="button" disabled={hostHasBlockingDiagnostics(host)} onclick={() => void runHostPickerHost(host.id)}>
+              <HostIcon icon={resolveHostIcon(host)} />
               <span>{host.document.name}</span>
               <small>{hostSubtitle(host)}</small>
             </button>
@@ -2884,6 +2908,7 @@
           <div class="connection-picker-content">
             {#each menu.node.hosts as host}
               <button type="button" disabled={hostHasBlockingDiagnostics(host)} onclick={() => void runHostPickerHost(host.id)}>
+                <HostIcon icon={resolveHostIcon(host)} />
                 <span>{host.document.name}</span>
                 <small>{hostSubtitle(host)}</small>
               </button>
@@ -3164,7 +3189,9 @@
     min-width: 0;
     min-height: 42px;
     display: grid;
-    gap: 2px;
+    grid-template-columns: 20px minmax(0, 1fr);
+    column-gap: 7px;
+    row-gap: 2px;
     border: 0;
     border-radius: 6px;
     padding: 6px 9px;
@@ -3190,6 +3217,15 @@
     position: relative;
     grid-template-columns: minmax(0, 1fr) auto;
     padding-right: 24px;
+  }
+
+  .connection-picker button > :global(.host-icon) {
+    grid-row: 1 / span 2;
+    align-self: center;
+  }
+
+  .connection-picker .manager-row {
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .connection-picker .folder-row em {

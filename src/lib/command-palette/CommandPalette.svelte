@@ -1,6 +1,7 @@
 <script lang="ts">
   import { OverlayScrollbarsComponent } from "overlayscrollbars-svelte";
   import "overlayscrollbars/overlayscrollbars.css";
+  import HostIcon from "$lib/hosts/HostIcon.svelte";
   import type { PaletteSearchResult } from "./search";
 
   type Props = {
@@ -104,7 +105,12 @@
             if (!result.disabledReason) onRun(result);
           }}
         >
-          <span class="title">{result.title}</span>
+          <span class:with-icon={!!result.icon} class="result-main">
+            {#if result.icon}
+              <HostIcon icon={result.icon} />
+            {/if}
+            <span class="title">{result.title}</span>
+          </span>
           <span class="scope">{result.disabledReason ?? result.scope}</span>
           {#if result.shortcut}
             <kbd>{result.shortcut}</kbd>
@@ -179,6 +185,21 @@
     color: inherit;
     font: inherit;
     text-align: left;
+  }
+
+  .result-main {
+    min-width: 0;
+    display: grid;
+    gap: 8px;
+    align-items: center;
+  }
+
+  .result-main.with-icon {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .result-main:not(.with-icon) {
+    grid-template-columns: minmax(0, 1fr);
   }
 
   button.selected {

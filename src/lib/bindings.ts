@@ -117,7 +117,7 @@ export type ConnectionHostDocument = {
 	id: string,
 	name: string,
 	folder: string | null,
-	icon_pack: string | null,
+	icon: ConnectionHostIcon | null,
 	protocol: ConnectionProtocol,
 	local: LocalConnectionConfig | null,
 	ssh: SshConnectionConfig | null,
@@ -139,6 +139,8 @@ export type ConnectionHostEntry = {
 	document: ConnectionHostDocument,
 	diagnostics: ConnectionHostDiagnostic[],
 };
+
+export type ConnectionHostIcon = { type: "catalog"; name: string } | { type: "image"; mime: string; data_base64: string } | { type: "svg"; svg: string };
 
 export type ConnectionHostSource = "virtual" | "user" | "open_ssh_config";
 

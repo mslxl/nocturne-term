@@ -20,7 +20,7 @@ use crate::{
     types::{
         AppConfigSnapshot, ConfigDocumentTarget, ConfigKeyPathInput, ConfigRootInfo, ConfigTable,
         ConfigValue, ConnectionDiagnosticSeverity, ConnectionHostDiagnostic,
-        ConnectionHostDocument, ConnectionHostDocumentInput, ConnectionHostEntry,
+        ConnectionHostDocument, ConnectionHostDocumentInput, ConnectionHostEntry, ConnectionHostIcon,
         ConnectionHostSource, EffectiveConfigDocument, HostDirsInput, LocalConnectionConfig,
         MainConfigDocument, ProfileConfigDocument, ProfileDocumentInput, ProfileEntry,
         SshConnectionConfig, TabBarOrientation,
@@ -38,6 +38,7 @@ const DEFAULT_HOSTS_DIR: &str = "hosts";
 const DEFAULT_PROFILE_NAME: &str = "default";
 const KNOWN_HOSTS_FILE: &str = "known-hosts.toml";
 const OPENSSH_INCLUDE_LIMIT: usize = 16;
+const CUSTOM_HOST_ICON_MAX_BYTES: usize = 256 * 1024;
 pub(crate) const DEFAULT_LOCAL_HOST_ID: &str = "00000000-0000-0000-0000-000000000001";
 
 #[derive(Default)]
@@ -777,7 +778,9 @@ fn default_local_host_document() -> ConnectionHostDocument {
         id: DEFAULT_LOCAL_HOST_ID.to_string(),
         name: "Local Shell".to_string(),
         folder: None,
-        icon_pack: Some("shell".to_string()),
+        icon: Some(ConnectionHostIcon::Catalog {
+            name: "lucide:terminal".to_string(),
+        }),
         protocol: crate::types::ConnectionProtocol::Local,
         local: Some(LocalConnectionConfig::default()),
         ssh: None,
@@ -808,8 +811,8 @@ fn validate_connection_host_document(document: &ConnectionHostDocument) -> Resul
     if document.name.trim().is_empty() {
         return Err(invalid_error("connection host name cannot be empty"));
     }
-    if matches!(document.icon_pack.as_deref(), Some(icon_pack) if icon_pack.trim().is_empty()) {
-        return Err(invalid_error("connection host icon pack cannot be empty"));
+    if let Some(icon) = &document.icon {
+        validate_connection_host_icon(icon)?;
     }
     match document.protocol {
         crate::types::ConnectionProtocol::Local => {
@@ -841,6 +844,82 @@ fn validate_connection_host_document(document: &ConnectionHostDocument) -> Resul
             Ok(())
         }
     }
+}
+
+fn validate_connection_host_icon(icon: &ConnectionHostIcon) -> Result<()> {
+    match icon {
+        ConnectionHostIcon::Catalog { name } => {
+            let trimmed = name.trim();
+            if trimmed.is_empty() {
+                return Err(invalid_error("connection host catalog icon name cannot be empty"));
+            }
+            if !trimmed.contains(':') {
+                return Err(invalid_error(
+                    "connection host catalog icon name must include a collection prefix",
+                ));
+            }
+            Ok(())
+        }
+        ConnectionHostIcon::Image { mime, data_base64 } => {
+            let mime = mime.trim();
+            if !matches!(mime, "image/png" | "image/jpeg" | "image/webp") {
+                return Err(invalid_error(
+                    "connection host image icon MIME must be image/png, image/jpeg, or image/webp",
+                ));
+            }
+            if data_base64.trim().is_empty() {
+                return Err(invalid_error("connection host image icon data cannot be empty"));
+            }
+            let decoded = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, data_base64)
+                .map_err(|_| invalid_error("connection host image icon data must be base64"))?;
+            if decoded.len() > CUSTOM_HOST_ICON_MAX_BYTES {
+                return Err(invalid_error(format!(
+                    "connection host image icon must be at most {} bytes",
+                    CUSTOM_HOST_ICON_MAX_BYTES
+                )));
+            }
+            Ok(())
+        }
+        ConnectionHostIcon::Svg { svg } => validate_connection_host_svg_icon(svg),
+    }
+}
+
+fn validate_connection_host_svg_icon(svg: &str) -> Result<()> {
+    let trimmed = svg.trim();
+    if trimmed.is_empty() {
+        return Err(invalid_error("connection host SVG icon cannot be empty"));
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    if !lower.contains("<svg") {
+        return Err(invalid_error("connection host SVG icon must contain an svg element"));
+    }
+    if lower.contains("<script")
+        || lower.contains("<foreignobject")
+        || lower.contains("javascript:")
+        || lower.contains("data:text/html")
+        || lower.contains("http://")
+        || lower.contains("https://")
+    {
+        return Err(invalid_error(
+            "connection host SVG icon contains unsupported active or external content",
+        ));
+    }
+    for attribute in [
+        " onload=",
+        " onclick=",
+        " onerror=",
+        " onmouseover=",
+        " onfocus=",
+        " onbegin=",
+        " onend=",
+    ] {
+        if lower.contains(attribute) {
+            return Err(invalid_error(
+                "connection host SVG icon contains unsupported event attributes",
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn validate_local_config(config: &LocalConnectionConfig) -> Result<()> {
@@ -1430,7 +1509,9 @@ fn parsed_to_openssh_hosts(parsed: ParsedOpenSshConfig, path: &Path) -> Vec<Conn
                     id,
                     name: pattern,
                     folder: Some(folder.clone()),
-                    icon_pack: Some("ssh".to_string()),
+                    icon: Some(ConnectionHostIcon::Catalog {
+                        name: "devicon:ssh".to_string(),
+                    }),
                     protocol: crate::types::ConnectionProtocol::Ssh,
                     local: None,
                     ssh: Some(SshConnectionConfig {
@@ -2440,7 +2521,9 @@ mod tests {
             id: id.to_string(),
             name: "Production API".to_string(),
             folder: Some("Production".to_string()),
-            icon_pack: Some("server".to_string()),
+            icon: Some(ConnectionHostIcon::Catalog {
+                name: "devicon:amazonwebservices".to_string(),
+            }),
             protocol: ConnectionProtocol::Ssh,
             local: None,
             ssh: Some(SshConnectionConfig {
@@ -2463,7 +2546,10 @@ mod tests {
         assert_eq!(read.name, "Production API");
         assert_eq!(read.folder, None);
         assert!(!text.contains("folder"));
-        assert_eq!(read.icon_pack.as_deref(), Some("server"));
+        assert!(matches!(
+            read.icon,
+            Some(ConnectionHostIcon::Catalog { ref name }) if name == "devicon:amazonwebservices"
+        ));
         assert_eq!(read.ssh.expect("ssh").hostname, "prod.example.com");
     }
 
@@ -2485,7 +2571,9 @@ mod tests {
             id: id.to_string(),
             name: "Nested".to_string(),
             folder: Some("ignored".to_string()),
-            icon_pack: Some("server".to_string()),
+            icon: Some(ConnectionHostIcon::Catalog {
+                name: "lucide:server".to_string(),
+            }),
             protocol: ConnectionProtocol::Ssh,
             local: None,
             ssh: Some(SshConnectionConfig {
@@ -2537,7 +2625,7 @@ mod tests {
             id: "018f6eb3-6f91-7410-bc43-f927b2236d94".to_string(),
             name: "Router".to_string(),
             folder: None,
-            icon_pack: None,
+            icon: None,
             protocol: ConnectionProtocol::Telnet,
             local: None,
             ssh: None,
@@ -2548,6 +2636,49 @@ mod tests {
             validate_connection_host_document(&document).expect_err("missing telnet config");
 
         assert!(format!("{error}").contains("telnet connection host requires"));
+    }
+
+    #[test]
+    fn connection_host_validation_rejects_unsafe_svg_icons() {
+        let document = ConnectionHostDocument {
+            version: 1,
+            id: "018f6eb3-6f91-7410-bc43-f927b2236d94".to_string(),
+            name: "Unsafe".to_string(),
+            folder: None,
+            icon: Some(ConnectionHostIcon::Svg {
+                svg: r#"<svg onload="alert(1)"></svg>"#.to_string(),
+            }),
+            protocol: ConnectionProtocol::Local,
+            local: Some(LocalConnectionConfig::default()),
+            ssh: None,
+            telnet: None,
+        };
+
+        let error = validate_connection_host_document(&document).expect_err("unsafe SVG");
+
+        assert!(format!("{error}").contains("event attributes"));
+    }
+
+    #[test]
+    fn connection_host_validation_rejects_invalid_image_icon_base64() {
+        let document = ConnectionHostDocument {
+            version: 1,
+            id: "018f6eb3-6f91-7410-bc43-f927b2236d94".to_string(),
+            name: "Invalid Image".to_string(),
+            folder: None,
+            icon: Some(ConnectionHostIcon::Image {
+                mime: "image/png".to_string(),
+                data_base64: "not base64".to_string(),
+            }),
+            protocol: ConnectionProtocol::Local,
+            local: Some(LocalConnectionConfig::default()),
+            ssh: None,
+            telnet: None,
+        };
+
+        let error = validate_connection_host_document(&document).expect_err("invalid base64");
+
+        assert!(format!("{error}").contains("must be base64"));
     }
 
     #[test]
@@ -2568,7 +2699,9 @@ mod tests {
             id: id.to_string(),
             name: "A".to_string(),
             folder: Some("Team A".to_string()),
-            icon_pack: Some("server".to_string()),
+            icon: Some(ConnectionHostIcon::Catalog {
+                name: "lucide:server".to_string(),
+            }),
             protocol: ConnectionProtocol::Ssh,
             local: None,
             ssh: Some(SshConnectionConfig {
@@ -2587,7 +2720,9 @@ mod tests {
             id: id.to_string(),
             name: "B".to_string(),
             folder: Some("Routers".to_string()),
-            icon_pack: Some("network".to_string()),
+            icon: Some(ConnectionHostIcon::Catalog {
+                name: "lucide:network".to_string(),
+            }),
             protocol: ConnectionProtocol::Telnet,
             local: None,
             ssh: None,
@@ -2669,7 +2804,10 @@ mod tests {
         assert_eq!(ssh.username.as_deref(), Some("deploy"));
         assert_eq!(ssh.port, 2200);
         assert_eq!(prod.document.folder.as_deref(), Some("config"));
-        assert_eq!(prod.document.icon_pack.as_deref(), Some("ssh"));
+        assert!(matches!(
+            prod.document.icon,
+            Some(ConnectionHostIcon::Catalog { ref name }) if name == "devicon:ssh"
+        ));
         let expected_identity = expand_home("~/.ssh/prod");
         assert_eq!(
             ssh.identity_file.as_deref(),

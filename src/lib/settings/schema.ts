@@ -246,6 +246,17 @@ export const settingsSchema: SettingDefinition[] = [
     get: (root) => booleanValue(valueAt(root, ["terminal", "confirm_close"])) ?? true,
     toConfigValue: (value) => configBoolean(Boolean(value)),
   },
+  {
+    key: "terminal.show_host_icons_in_tabs",
+    category: "terminal",
+    label: "showHostIconsInTabs",
+    path: ["terminal", "show_host_icons_in_tabs"],
+    kind: "boolean",
+    defaultValue: false,
+    help: "showHostIconsInTabsHelp",
+    get: (root) => booleanValue(valueAt(root, ["terminal", "show_host_icons_in_tabs"])) ?? false,
+    toConfigValue: (value) => configBoolean(Boolean(value)),
+  },
   ...(["top", "right", "bottom", "left"] as const).map((edge) => ({
     key: `terminal.padding.${edge}`,
     category: "terminal" as const,

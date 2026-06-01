@@ -36,7 +36,7 @@ pub struct ConnectionHostDocument {
     pub id: String,
     pub name: String,
     pub folder: Option<String>,
-    pub icon_pack: Option<String>,
+    pub icon: Option<ConnectionHostIcon>,
     pub protocol: ConnectionProtocol,
     pub local: Option<LocalConnectionConfig>,
     pub ssh: Option<SshConnectionConfig>,
@@ -50,13 +50,21 @@ impl Default for ConnectionHostDocument {
             id: String::new(),
             name: String::new(),
             folder: None,
-            icon_pack: None,
+            icon: None,
             protocol: ConnectionProtocol::Local,
             local: None,
             ssh: None,
             telnet: None,
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ConnectionHostIcon {
+    Catalog { name: String },
+    Image { mime: String, data_base64: String },
+    Svg { svg: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type, Default)]

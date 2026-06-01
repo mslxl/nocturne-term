@@ -1,5 +1,6 @@
 <script lang="ts">
-  import type { TabBarOrientation } from "$lib/bindings";
+  import type { ConnectionHostIcon, TabBarOrientation } from "$lib/bindings";
+  import HostIcon from "$lib/hosts/HostIcon.svelte";
   import type { TerminalTab } from "$lib/terminal/tabs";
 
   type Props = {
@@ -7,6 +8,8 @@
     activeId: string;
     placement: TabBarOrientation;
     integratedTitlebar?: boolean;
+    showHostIcons?: boolean;
+    hostIconById?: Map<string, ConnectionHostIcon>;
     activateTab: (id: string) => void | Promise<void>;
     closeTab: (id: string) => void | Promise<void>;
     newSession: () => void | Promise<void>;
@@ -21,6 +24,8 @@
     activeId,
     placement,
     integratedTitlebar = false,
+    showHostIcons = false,
+    hostIconById = new Map(),
     activateTab,
     closeTab,
     newSession,
@@ -36,6 +41,11 @@
     const pane = tab.panes.find((item) => item.id === tab.activePaneId);
     if (!pane) throw new Error(`active pane ${tab.activePaneId} not found in tab ${tab.id}`);
     return pane;
+  }
+
+  function hostIconForPane(connectionHostId: string): ConnectionHostIcon | null {
+    if (!showHostIcons || !connectionHostId) return null;
+    return hostIconById.get(connectionHostId) ?? null;
   }
 
   function close(event: MouseEvent, id: string) {
@@ -79,6 +89,7 @@
   <div class="tabs">
     {#each tabs as tab (tab.id)}
       {@const pane = activePane(tab)}
+      {@const hostIcon = hostIconForPane(pane.connectionHostId)}
       <div
         class:active={tab.id === activeId}
         class:error={pane.status === "error"}
@@ -95,8 +106,13 @@
           onpointerdown={(event) => pointerDragStart(event, tab.id)}
           onclick={(event) => activate(event, tab.id)}
         >
-          <span>{tab.title}</span>
-          <small>{pane.command}</small>
+          {#if hostIcon}
+            <HostIcon icon={hostIcon} size="small" title={tab.title} />
+          {/if}
+          <span class="tab-copy">
+            <span>{tab.title}</span>
+            <small>{pane.command}</small>
+          </span>
         </button>
         <button
           class="close-tab"
@@ -224,11 +240,15 @@
   .tab-activate {
     min-width: 0;
     height: 39px;
-    display: grid;
-    align-content: center;
+    display: flex;
+    align-items: center;
     gap: 1px;
     padding: 4px 4px 4px 12px;
     text-align: left;
+  }
+
+  .tab-activate > :global(.host-icon) {
+    margin-right: 7px;
   }
 
   .integrated-titlebar .tab-activate {
@@ -237,7 +257,18 @@
     padding: 2px 4px 2px 10px;
   }
 
-  .tab-activate span,
+  .tab-copy {
+    min-width: 0;
+    display: grid;
+    align-content: center;
+    gap: 1px;
+  }
+
+  .integrated-titlebar .tab-copy {
+    gap: 0;
+  }
+
+  .tab-copy span,
   .tab-activate small {
     min-width: 0;
     overflow: hidden;
@@ -245,12 +276,12 @@
     white-space: nowrap;
   }
 
-  .tab-activate span {
+  .tab-copy span {
     font-size: 12px;
     line-height: 1.1;
   }
 
-  .integrated-titlebar .tab-activate span {
+  .integrated-titlebar .tab-copy span {
     line-height: 14px;
   }
 
