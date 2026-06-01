@@ -57,6 +57,7 @@ The default goal is a native-feeling experience on each platform, with a polishe
 - Follow the repository's existing patterns unless they are clearly wrong for the task.
 - Run development, check, test, and build commands inside the Nix devShell. Prefer `nix develop -c sh -lc '<command>'` unless already inside the devShell.
 - Keep async boundaries clear and errors visible.
+- Add logs where they help diagnose lifecycle, platform, IPC, storage, or external-service behavior, and choose an appropriate level: `trace`/`debug` for routine diagnostics, `info` for meaningful state changes, `warn` for recoverable anomalies, and `error` for failures that require attention.
 - Add tests or checks when behavior changes in a way that could regress.
 - After finishing code changes, first run `pnpm check` and `cargo check` to validate frontend and backend code. Only after both pass should you attempt build checks, and all checks must pass before considering the work complete.
 - If Tauri command-related types change, regenerate Specta bindings only by running the Tauri `dev` flow in debug mode, for example `pnpm tauri dev` or the repo's equivalent debug dev command. `dev` does not stop automatically, so end it manually after bindings are generated. Never manually edit generated bindings, generated command helper names, or generated TypeScript type shapes.

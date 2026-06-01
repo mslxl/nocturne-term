@@ -548,6 +548,11 @@
     return terminalPaneById(tab, tab.activePaneId) ?? null;
   }
 
+  function shouldConfirmTerminalClose() {
+    if (!lastConfigSnapshot) return true;
+    return booleanValue(readValue(lastConfigSnapshot.effective_config.root, ["terminal", "confirm_close"])) ?? true;
+  }
+
   async function activateTab(id: string) {
     activeId = id;
     const tab = tabs.find((item) => item.id === id);
@@ -718,6 +723,7 @@
   async function confirmRunningPanes(panes: TerminalPane[]) {
     const runningCount = panes.filter((pane) => pane.status === "running").length;
     if (!runningCount) return true;
+    if (!shouldConfirmTerminalClose()) return true;
     if (!hasTauriRuntime()) return window.confirm("Close running terminal session?");
     return ask(runningCount === 1 ? "Close running terminal session?" : `Close ${runningCount} running terminal sessions?`, {
       title: "Close Terminal",
