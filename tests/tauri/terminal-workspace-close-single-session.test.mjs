@@ -3,23 +3,20 @@
  * Test content:
  *
  * Feature:
- * Verifies that the default Local Workspace terminal renders correctly inside a
- * real Tauri window. The Terminal ToolTab must use the Workspace/Dock ToolTab
- * toolbar as its only toolbar, must not render the legacy TerminalTabBar
- * session toolbar, and must mount a working xterm surface instead of a blank
- * content area.
+ * Verifies that the default Local Workspace owns a single terminal backend
+ * session during startup and shutdown. Closing the default window must not
+ * report duplicate or stale terminal session cleanup errors.
  *
  * Operation:
  * Starts the dev server, starts tauri-driver, launches the Tauri application
- * provided by the TAURI_E2E_APPLICATION environment variable, waits for the
- * Terminal ToolTab to appear in the live Tauri WebView, and inspects the
- * terminal dock group's DOM for Dock ToolTab toolbar, legacy TerminalTabBar,
- * terminal host, and .xterm mount counts.
+ * provided by the TAURI_TEST_APPLICATION environment variable, waits for the
+ * default Terminal ToolTab to mount in the live Tauri WebView, closes the
+ * WebDriver session, and inspects the captured native driver output.
  *
  * Expected:
- * The terminal dock group contains exactly one Dock ToolTab toolbar, contains
- * zero legacy TerminalTabBar session toolbars, contains at least one terminal
- * host, and contains at least one mounted .xterm element.
+ * The Tauri app shutdown output must not contain "failed to close terminal
+ * session" messages. In particular, the default window must not attempt to
+ * close a second unexpected terminal session such as term-2.
  */
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
@@ -28,11 +25,11 @@ import { fileURLToPath } from "node:url";
 import { createServer } from "vite";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
-const appPath = requiredEnvPath("TAURI_E2E_APPLICATION");
-const nativeDriverPath = optionalEnvPath("TAURI_E2E_NATIVE_DRIVER");
-const driverPort = Number(process.env.TAURI_E2E_DRIVER_PORT ?? "4444");
+const appPath = requiredEnvPath("TAURI_TEST_APPLICATION");
+const nativeDriverPath = optionalEnvPath("TAURI_TEST_NATIVE_DRIVER");
+const driverPort = Number(process.env.TAURI_TEST_DRIVER_PORT ?? "4444");
 const driverUrl = `http://127.0.0.1:${driverPort}`;
-const devUrl = process.env.TAURI_E2E_DEV_URL ?? "http://localhost:1420/";
+const devUrl = process.env.TAURI_TEST_DEV_URL ?? "http://localhost:1420/";
 const devPort = Number(new URL(devUrl).port);
 const nativeDriverArgs = nativeDriverPath ? ["--native-driver", nativeDriverPath] : [];
 
@@ -74,27 +71,19 @@ try {
   await waitForDriver();
   sessionId = await createSession();
   await waitUntil(async () => {
-    return await execute("return document.querySelector('.terminal-tool-area') !== null;");
-  }, async () => `terminal ToolTab did not render\n${await pageSummary()}`);
+    const state = await terminalState();
+    return state.terminalHosts === 1 && state.xterms === 1;
+  }, async () => `default terminal did not mount exactly once\n${await pageSummary()}`);
 
-  await waitUntil(async () => {
-    const result = await terminalGroupState();
-    return result.ok && result.terminalHosts >= 1 && result.xterms >= 1;
-  }, async () => `terminal xterm did not mount\n${await pageSummary()}`);
+  await webdriver("DELETE", `/session/${sessionId}`);
+  sessionId = "";
+  await delay(1_000);
 
-  const result = await terminalGroupState();
-
-  if (!result.ok) {
-    throw new Error(result.reason);
-  }
-  if (result.toolTabBars !== 1) {
-    throw new Error(`expected exactly one ToolTab toolbar, found ${result.toolTabBars}`);
-  }
-  if (result.legacyTerminalTabBars !== 0) {
-    throw new Error(`expected no legacy terminal session toolbar, found ${result.legacyTerminalTabBars}`);
+  if (driverOutput.includes("failed to close terminal session")) {
+    throw new Error(`default window shutdown reported terminal session cleanup errors\n${driverOutput}`);
   }
 
-  console.log("tauri terminal workspace single-toolbar e2e passed");
+  console.log("tauri terminal workspace close single-session unit test passed");
 } finally {
   if (sessionId) {
     await webdriver("DELETE", `/session/${sessionId}`).catch(() => undefined);
@@ -103,19 +92,12 @@ try {
   await devServer.close();
 }
 
-async function terminalGroupState() {
+async function terminalState() {
   return await execute(`
-    const terminalArea = document.querySelector('.terminal-tool-area');
-    const terminalGroup = terminalArea?.closest('.workspace-dock-group');
-    if (!terminalGroup) return { ok: false, reason: 'terminal dock group missing' };
     return {
-      ok: true,
-      groupId: terminalGroup.getAttribute('data-dock-group-id'),
-      toolTabBars: terminalGroup.querySelectorAll('.tool-tabbar').length,
-      legacyTerminalTabBars: terminalGroup.querySelectorAll('[data-testid="terminal-tabbar"]').length,
-      terminalHosts: terminalGroup.querySelectorAll('[data-testid="terminal-host"]').length,
-      xterms: terminalGroup.querySelectorAll('.xterm').length,
-      text: terminalGroup.textContent,
+      terminalHosts: document.querySelectorAll('[data-testid="terminal-host"]').length,
+      xterms: document.querySelectorAll('.xterm').length,
+      panes: [...document.querySelectorAll('[data-testid="terminal-pane"]')].map((pane) => pane.getAttribute('data-pane-id')),
     };
   `);
 }
@@ -199,7 +181,7 @@ function delay(ms) {
 function requiredEnvPath(name) {
   const value = process.env[name];
   if (!value) {
-    throw new Error(`${name} must point to the Tauri application binary for this e2e test.`);
+    throw new Error(`${name} must point to the Tauri application binary for this Tauri unit test.`);
   }
   const path = resolve(value);
   if (!existsSync(path)) {
@@ -225,14 +207,11 @@ async function pageSummary() {
       title: document.title,
       url: location.href,
       bodyText: document.body?.innerText?.slice(0, 1000) ?? '',
-      dockGroups: [...document.querySelectorAll('.workspace-dock-group')].map((group) => ({
-        id: group.getAttribute('data-dock-group-id'),
-        text: group.textContent?.slice(0, 300),
-        hasTerminalArea: group.querySelector('.terminal-tool-area') !== null,
-        legacyTerminalTabBars: group.querySelectorAll('[data-testid="terminal-tabbar"]').length,
-        terminalHosts: group.querySelectorAll('[data-testid="terminal-host"]').length,
-        xterms: group.querySelectorAll('.xterm').length,
-      })),
+      terminalState: {
+        terminalHosts: document.querySelectorAll('[data-testid="terminal-host"]').length,
+        xterms: document.querySelectorAll('.xterm').length,
+        panes: [...document.querySelectorAll('[data-testid="terminal-pane"]')].map((pane) => pane.getAttribute('data-pane-id')),
+      },
     };
   `).then((summary) => JSON.stringify(summary, null, 2));
 }

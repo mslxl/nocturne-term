@@ -309,6 +309,7 @@
   let serializedMenuState = "";
   let undoStack: TerminalUndoAction[] = [];
   let redoStack: TerminalRedoAction[] = [];
+  let startupSessionPromise: Promise<void> | null = null;
   const textEditHistories = new WeakMap<TextInputElement, TextEditHistory>();
   let resizeDrag = $state<{
     tabId: string;
@@ -926,7 +927,14 @@
 
   async function ensureStartupSession(restored: boolean) {
     if (restored || tabs.length > 0) return;
-    await openWorkspaceTerminalSession({ recordHistory: false });
+    if (startupSessionPromise) {
+      await startupSessionPromise;
+      return;
+    }
+    startupSessionPromise = openWorkspaceTerminalSession({ recordHistory: false }).finally(() => {
+      startupSessionPromise = null;
+    });
+    await startupSessionPromise;
   }
 
   function saveActiveTerminalRuntime() {
@@ -4038,6 +4046,9 @@
   .tool-surface {
     min-width: 0;
     min-height: 0;
+    height: 100%;
+    display: grid;
+    grid-template-rows: minmax(0, 1fr);
     overflow: hidden;
   }
 
@@ -4099,6 +4110,7 @@
   .terminal-tool-area {
     min-width: 0;
     min-height: 0;
+    height: 100%;
     display: grid;
     grid-template-rows: minmax(0, 1fr);
   }
