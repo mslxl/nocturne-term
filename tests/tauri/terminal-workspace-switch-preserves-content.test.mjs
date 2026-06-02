@@ -27,9 +27,11 @@ import { existsSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createServer } from "vite";
+import { createIsolatedAppConfigEnv } from "./isolated-app-config.mjs";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const appPath = requiredEnvPath("TAURI_TEST_APPLICATION");
+const isolatedAppConfig = await createIsolatedAppConfigEnv("switch-preserves-content");
 const nativeDriverPath = optionalEnvPath("TAURI_TEST_NATIVE_DRIVER");
 const driverPort = Number(process.env.TAURI_TEST_DRIVER_PORT ?? "4444");
 const driverUrl = `http://127.0.0.1:${driverPort}`;
@@ -39,6 +41,7 @@ const nativeDriverArgs = nativeDriverPath ? ["--native-driver", nativeDriverPath
 
 process.chdir(repoRoot);
 process.env.NOCTURNE_DEV_PORT = String(devPort);
+isolatedAppConfig.env.NOCTURNE_DEV_PORT = String(devPort);
 
 const devServer = await createServer({
   server: {
@@ -56,6 +59,7 @@ const tauriDriver = spawn(
   ["--port", String(driverPort), ...nativeDriverArgs],
   {
     cwd: repoRoot,
+    env: isolatedAppConfig.env,
     stdio: ["ignore", "pipe", "pipe"],
   },
 );
@@ -113,6 +117,7 @@ try {
   }
   stopProcess(tauriDriver);
   await devServer.close();
+  await isolatedAppConfig.cleanup();
 }
 
 function assertSameTerminal(expected, actual, label) {
@@ -134,7 +139,7 @@ async function createWorkspace() {
   await execute(`
     const button = document.querySelector('.new-workspace');
     if (!button) throw new Error('New workspace button not found');
-    button.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+    button.click();
   `);
 }
 
@@ -143,8 +148,12 @@ async function activateWorkspace(workspaceId) {
     const button = document
       .querySelector('[data-testid="workspace-tab-${workspaceId}"] .workspace-activate');
     if (!button) throw new Error('Workspace tab ${workspaceId} not found');
-    button.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+    button.click();
   `);
+  await waitUntil(async () => {
+    const state = await workspaceState();
+    return state.activeWorkspaceId === workspaceId;
+  }, async () => `Workspace ${workspaceId} did not become active\n${await pageSummary()}`);
 }
 
 async function waitForVisibleTerminal(reason) {

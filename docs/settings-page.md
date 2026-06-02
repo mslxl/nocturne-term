@@ -152,7 +152,7 @@ The main window uses Host Workspace tabs and a shared IDE-style Dock system. See
 
 Settings should expose:
 
-- workspace restore strategy: visible auto reconnect, manual reconnect, safe auto restore
+- workspace reconnect strategy: visible auto reconnect, manual reconnect, safe auto restore
 - dock and workspace keybindings
 - macOS integrated title bar behavior
 

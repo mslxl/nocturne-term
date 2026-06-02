@@ -12,7 +12,7 @@ The dock system should feel like a native desktop IDE layout:
 - drag to edges to split
 - drag to other workspaces to mirror
 - drag out into floating windows
-- restore the last window state automatically
+- keep runtime Workspace state authoritative without restoring old Workspaces on startup
 - keep the model testable outside the UI
 
 The dock system is a standalone feature module, not a terminal feature.
@@ -34,7 +34,7 @@ Pure layout operations and hit testing must have focused Vitest unit-test covera
 
 Use Rust unit tests for Rust-side Tauri command and service logic, including workspace snapshot validation, persistence decisions, and command intent handling that do not require a real WebView or native window.
 
-Use Tauri unit tests for workflows that launch the real Tauri app and depend on the real desktop shell: WebView rendering, native pointer/keyboard dispatch, Tauri window lifecycle, floating windows, persisted restore across app windows, or IPC behavior visible through the running app.
+Use Tauri unit tests for workflows that launch the real Tauri app and depend on the real desktop shell: WebView rendering, native pointer/keyboard dispatch, Tauri window lifecycle, floating windows, startup behavior across app sessions, or IPC behavior visible through the running app.
 
 ## Authority And State
 

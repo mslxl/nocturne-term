@@ -11,7 +11,7 @@ Nocturne stores configuration as TOML files inside Tauri's application config di
 - Main application config
 - Profile config
 - Host/session config
-- Workspace/window state
+- Runtime Workspace/window state
 - File transfer state
 - Private SSH trust store
 
@@ -19,7 +19,13 @@ Main config and profile config together form the application config. The effecti
 
 Host config is stored separately as individual TOML files in configured host directories. User-created hosts use stable UUIDs, not content hashes, because connection history, keyring records, trust repair, default-host selection, and command palette entries need durable identity across edits.
 
-Workspace/window state is automatic IDE-style runtime state. It is separate from user-authored application config. It stores last-open workspaces, owned tool tabs, Dock layout, floating windows, active selections, and restore metadata. It does not store transient view state such as scroll positions, hover, focus, or mirror slots.
+Runtime Workspace/window state is separate from user-authored application config.
+It can store the current process's workspaces, owned tool tabs, Dock layout,
+floating windows, and active selections while the app is running. Application
+startup does not restore previously persisted Workspace tabs; startup creates
+the default Workspace template and overwrites stale runtime Workspace state.
+The runtime snapshot does not store transient view state such as scroll
+positions, hover, focus, or mirror slots.
 
 OpenSSH config entries from configured OpenSSH config files are read as separate read-only sources. They do not live under the Nocturne config root and Nocturne must not write them. The default configured OpenSSH file is `~/.ssh/config`.
 
@@ -41,7 +47,7 @@ The current layout is:
 - `hosts/<folder>/<uuid>.toml` - user-created hosts organized into nested folders
 - `known-hosts.toml` - private SSH host-key trust store for connection hosts
 - `terminal-color-schemes/<id>.toml` - user terminal color schemes
-- `workspace-state.toml` - automatic workspace, Dock, and floating-window state
+- `workspace-state.toml` - disposable runtime Workspace, Dock, and floating-window snapshot; startup overwrites it with the default Workspace template instead of restoring old Workspaces
 - `transfer-state.toml` - recoverable transfer task state when needed
 
 The system also supports additional connection host directories through application config.
@@ -385,9 +391,15 @@ left = 12
 
 ### Workspace and Dock state
 
-Workspace and Dock layout are not configured through profile TOML. They are automatic runtime state stored separately in `workspace-state.toml`.
+Workspace and Dock layout are not configured through profile TOML. They are
+runtime state stored separately in `workspace-state.toml`.
 
-The runtime state stores:
+Startup does not restore `workspace-state.toml`. A fresh app process creates the
+default Workspace template for the default host and writes that snapshot over
+any stale runtime Workspace state. Runtime commands can still update the file
+after startup.
+
+The runtime state can store:
 
 - workspace order and active workspace
 - workspace host ids and user-renamed workspace titles

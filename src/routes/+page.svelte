@@ -78,6 +78,7 @@
   } from "$lib/terminal/tabs";
   import { toTerminalSessionSizeInput } from "$lib/terminal/sizes";
   import { terminalMenuCanRedo, terminalMenuCanUndo } from "$lib/terminal/menu-history";
+  import { TerminalRuntimeCreationGate } from "$lib/terminal/runtime-creation";
   import { language, setLanguage, t } from "$lib/i18n";
 
   type TerminalMenuCommand =
@@ -311,6 +312,7 @@
   let undoStack: TerminalUndoAction[] = [];
   let redoStack: TerminalRedoAction[] = [];
   let startupSessionPromise: Promise<void> | null = null;
+  const terminalRuntimeCreationGate = new TerminalRuntimeCreationGate();
   const textEditHistories = new WeakMap<TextInputElement, TextEditHistory>();
   let resizeDrag = $state<{
     tabId: string;
@@ -1182,9 +1184,14 @@
         workspace.owned_tool_tab_ids.includes(tool.id),
     );
     for (const tool of terminalTools) {
-      if (terminalRuntimeByToolTabId.has(tool.id)) continue;
-      activeTerminalToolTabId = tool.id;
-      await createHostSession(tool.host_id, { recordHistory: false, toolTabId: tool.id });
+      await terminalRuntimeCreationGate.ensure(
+        tool.id,
+        () => terminalRuntimeByToolTabId.has(tool.id),
+        async () => {
+          activeTerminalToolTabId = tool.id;
+          await createHostSession(tool.host_id, { recordHistory: false, toolTabId: tool.id });
+        },
+      );
     }
     if (!activeTerminalToolTabId && terminalTools[0]) activeTerminalToolTabId = terminalTools[0].id;
   }

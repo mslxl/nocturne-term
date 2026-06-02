@@ -3,8 +3,12 @@
   import { ask, message, open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
   import { getCurrentWebview } from "@tauri-apps/api/webview";
   import { createQuery, useQueryClient } from "@tanstack/svelte-query";
+  import FileIcon from "~icons/lucide/file";
+  import FileSymlinkIcon from "~icons/lucide/file-symlink";
+  import FolderIcon from "~icons/lucide/folder";
   import { commands, type FileEntry, type FileListResult, type FilePreviewResult, type FileProviderKind, type FileSearchResult, type TransferEndpoint, type WorkspaceToolTab } from "$lib/bindings";
   import { clearFilesClipboard, filesClipboardSnapshot, setFilesClipboard } from "$lib/files/clipboard.svelte";
+  import { buildFileTreeRows, fileTreeClickAction, fileTreeDoubleClickAction, isRenderableFilePreview, shouldShowFilePreviewRegion } from "$lib/files/tree";
   import { hasTauriRuntime } from "$lib/tauri/runtime";
   import { unwrapCommand } from "$lib/terminal/commands";
 
@@ -38,6 +42,10 @@
   let previewPath = $state("");
   let dragHover = $state(false);
   let operationError = $state("");
+  let expandedTreePaths = $state<Record<string, boolean>>({});
+  let treeChildrenByPath = $state<Record<string, FileEntry[]>>({});
+  let treeLoadingByPath = $state<Record<string, boolean>>({});
+  let treeErrorByPath = $state<Record<string, string>>({});
   let nameDialog = $state<{
     action: "create_directory" | "rename" | "chmod";
     title: string;
@@ -101,7 +109,17 @@
   const result = $derived(filesQuery.data as FileListResult | undefined);
   const currentPath = $derived(result?.provider.current_path ?? path ?? toolTab.title);
   const entries = $derived((result?.entries ?? []).filter((entry) => showHidden || !entry.name.startsWith(".")));
-  const selectedEntry = $derived(entries.find((entry) => entry.path === selectedPath) ?? null);
+  const visibleTreeChildrenByPath = $derived(filterEntriesByVisibility(treeChildrenByPath));
+  const treeRows = $derived(
+    buildFileTreeRows({
+      rootEntries: entries,
+      childrenByPath: visibleTreeChildrenByPath,
+      expandedPaths: recordKeySet(expandedTreePaths),
+      loadingPaths: recordKeySet(treeLoadingByPath),
+      errorByPath: recordStringMap(treeErrorByPath),
+    }),
+  );
+  const selectedEntry = $derived(findEntryByPath(selectedPath) ?? null);
   const columnPaths = $derived(columnsForPath(currentPath));
   const filesClipboard = $derived(filesClipboardSnapshot());
   const canPaste = $derived(Boolean(filesClipboard && result?.provider.capabilities.can_write));
@@ -123,6 +141,13 @@
   }));
 
   const previewResult = $derived(previewQuery.data as FilePreviewResult | undefined);
+  const previewVisible = $derived(
+    shouldShowFilePreviewRegion({
+      selectedPath: selectedEntry?.path ?? "",
+      previewPath,
+      preview: previewResult,
+    }),
+  );
   let remoteHelperChecked = false;
 
   $effect(() => {
@@ -138,6 +163,7 @@
   });
 
   async function refresh() {
+    clearTreeDirectoryCache();
     await queryClient.invalidateQueries({ queryKey: ["files", "list", toolTab.id] });
   }
 
@@ -214,6 +240,54 @@
     path = entry.path;
     searchResult = null;
     previewPath = "";
+  }
+
+  async function activateTreeEntry(entry: FileEntry) {
+    if (fileTreeDoubleClickAction(entry) === "ignore-directory") return;
+    selectedPath = entry.path;
+    previewPath = entry.kind === "file" || entry.kind === "symlink" ? entry.path : "";
+  }
+
+  async function clickTreeEntry(entry: FileEntry) {
+    selectedPath = entry.path;
+    previewPath = entry.kind === "file" || entry.kind === "symlink" ? entry.path : "";
+    if (fileTreeClickAction(entry) === "toggle-directory") {
+      await toggleTreeDirectory(entry);
+    }
+  }
+
+  async function toggleTreeDirectory(entry: FileEntry) {
+    if (entry.kind !== "directory") return;
+    const willExpand = !expandedTreePaths[entry.path];
+    expandedTreePaths = { ...expandedTreePaths, [entry.path]: willExpand };
+    if (!willExpand || treeChildrenByPath[entry.path] || treeLoadingByPath[entry.path]) {
+      return;
+    }
+
+    treeLoadingByPath = { ...treeLoadingByPath, [entry.path]: true };
+    const { [entry.path]: _previousError, ...remainingErrors } = treeErrorByPath;
+    treeErrorByPath = remainingErrors;
+    try {
+      const childResult = await unwrapCommand(
+        commands.listFiles({
+          host_id: toolTab.host_id,
+          path: entry.path,
+          ...providerCommandAuth(),
+        }),
+      );
+      treeChildrenByPath = {
+        ...treeChildrenByPath,
+        [entry.path]: childResult.entries,
+      };
+    } catch (error) {
+      treeErrorByPath = {
+        ...treeErrorByPath,
+        [entry.path]: error instanceof Error ? error.message : String(error),
+      };
+    } finally {
+      const { [entry.path]: _completed, ...remainingLoading } = treeLoadingByPath;
+      treeLoadingByPath = remainingLoading;
+    }
   }
 
   function openSearchMatch(match: FileSearchResult["matches"][number]) {
@@ -299,6 +373,41 @@
       credential: null,
       save_credential: false,
     };
+  }
+
+  function recordKeySet(record: Readonly<Record<string, boolean>>) {
+    return new Set(Object.entries(record).filter(([, enabled]) => enabled).map(([key]) => key));
+  }
+
+  function recordStringMap(record: Readonly<Record<string, string>>) {
+    return new Map(Object.entries(record));
+  }
+
+  function filterEntriesByVisibility(record: Readonly<Record<string, FileEntry[]>>) {
+    return Object.fromEntries(
+      Object.entries(record).map(([directoryPath, children]) => [
+        directoryPath,
+        children.filter((entry) => showHidden || !entry.name.startsWith(".")),
+      ]),
+    );
+  }
+
+  function clearTreeDirectoryCache() {
+    treeChildrenByPath = {};
+    treeLoadingByPath = {};
+    treeErrorByPath = {};
+  }
+
+  function findEntryByPath(value: string) {
+    if (!value) return null;
+    for (const entry of entries) {
+      if (entry.path === value) return entry;
+    }
+    for (const children of Object.values(visibleTreeChildrenByPath)) {
+      const entry = children.find((child) => child.path === value);
+      if (entry) return entry;
+    }
+    return null;
   }
 
   function parentPathOf(value: string) {
@@ -737,7 +846,15 @@
                     onclick={() => selectEntry(entry)}
                   >
                     <span class="name-cell" title={entry.symlink_target ? `${entry.path} -> ${entry.symlink_target}` : entry.path}>
-                      <span class="kind-icon" aria-hidden="true">{entry.kind === "directory" ? "▸" : entry.kind === "symlink" ? "↪" : ""}</span>
+                      <span class="kind-icon file-kind-icon" aria-hidden="true">
+                        {#if entry.kind === "directory"}
+                          <FolderIcon />
+                        {:else if entry.kind === "symlink"}
+                          <FileSymlinkIcon />
+                        {:else}
+                          <FileIcon />
+                        {/if}
+                      </span>
                       {entry.name}
                     </span>
                     <small>{formatSize(entry)}</small>
@@ -746,43 +863,89 @@
               </div>
             {/if}
           </section>
-	        {/each}
-	        <section class="file-column preview-column" aria-label="Preview">
-	          <header>Preview</header>
-	          {@render previewPanel()}
-	        </section>
+        {/each}
+        {#if previewVisible}
+          <section class="file-column preview-column" aria-label="Preview">
+            <header>Preview</header>
+            {@render previewPanel()}
+          </section>
+        {/if}
 	      </div>
 	    {:else}
-	      <div class="tree-preview-layout">
-	        <div class="files-table" role="treegrid" aria-rowcount={entries.length}>
+	      <div class:with-preview={previewVisible} class="tree-preview-layout">
+	        <div class="files-table" role="treegrid" aria-rowcount={treeRows.length}>
 	          <div class="files-row files-head" role="row">
 	            <span>Name</span>
 	            <span>Size</span>
 	            <span>Modified</span>
 	            <span>Permissions</span>
 	          </div>
-	          {#each entries as entry (entry.path)}
-	            <button
-	              class:selected={selectedPath === entry.path}
+	          {#each treeRows as row (row.entry.path)}
+	            <div
+	              class:selected={selectedPath === row.entry.path}
 	              class="files-row"
-	              type="button"
 	              role="row"
-	              ondblclick={() => openEntry(entry)}
-	              onclick={() => selectEntry(entry)}
+                tabindex="0"
+	              aria-level={row.depth + 1}
+	              aria-expanded={row.entry.kind === "directory" ? row.expanded : undefined}
+	              style={`--tree-depth: ${row.depth};`}
+	              ondblclick={() =>
+	                void activateTreeEntry(row.entry).catch((error) => {
+	                  operationError = error instanceof Error ? error.message : String(error);
+	                })}
+	              onclick={() =>
+                  void clickTreeEntry(row.entry).catch((error) => {
+                    operationError = error instanceof Error ? error.message : String(error);
+                  })}
+                onkeydown={(event) => {
+                  if (event.key !== "Enter") return;
+                  event.preventDefault();
+                  void activateTreeEntry(row.entry).catch((error) => {
+                    operationError = error instanceof Error ? error.message : String(error);
+                  });
+                }}
 	            >
-	              <span class="name-cell" title={entry.symlink_target ? `${entry.path} -> ${entry.symlink_target}` : entry.path}>
-	                <span class="kind-icon" aria-hidden="true">{entry.kind === "directory" ? "▸" : entry.kind === "symlink" ? "↪" : ""}</span>
-	                {entry.name}
+	              <span class="name-cell" title={row.entry.symlink_target ? `${row.entry.path} -> ${row.entry.symlink_target}` : row.entry.path}>
+                  {#if row.entry.kind === "directory"}
+                    <button
+                      class="tree-disclosure"
+                      type="button"
+                      aria-label={row.expanded ? "Collapse directory" : "Expand directory"}
+                      aria-expanded={row.expanded}
+                      onclick={(event) => {
+                        event.stopPropagation();
+                        void toggleTreeDirectory(row.entry).catch((error) => {
+                          operationError = error instanceof Error ? error.message : String(error);
+                        });
+                      }}
+                    >
+                      {row.loading ? "…" : row.expanded ? "▾" : "▸"}
+                    </button>
+                  {:else}
+                    <span class="tree-disclosure placeholder" aria-hidden="true"></span>
+                  {/if}
+                  <span class="kind-icon file-kind-icon" aria-hidden="true">
+                    {#if row.entry.kind === "directory"}
+                      <FolderIcon />
+                    {:else if row.entry.kind === "symlink"}
+                      <FileSymlinkIcon />
+                    {:else}
+                      <FileIcon />
+                    {/if}
+                  </span>
+	                {row.entry.name}
 	              </span>
-	              <span>{formatSize(entry)}</span>
-	              <span>{formatModified(entry)}</span>
-	              <span>{entry.permissions ?? ""}</span>
-	            </button>
+	              <span>{formatSize(row.entry)}</span>
+	              <span>{formatModified(row.entry)}</span>
+	              <span>{row.error ?? row.entry.permissions ?? ""}</span>
+	            </div>
 	          {/each}
 	        </div>
-	        <aside class="tree-preview" aria-label="Preview">
-	          {@render previewPanel()}
-	        </aside>
+          {#if previewVisible}
+            <aside class="tree-preview" aria-label="Preview">
+              {@render previewPanel()}
+            </aside>
+          {/if}
 	      </div>
 	    {/if}
   {/if}
@@ -822,15 +985,7 @@
 </section>
 
 {#snippet previewPanel()}
-  {#if !selectedEntry}
-    <div class="preview-empty">Select a file to preview</div>
-  {:else if selectedEntry.kind === "directory"}
-    <div class="preview-empty">Directory selected</div>
-  {:else if previewQuery.isPending}
-    <div class="preview-empty">Loading preview...</div>
-  {:else if previewQuery.error}
-    <div class="preview-empty error">{previewQuery.error instanceof Error ? previewQuery.error.message : String(previewQuery.error)}</div>
-  {:else if previewResult}
+  {#if previewResult && isRenderableFilePreview(previewResult)}
     <div class="preview-content">
       <header>
         <strong title={previewResult.path}>{previewResult.name}</strong>
@@ -843,14 +998,8 @@
         <div class="image-preview">
           <img alt={previewResult.name} src={previewImageSrc(previewResult)} />
         </div>
-      {:else if previewResult.content.kind === "too_large"}
-        <div class="preview-empty">Preview limit: {formatBytes(previewResult.content.limit_bytes)}</div>
-      {:else}
-        <div class="preview-empty">{previewResult.content.reason}</div>
       {/if}
     </div>
-  {:else}
-    <div class="preview-empty">No preview</div>
   {/if}
 {/snippet}
 
@@ -1011,6 +1160,10 @@
     min-width: 0;
     min-height: 0;
     display: grid;
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .tree-preview-layout.with-preview {
     grid-template-columns: minmax(0, 1fr) minmax(220px, 28%);
   }
 
@@ -1159,6 +1312,11 @@
     text-align: left;
   }
 
+  .files-row:focus-visible {
+    outline: 1px solid color-mix(in srgb, var(--app-accent) 82%, transparent);
+    outline-offset: -1px;
+  }
+
   .files-head {
     position: sticky;
     top: 0;
@@ -1187,26 +1345,41 @@
     display: flex;
     align-items: center;
     gap: 5px;
+    padding-left: calc(var(--tree-depth, 0) * 16px);
   }
 
-  .kind-icon {
+  .kind-icon,
+  .tree-disclosure {
     width: 13px;
     color: color-mix(in srgb, var(--app-fg) 58%, transparent);
   }
 
-  .preview-empty {
-    min-width: 0;
-    min-height: 100%;
-    display: grid;
+  .file-kind-icon {
+    width: 15px;
+    height: 15px;
+    display: inline-grid;
     place-items: center;
-    padding: 16px;
-    color: color-mix(in srgb, var(--app-fg) 58%, transparent);
-    font-size: 12px;
-    text-align: center;
+    flex: 0 0 15px;
   }
 
-  .preview-empty.error {
-    color: var(--app-danger);
+  .file-kind-icon :global(svg) {
+    width: 15px;
+    height: 15px;
+    stroke-width: 1.8;
+  }
+
+  .tree-disclosure {
+    height: 22px;
+    display: grid;
+    place-items: center;
+    border: 0;
+    padding: 0;
+    background: transparent;
+    font-size: 12px;
+  }
+
+  .tree-disclosure.placeholder {
+    height: auto;
   }
 
   .preview-content {
