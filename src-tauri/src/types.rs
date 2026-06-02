@@ -400,6 +400,10 @@ pub enum WorkspaceIntent {
         tool_tab_id: String,
         side: WorkspaceDockSide,
     },
+    CreateTerminalToolTab {
+        workspace_id: String,
+        target_group_id: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
