@@ -314,6 +314,10 @@ fn apply_intent(
             tool_tab_id,
             side,
         } => split_tool_slot(snapshot, &workspace_id, &target_slot_id, &tool_tab_id, side),
+        WorkspaceIntent::CreateTerminalToolTab {
+            workspace_id,
+            target_group_id,
+        } => create_terminal_tool_tab(snapshot, &workspace_id, target_group_id.as_deref()),
     }
 }
 
@@ -826,6 +830,47 @@ fn split_tool_slot(
     };
     let workspace = require_workspace_mut(snapshot, workspace_id)?;
     workspace.layout = split_slot(workspace.layout.clone(), target_slot_id, slot, side)?;
+    Ok(())
+}
+
+fn create_terminal_tool_tab(
+    snapshot: &mut WorkspaceLayoutSnapshot,
+    workspace_id: &str,
+    target_group_id: Option<&str>,
+) -> Result<()> {
+    let workspace = require_workspace(snapshot, workspace_id)?.clone();
+    let tool_tab_id = new_id("tool-terminal");
+    let slot = WorkspaceToolSlot::Owned {
+        id: new_id("slot-terminal"),
+        tool_tab_id: tool_tab_id.clone(),
+    };
+    let title = snapshot
+        .tool_tabs
+        .iter()
+        .find(|tool_tab| {
+            tool_tab.owner_workspace_id == workspace_id
+                && matches!(tool_tab.kind, WorkspaceToolKind::Terminal)
+        })
+        .map(|tool_tab| tool_tab.title.clone())
+        .unwrap_or_else(|| "Shell".to_string());
+    snapshot.tool_tabs.push(WorkspaceToolTab {
+        id: tool_tab_id.clone(),
+        kind: WorkspaceToolKind::Terminal,
+        owner_workspace_id: workspace_id.to_string(),
+        host_id: workspace.host_id.clone(),
+        title,
+    });
+    let workspace = require_workspace_mut(snapshot, workspace_id)?;
+    workspace.owned_tool_tab_ids.push(tool_tab_id);
+    workspace.layout = match target_group_id {
+        Some(group_id) if contains_group(&workspace.layout, group_id) => {
+            add_slot_to_group(workspace.layout.clone(), group_id, slot)?
+        }
+        Some(group_id) => {
+            return Err(missing_error(format!("dock group {group_id} not found")));
+        }
+        None => add_slot_to_first_group(workspace.layout.clone(), slot)?,
+    };
     Ok(())
 }
 
@@ -1645,6 +1690,7 @@ fn intent_name(intent: &WorkspaceIntent) -> &'static str {
         WorkspaceIntent::MoveToolSlotToGroup { .. } => "move_tool_slot_to_group",
         WorkspaceIntent::MoveToolSlotToSplit { .. } => "move_tool_slot_to_split",
         WorkspaceIntent::SplitToolSlot { .. } => "split_tool_slot",
+        WorkspaceIntent::CreateTerminalToolTab { .. } => "create_terminal_tool_tab",
     }
 }
 
@@ -1826,6 +1872,45 @@ mod tests {
             1
         );
         assert!(matches!(workspace.layout, WorkspaceDockLayout::Split { .. }));
+    }
+
+    #[test]
+    fn create_terminal_tool_tab_adds_owned_terminal_to_target_group() {
+        let mut snapshot = test_split_snapshot();
+
+        create_terminal_tool_tab(&mut snapshot, "workspace-a", Some("group-terminal-a")).unwrap();
+
+        let workspace = require_workspace(&snapshot, "workspace-a").unwrap();
+        let terminal_tools = snapshot
+            .tool_tabs
+            .iter()
+            .filter(|tool| {
+                tool.owner_workspace_id == "workspace-a"
+                    && matches!(tool.kind, WorkspaceToolKind::Terminal)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(terminal_tools.len(), 2);
+        let created = terminal_tools
+            .iter()
+            .find(|tool| tool.id != "terminal-a")
+            .expect("created terminal tool tab");
+        assert!(created.id.starts_with("tool-terminal-"));
+        assert_eq!(created.host_id, "host-a");
+        assert!(workspace.owned_tool_tab_ids.iter().any(|id| id == &created.id));
+
+        let group = find_group_containing_slot(&workspace.layout, "slot-terminal-a").unwrap();
+        let created_slot = group
+            .iter()
+            .find(|slot| matches!(slot, WorkspaceToolSlot::Owned { tool_tab_id, .. } if tool_tab_id == &created.id))
+            .expect("created terminal slot");
+        assert!(workspace_slot_id(created_slot).starts_with("slot-terminal-"));
+        let WorkspaceDockLayout::Split { children, .. } = &workspace.layout else {
+            panic!("expected split workspace");
+        };
+        let WorkspaceDockLayout::Group { active_slot_id, .. } = &children[1] else {
+            panic!("expected terminal group");
+        };
+        assert_eq!(active_slot_id, workspace_slot_id(created_slot));
     }
 
     fn test_snapshot() -> WorkspaceLayoutSnapshot {

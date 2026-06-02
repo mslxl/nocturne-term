@@ -29,7 +29,6 @@
   import { resolveHostIcon } from "$lib/hosts/icons";
   import { buildHostFolderTree, hostFolderLabel, hostHasBlockingDiagnostics, hostSubtitle, type HostFolderTreeNode } from "$lib/hosts/model";
   import { hasTauriRuntime } from "$lib/tauri/runtime";
-  import TerminalPaneTree from "$lib/terminal/components/TerminalPaneTree.svelte";
   import WorkspaceTabBar from "$lib/workspace/components/WorkspaceTabBar.svelte";
   import { createWorkspaceStore } from "$lib/workspace/state.svelte";
   import { unwrapCommand } from "$lib/terminal/commands";
@@ -239,9 +238,9 @@
       }
     | CloseTabAction
     | ClosePaneAction;
-  type TerminalWorkspaceRuntime = {
-    activeId: string;
-    tabs: TerminalTab[];
+  type TerminalToolRuntime = {
+    tab: TerminalTab;
+    toolTabId: string;
   };
   type TerminalRenderMode = {
     workspace: WorkspaceTabState;
@@ -266,8 +265,10 @@
   let settingsError = $state("");
   let tabs = $state<TerminalTab[]>([]);
   let activeId = $state("");
-  let terminalRuntimeByWorkspaceId = new Map<string, TerminalWorkspaceRuntime>();
+  let terminalRuntimeByToolTabId = $state(new Map<string, TerminalToolRuntime>());
   let activeTerminalWorkspaceId = "";
+  let activeTerminalToolTabId = $state("");
+  let lastActivatedContentGroupIdByWorkspace = new Map<string, string>();
   let tabBarOrientation = $state<TabBarOrientation>("horizontal");
   let outputUnlisten: undefined | (() => void);
   let exitUnlisten: undefined | (() => void);
@@ -367,7 +368,7 @@
   );
   const terminalTabs = createTerminalTabController({
     settings: () => settings,
-    tabs: () => tabs,
+    tabs: () => terminalRuntimeTabs(),
     setGlobalError: (message) => {
       settingsError = message;
     },
@@ -378,6 +379,10 @@
       void reconnectPaneAfterDisconnect(paneId);
     },
   });
+
+  function terminalRuntimeTabs() {
+    return Array.from(terminalRuntimeByToolTabId.values()).map((runtime) => runtime.tab);
+  }
 
   async function loadSettings() {
     settingsError = "";
@@ -508,6 +513,86 @@
     return layout.slots.find((slot) => slot.id === layout.active_slot_id) ?? layout.slots[0] ?? null;
   }
 
+  function workspaceSlotToolTabId(slot: WorkspaceToolSlot): string | null {
+    if (slot.kind === "closed_source") return null;
+    return slot.tool_tab_id;
+  }
+
+  function dockGroupRole(group: Extract<WorkspaceDockLayout, { kind: "group" }>) {
+    const kinds = group.slots
+      .map((slot) => {
+        const toolTabId = workspaceSlotToolTabId(slot);
+        return toolTabId ? workspaceToolById(toolTabId)?.kind : null;
+      })
+      .filter((kind): kind is WorkspaceToolTab["kind"] => kind !== null);
+    if (kinds.includes("terminal")) return "content";
+    if (kinds.includes("transfers")) return "panel";
+    return "sidebar";
+  }
+
+  function firstContentGroupId(workspace: WorkspaceTabState): string | null {
+    return firstGroupIdByRole(workspace.layout, "content");
+  }
+
+  function firstGroupIdByRole(layout: WorkspaceDockLayout, role: "content" | "panel" | "sidebar"): string | null {
+    if (layout.kind === "group") return dockGroupRole(layout) === role ? layout.id : null;
+    return layout.children.map((child) => firstGroupIdByRole(child, role)).find((id): id is string => id !== null) ?? null;
+  }
+
+  function groupIdForSlot(layout: WorkspaceDockLayout, slotId: string): string | null {
+    if (layout.kind === "group") {
+      return layout.slots.some((slot) => slot.id === slotId) ? layout.id : null;
+    }
+    return layout.children.map((child) => groupIdForSlot(child, slotId)).find((id): id is string => id !== null) ?? null;
+  }
+
+  function terminalToolTabForSlot(slot: WorkspaceToolSlot | null): WorkspaceToolTab | null {
+    if (!slot || slot.kind === "closed_source" || slot.kind === "floating_placeholder") return null;
+    const tool = slotTool(slot);
+    return tool?.kind === "terminal" ? tool : null;
+  }
+
+  function activeTerminalSlotForWorkspace(workspace: WorkspaceTabState): WorkspaceToolSlot | null {
+    return activeTerminalSlot(workspace.layout);
+  }
+
+  function activeTerminalSlot(layout: WorkspaceDockLayout): WorkspaceToolSlot | null {
+    if (layout.kind === "group") {
+      const active = activeGroupSlot(layout);
+      if (terminalToolTabForSlot(active)) return active;
+      return layout.slots.find((slot) => terminalToolTabForSlot(slot) !== null) ?? null;
+    }
+    return layout.children.map(activeTerminalSlot).find((slot): slot is WorkspaceToolSlot => slot !== null) ?? null;
+  }
+
+  function terminalRuntimeForToolTab(toolTabId: string): TerminalToolRuntime | null {
+    return terminalRuntimeByToolTabId.get(toolTabId) ?? null;
+  }
+
+  function setTerminalRuntime(toolTabId: string, runtime: TerminalToolRuntime) {
+    const next = new Map(terminalRuntimeByToolTabId);
+    next.set(toolTabId, runtime);
+    terminalRuntimeByToolTabId = next;
+    syncLegacyTerminalTabState();
+  }
+
+  function deleteTerminalRuntime(toolTabId: string) {
+    const next = new Map(terminalRuntimeByToolTabId);
+    next.delete(toolTabId);
+    terminalRuntimeByToolTabId = next;
+    syncLegacyTerminalTabState();
+  }
+
+  function syncLegacyTerminalTabState() {
+    tabs = terminalRuntimeTabs();
+    activeId = activeTerminalToolTabId;
+  }
+
+  function activeTerminalRuntime(): TerminalToolRuntime | null {
+    if (!activeTerminalToolTabId) return null;
+    return terminalRuntimeForToolTab(activeTerminalToolTabId);
+  }
+
   function workspaceById(workspaceId: string): WorkspaceTabState | null {
     return workspaceSnapshot?.workspaces.find((workspace) => workspace.id === workspaceId) ?? null;
   }
@@ -541,6 +626,16 @@
   }
 
   async function activateWorkspaceSlot(workspace: WorkspaceTabState, slotId: string) {
+    const slot = findWorkspaceSlot(workspace.layout, slotId);
+    const groupId = groupIdForSlot(workspace.layout, slotId);
+    if (slot && groupId) {
+      const tool = terminalToolTabForSlot(slot);
+      const group = findWorkspaceGroup(workspace.layout, groupId);
+      if (group && dockGroupRole(group) === "content") {
+        lastActivatedContentGroupIdByWorkspace.set(workspace.id, groupId);
+      }
+      if (tool) activeTerminalToolTabId = tool.id;
+    }
     await workspaceStore.dispatch({
       kind: "activate_tool_slot",
       workspace_id: workspace.id,
@@ -549,15 +644,88 @@
   }
 
   async function closeWorkspaceSlot(workspaceId: string, slotId: string) {
+    const workspace = workspaceById(workspaceId);
+    const slot = workspace ? findWorkspaceSlot(workspace.layout, slotId) : null;
+    const tool = slot ? terminalToolTabForSlot(slot) : null;
+    if (slot?.kind === "owned" && tool) {
+      const confirmed = await confirmTerminalToolRuntimeClose(tool.id);
+      if (!confirmed) return;
+    }
     await workspaceStore.dispatch({ kind: "close_tool_slot", workspace_id: workspaceId, slot_id: slotId });
+    if (slot?.kind === "owned" && tool) {
+      await disposeTerminalToolRuntime(tool.id);
+    }
+  }
+
+  async function confirmTerminalToolRuntimeClose(toolTabId: string) {
+    const runtime = terminalRuntimeForToolTab(toolTabId);
+    if (!runtime) return true;
+    const pane = terminalPaneById(runtime.tab, runtime.tab.activePaneId);
+    if (!pane) return true;
+    if (pane.status === "running" && shouldConfirmTerminalClose()) {
+      const confirmed = await ask(`Close terminal session ${pane.title}?`, {
+        title: "Close Terminal",
+        kind: "warning",
+        okLabel: "Close",
+        cancelLabel: "Cancel",
+      });
+      if (!confirmed) return false;
+    }
+    return true;
+  }
+
+  async function disposeTerminalToolRuntime(toolTabId: string) {
+    const runtime = terminalRuntimeForToolTab(toolTabId);
+    if (!runtime) return;
+    const pane = terminalPaneById(runtime.tab, runtime.tab.activePaneId);
+    if (!pane) return;
+    disposeTerminalTab(runtime.tab);
+    if (pane.status === "running") await closePaneSession(pane);
+    deleteTerminalRuntime(toolTabId);
+    if (activeTerminalToolTabId === toolTabId) activeTerminalToolTabId = "";
   }
 
   async function closeOtherWorkspaceSlots(workspaceId: string, slotId: string) {
+    const toolIds = terminalToolTabIdsClosedByOtherSlots(workspaceId, slotId);
+    for (const toolTabId of toolIds) {
+      const confirmed = await confirmTerminalToolRuntimeClose(toolTabId);
+      if (!confirmed) return;
+    }
     await workspaceStore.dispatch({ kind: "close_other_tool_slots", workspace_id: workspaceId, slot_id: slotId });
+    for (const toolTabId of toolIds) await disposeTerminalToolRuntime(toolTabId);
   }
 
   async function closeWorkspaceSlotsToRight(workspaceId: string, slotId: string) {
+    const toolIds = terminalToolTabIdsClosedToRight(workspaceId, slotId);
+    for (const toolTabId of toolIds) {
+      const confirmed = await confirmTerminalToolRuntimeClose(toolTabId);
+      if (!confirmed) return;
+    }
     await workspaceStore.dispatch({ kind: "close_tool_slots_to_right", workspace_id: workspaceId, slot_id: slotId });
+    for (const toolTabId of toolIds) await disposeTerminalToolRuntime(toolTabId);
+  }
+
+  function terminalToolTabIdsClosedByOtherSlots(workspaceId: string, slotId: string) {
+    const workspace = workspaceById(workspaceId);
+    if (!workspace) return [];
+    return listWorkspaceSlots(workspace.layout)
+      .filter((slot) => slot.id !== slotId && slot.kind === "owned")
+      .map((slot) => terminalToolTabForSlot(slot)?.id ?? "")
+      .filter((id) => id.length > 0);
+  }
+
+  function terminalToolTabIdsClosedToRight(workspaceId: string, slotId: string) {
+    const workspace = workspaceById(workspaceId);
+    if (!workspace) return [];
+    const group = findWorkspaceGroupContainingSlot(workspace.layout, slotId);
+    if (!group) return [];
+    const index = group.slots.findIndex((slot) => slot.id === slotId);
+    if (index < 0) return [];
+    return group.slots
+      .slice(index + 1)
+      .filter((slot) => slot.kind === "owned")
+      .map((slot) => terminalToolTabForSlot(slot)?.id ?? "")
+      .filter((id) => id.length > 0);
   }
 
   async function mirrorToolTabToWorkspace(toolTabId: string, targetWorkspaceId: string, targetGroupId: string) {
@@ -618,6 +786,34 @@
   function firstDockGroupId(layout: WorkspaceDockLayout): string | null {
     if (layout.kind === "group") return layout.id;
     return layout.children.map(firstDockGroupId).find((id): id is string => id !== null) ?? null;
+  }
+
+  function findWorkspaceSlot(layout: WorkspaceDockLayout, slotId: string): WorkspaceToolSlot | null {
+    if (layout.kind === "group") return layout.slots.find((slot) => slot.id === slotId) ?? null;
+    return layout.children.map((child) => findWorkspaceSlot(child, slotId)).find((slot): slot is WorkspaceToolSlot => slot !== null) ?? null;
+  }
+
+  function findWorkspaceGroup(
+    layout: WorkspaceDockLayout,
+    groupId: string,
+  ): Extract<WorkspaceDockLayout, { kind: "group" }> | null {
+    if (layout.kind === "group") return layout.id === groupId ? layout : null;
+    return layout.children.map((child) => findWorkspaceGroup(child, groupId)).find((group): group is Extract<WorkspaceDockLayout, { kind: "group" }> => group !== null) ?? null;
+  }
+
+  function findWorkspaceGroupContainingSlot(
+    layout: WorkspaceDockLayout,
+    slotId: string,
+  ): Extract<WorkspaceDockLayout, { kind: "group" }> | null {
+    if (layout.kind === "group") return layout.slots.some((slot) => slot.id === slotId) ? layout : null;
+    return layout.children
+      .map((child) => findWorkspaceGroupContainingSlot(child, slotId))
+      .find((group): group is Extract<WorkspaceDockLayout, { kind: "group" }> => group !== null) ?? null;
+  }
+
+  function listWorkspaceSlots(layout: WorkspaceDockLayout): WorkspaceToolSlot[] {
+    if (layout.kind === "group") return [...layout.slots];
+    return layout.children.flatMap(listWorkspaceSlots);
   }
 
   async function moveWorkspaceSlotToGroup(workspaceId: string, slotId: string, targetGroupId: string) {
@@ -681,10 +877,12 @@
     {
       cwd = null,
       recordHistory = true,
+      toolTabId = "",
       trust = {},
     }: {
       cwd?: string | null;
       recordHistory?: boolean;
+      toolTabId?: string;
       trust?: {
         acceptNewHostKey?: boolean;
         updateChangedHostKey?: boolean;
@@ -714,6 +912,10 @@
     }
 
     const tab = createTerminalTab(info);
+    if (toolTabId) {
+      tab.id = toolTabId;
+      for (const pane of tab.panes) pane.tabId = toolTabId;
+    }
     const pane = terminalPaneById(tab, tab.activePaneId);
     if (!pane) throw new Error(`active pane ${tab.activePaneId} not found in created tab`);
     pane.connectionHostId = connectionHostId;
@@ -721,7 +923,12 @@
       acceptNewHostKey: trust.acceptNewHostKey,
       updateChangedHostKey: trust.updateChangedHostKey,
     };
-    tabs = [...tabs, tab];
+    if (toolTabId) {
+      setTerminalRuntime(toolTabId, { toolTabId, tab });
+      activeTerminalToolTabId = toolTabId;
+    } else {
+      tabs = [...tabs, tab];
+    }
     activeId = tab.id;
     hostSessionRetryByPaneId = {
       ...hostSessionRetryByPaneId,
@@ -737,7 +944,7 @@
       await mountTerminalWhenReady(tab.activePaneId);
       await flushTerminalOutputBacklog(tab.activePaneId);
       terminalPaneById(tab, tab.activePaneId)?.term?.focus();
-      if (recordHistory) {
+      if (recordHistory && !toolTabId) {
         pushUndoAction({ kind: "create_tab", tabId: tab.id });
       } else {
         syncTerminalMenuState();
@@ -822,7 +1029,29 @@
 
   async function openWorkspaceTerminalSession({ recordHistory = true }: { recordHistory?: boolean } = {}) {
     if (!hasTauriRuntime()) return;
-    await createHostSession(activeWorkspaceHostId(), { recordHistory });
+    const workspace = activeWorkspace;
+    if (!workspace) throw new Error("active workspace is not loaded");
+    const before = new Set(
+      (workspaceSnapshot?.tool_tabs ?? [])
+        .filter((tool) => tool.owner_workspace_id === workspace.id && tool.kind === "terminal")
+        .map((tool) => tool.id),
+    );
+    const targetGroupId =
+      lastActivatedContentGroupIdByWorkspace.get(workspace.id) ?? firstContentGroupId(workspace);
+    const next = await workspaceStore.dispatch({
+      kind: "create_terminal_tool_tab",
+      workspace_id: workspace.id,
+      target_group_id: targetGroupId,
+    });
+    const tool = next.tool_tabs.find(
+      (item) =>
+        item.owner_workspace_id === workspace.id &&
+        item.kind === "terminal" &&
+        !before.has(item.id),
+    );
+    if (!tool) throw new Error("created Terminal ToolTab was not found in workspace snapshot");
+    activeTerminalToolTabId = tool.id;
+    await createHostSession(tool.host_id, { recordHistory, toolTabId: tool.id });
   }
 
   async function openDefaultWorkspace() {
@@ -837,7 +1066,6 @@
   async function activateWorkspace(id: string) {
     const current = workspaceSnapshot;
     if (!current || current.active_workspace_id === id) return;
-    saveActiveTerminalRuntime();
     await workspaceStore.dispatch({ kind: "activate_workspace", workspace_id: id });
     await restoreTerminalRuntimeForWorkspace(id);
   }
@@ -845,11 +1073,8 @@
   async function closeWorkspace(id: string) {
     const canClose = await confirmWorkspaceTransferClose(id);
     if (!canClose) return;
-    if (activeTerminalWorkspaceId === id) {
-      saveActiveTerminalRuntime();
-    }
     await workspaceStore.dispatch({ kind: "close_workspace", workspace_id: id });
-    terminalRuntimeByWorkspaceId.delete(id);
+    await disposeTerminalRuntimesForWorkspace(id);
     const nextWorkspaceId = workspaceStore.snapshot?.active_workspace_id;
     if (nextWorkspaceId) await restoreTerminalRuntimeForWorkspace(nextWorkspaceId);
   }
@@ -860,10 +1085,9 @@
       const canClose = await confirmWorkspaceTransferClose(workspaceId);
       if (!canClose) return;
     }
-    saveActiveTerminalRuntime();
     await workspaceStore.dispatch({ kind: "close_other_workspaces", workspace_id: id });
     for (const workspaceId of ids) {
-      terminalRuntimeByWorkspaceId.delete(workspaceId);
+      await disposeTerminalRuntimesForWorkspace(workspaceId);
     }
     await restoreTerminalRuntimeForWorkspace(id);
   }
@@ -877,10 +1101,9 @@
       const canClose = await confirmWorkspaceTransferClose(workspaceId);
       if (!canClose) return;
     }
-    saveActiveTerminalRuntime();
     await workspaceStore.dispatch({ kind: "close_workspaces_to_right", workspace_id: id });
     for (const workspaceId of ids) {
-      terminalRuntimeByWorkspaceId.delete(workspaceId);
+      await disposeTerminalRuntimesForWorkspace(workspaceId);
     }
     const nextWorkspaceId = workspaceStore.snapshot?.active_workspace_id;
     if (nextWorkspaceId) await restoreTerminalRuntimeForWorkspace(nextWorkspaceId);
@@ -926,40 +1149,68 @@
   }
 
   async function ensureStartupSession(restored: boolean) {
-    if (restored || tabs.length > 0) return;
+    if (restored || activeWorkspaceTerminalRuntimesReady()) return;
     if (startupSessionPromise) {
       await startupSessionPromise;
       return;
     }
-    startupSessionPromise = openWorkspaceTerminalSession({ recordHistory: false }).finally(() => {
+    startupSessionPromise = ensureWorkspaceTerminalRuntimes().finally(() => {
       startupSessionPromise = null;
     });
     await startupSessionPromise;
   }
 
-  function saveActiveTerminalRuntime() {
-    if (!activeTerminalWorkspaceId) return;
-    for (const tab of tabs) {
-      for (const pane of tab.panes) detachTerminalPane(pane);
+  function activeWorkspaceTerminalRuntimesReady() {
+    const workspace = activeWorkspace;
+    if (!workspace) return false;
+    const terminalTools = (workspaceSnapshot?.tool_tabs ?? []).filter(
+      (tool) =>
+        tool.owner_workspace_id === workspace.id &&
+        tool.kind === "terminal" &&
+        workspace.owned_tool_tab_ids.includes(tool.id),
+    );
+    return terminalTools.length > 0 && terminalTools.every((tool) => terminalRuntimeByToolTabId.has(tool.id));
+  }
+
+  async function ensureWorkspaceTerminalRuntimes() {
+    const workspace = activeWorkspace;
+    if (!workspace) return;
+    const terminalTools = (workspaceSnapshot?.tool_tabs ?? []).filter(
+      (tool) =>
+        tool.owner_workspace_id === workspace.id &&
+        tool.kind === "terminal" &&
+        workspace.owned_tool_tab_ids.includes(tool.id),
+    );
+    for (const tool of terminalTools) {
+      if (terminalRuntimeByToolTabId.has(tool.id)) continue;
+      activeTerminalToolTabId = tool.id;
+      await createHostSession(tool.host_id, { recordHistory: false, toolTabId: tool.id });
     }
-    terminalRuntimeByWorkspaceId.set(activeTerminalWorkspaceId, {
-      activeId,
-      tabs,
-    });
+    if (!activeTerminalToolTabId && terminalTools[0]) activeTerminalToolTabId = terminalTools[0].id;
+  }
+
+  async function disposeTerminalRuntimesForWorkspace(workspaceId: string) {
+    const toolTabIds = Array.from(terminalRuntimeByToolTabId.values())
+      .filter((runtime) => workspaceToolById(runtime.toolTabId)?.owner_workspace_id === workspaceId)
+      .map((runtime) => runtime.toolTabId);
+    for (const toolTabId of toolTabIds) {
+      await disposeTerminalToolRuntime(toolTabId);
+    }
   }
 
   async function restoreTerminalRuntimeForWorkspace(workspaceId: string) {
     if (activeTerminalWorkspaceId === workspaceId) return;
-    if (activeTerminalWorkspaceId) saveActiveTerminalRuntime();
-    const runtime = terminalRuntimeByWorkspaceId.get(workspaceId);
-    tabs = runtime?.tabs ?? [];
-    activeId = runtime?.activeId ?? "";
     activeTerminalWorkspaceId = workspaceId;
-    await tick();
-    if (activeId) {
-      const tab = tabs.find((item) => item.id === activeId);
-      if (tab) await mountAndFitTabPanes(tab);
+    const workspace = workspaceById(workspaceId);
+    const terminalSlot = workspace ? activeTerminalSlotForWorkspace(workspace) : null;
+    const tool = terminalToolTabForSlot(terminalSlot);
+    if (tool) {
+      activeTerminalToolTabId = tool.id;
+      syncLegacyTerminalTabState();
     }
+    await tick();
+    await ensureWorkspaceTerminalRuntimes();
+    if (activeTerminalToolTabId) await mountTerminalToolTab(activeTerminalToolTabId);
     syncTerminalMenuState();
   }
 
@@ -989,7 +1240,8 @@
   }
 
   function activePane(): TerminalPane | null {
-    const tab = activeTab;
+    const runtime = activeTerminalRuntime();
+    const tab = runtime?.tab ?? activeTab;
     if (!tab) return null;
     return terminalPaneById(tab, tab.activePaneId) ?? null;
   }
@@ -1069,7 +1321,9 @@
   }
 
   function findTabByPaneId(paneId: string): TerminalTab {
-    const tab = tabs.find((item) => item.panes.some((pane) => pane.id === paneId));
+    const tab =
+      terminalRuntimeTabs().find((item) => item.panes.some((pane) => pane.id === paneId)) ??
+      tabs.find((item) => item.panes.some((pane) => pane.id === paneId));
     if (!tab) throw new Error(`tab for pane ${paneId} not found`);
     return tab;
   }
@@ -1954,6 +2208,20 @@
       await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
     }
     throw new Error(`terminal pane ${paneId} did not mount a container`);
+  }
+
+  async function mountTerminalToolTab(toolTabId: string) {
+    const runtime = terminalRuntimeForToolTab(toolTabId);
+    const pane = runtime ? terminalPaneById(runtime.tab, runtime.tab.activePaneId) : null;
+    if (!pane) return;
+    activeTerminalToolTabId = toolTabId;
+    activeId = toolTabId;
+    await tick();
+    await mountTerminalWhenReady(pane.id);
+    await flushTerminalOutputBacklog(pane.id);
+    terminalTabs.scheduleFit(pane.id);
+    pane.term?.focus();
+    syncTerminalMenuState();
   }
 
   function removePaneFromTab(tab: TerminalTab, paneId: string) {
@@ -3340,10 +3608,10 @@
       workspaceStore.dispose();
       if (isHotModuleReplacement) {
         storeHotTabsSnapshot();
-        for (const tab of tabs) disposeTerminalTab(tab);
+        for (const tab of terminalRuntimeTabs()) disposeTerminalTab(tab);
         return;
       }
-      for (const tab of tabs) {
+      for (const tab of terminalRuntimeTabs()) {
         disposeTerminalTab(tab);
         for (const pane of tab.panes) {
           if (movedPaneIds.has(pane.id)) continue;
@@ -3357,6 +3625,16 @@
     const workspaceId = workspaceSnapshot?.active_workspace_id ?? "";
     if (!workspaceId || workspaceId === activeTerminalWorkspaceId) return;
     void restoreTerminalRuntimeForWorkspace(workspaceId).then(() => ensureStartupSession(false));
+  });
+
+  $effect(() => {
+    const workspace = activeWorkspace;
+    if (!workspace) return;
+    const terminalSlot = activeTerminalSlotForWorkspace(workspace);
+    const tool = terminalToolTabForSlot(terminalSlot);
+    if (!tool) return;
+    activeTerminalToolTabId = tool.id;
+    void mountTerminalToolTab(tool.id);
   });
 
   $effect(() => {
@@ -3692,6 +3970,7 @@
       class="workspace-dock-group"
       aria-label="Tool tabs"
       data-dock-group-id={layout.id}
+      data-dock-group-role={dockGroupRole(layout)}
       data-testid={`dock-group-${layout.id}`}
       data-workspace-id={workspace?.id ?? ""}
     >
@@ -3707,7 +3986,10 @@
             class:split-target={toolTabDropTarget?.kind === "split" && toolTabDropTarget.slotId === slot.id}
             type="button"
             data-testid={`tool-slot-${slot.id}`}
+            data-session-id={tool?.kind === "terminal" ? terminalRuntimeForToolTab(tool.id)?.tab.activePaneId : undefined}
+            data-tool-kind={tool?.kind ?? ""}
             data-tool-slot-id={slot.id}
+            data-tool-tab-id={tool?.id ?? ""}
             title={slotToolTitle(slot)}
             onclick={() => workspace ? void activateWorkspaceSlot(workspace, slot.id) : undefined}
             oncontextmenu={(event) => workspace ? openToolTabContextMenu(event, workspace, layout, slot) : undefined}
@@ -3784,6 +4066,8 @@
     <TransfersToolTab workspace={effectiveWorkspace} />
   {:else}
     {@const terminalMode = terminalRenderMode(workspace, effectiveWorkspace)}
+    {@const runtime = terminalRuntimeForToolTab(tool.id)}
+    {@const pane = runtime ? terminalPaneById(runtime.tab, runtime.tab.activePaneId) : null}
     {#if !terminalMode}
       <div class="dock-empty">
         <strong>{tool.title}</strong>
@@ -3803,23 +4087,28 @@
               <img src="/favicon.png" alt="" />
               <h1>Nocturne</h1>
             </div>
+          {:else if !runtime || !pane}
+            <div class="placeholder">
+              <img src="/favicon.png" alt="" />
+              <h1>Nocturne</h1>
+            </div>
           {:else}
-            {#each tabs as tab (tab.id)}
-              <div class:active={tab.id === activeId} class="terminal-pane">
-                <TerminalPaneTree
-                  {tab}
-                  tree={tab.tree}
-                  activePaneId={tab.activePaneId}
-                  {activatePane}
-                  {closePane}
-                  {openPaneContextMenu}
-                  {startResize}
-                  {startPanePointerDrag}
-                  dragActive={dragState !== null}
-                  {dropTarget}
-                />
+            <section
+              class="terminal-surface"
+              data-testid="terminal-surface"
+              data-session-id={pane.id}
+              data-tool-tab-id={tool.id}
+              aria-label={pane.title}
+              role="group"
+              oncontextmenu={(event) => void openPaneContextMenu(event, pane.id)}
+            >
+              <div class="terminal-host" data-testid="terminal-host" role="presentation" onmousedown={() => void mountTerminalToolTab(tool.id)}>
+                <div class="terminal-mount" data-testid="terminal-mount" bind:this={pane.container}></div>
               </div>
-            {/each}
+              {#if pane.error}
+                <p class="terminal-error">{pane.error}</p>
+              {/if}
+            </section>
           {/if}
         </section>
       </section>
@@ -4152,22 +4441,6 @@
     color: var(--app-danger);
     text-align: center;
     overflow-wrap: anywhere;
-  }
-
-  .terminal-pane {
-    position: absolute;
-    inset: 0;
-    min-width: 0;
-    min-height: 0;
-    background: var(--terminal-bg);
-    overflow: hidden;
-    visibility: hidden;
-    pointer-events: none;
-  }
-
-  .terminal-pane.active {
-    visibility: visible;
-    pointer-events: auto;
   }
 
   .connection-picker {

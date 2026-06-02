@@ -285,6 +285,32 @@ function applyDemoWorkspaceIntent(
     });
     return bumpDemoVersion(next);
   }
+  if (intent.kind === "create_terminal_tool_tab") {
+    const workspace = requireDemoWorkspace(next, intent.workspace_id);
+    const toolTabId = `tool-terminal-demo-${next.version + 1}`;
+    const slotId = `slot-terminal-demo-${next.version + 1}`;
+    next.tool_tabs.push({
+      id: toolTabId,
+      kind: "terminal",
+      owner_workspace_id: workspace.id,
+      host_id: workspace.host_id,
+      title: "Local Shell",
+    });
+    workspace.owned_tool_tab_ids.push(toolTabId);
+    const targetGroupId = intent.target_group_id ?? firstDemoTerminalGroupId(workspace.layout);
+    workspace.layout = targetGroupId
+      ? addDemoSlotToGroup(workspace.layout, targetGroupId, {
+          kind: "owned",
+          id: slotId,
+          tool_tab_id: toolTabId,
+        })
+      : addDemoSlotToFirstGroup(workspace.layout, {
+          kind: "owned",
+          id: slotId,
+          tool_tab_id: toolTabId,
+        });
+    return bumpDemoVersion(next);
+  }
   if (intent.kind === "restore_floating_window") {
     const floating = next.floating_windows.find((window) => window.id === intent.floating_window_id);
     if (!floating) throw new Error(`floating window ${intent.floating_window_id} not found`);
@@ -391,6 +417,24 @@ function addDemoSlotToGroup(layout: DemoLayout, groupId: string, slot: DemoSlot)
     return { ...layout, slots: [...layout.slots, slot], active_slot_id: slot.id };
   }
   return { ...layout, children: layout.children.map((child) => addDemoSlotToGroup(child, groupId, slot)) };
+}
+
+function addDemoSlotToFirstGroup(layout: DemoLayout, slot: DemoSlot): DemoLayout {
+  if (layout.kind === "group") {
+    return { ...layout, slots: [...layout.slots, slot], active_slot_id: slot.id };
+  }
+  const children = [...layout.children];
+  const first = children[0];
+  if (!first) throw new Error("dock split has no children");
+  children[0] = addDemoSlotToFirstGroup(first, slot);
+  return { ...layout, children };
+}
+
+function firstDemoTerminalGroupId(layout: DemoLayout): string | null {
+  if (layout.kind === "group") {
+    return layout.slots.some((slot) => slot.kind === "owned" && slot.tool_tab_id.includes("terminal")) ? layout.id : null;
+  }
+  return layout.children.map(firstDemoTerminalGroupId).find((id): id is string => id !== null) ?? null;
 }
 
 function splitDemoSlot(layout: DemoLayout, targetSlotId: string, slot: DemoSlot, side: "left" | "right" | "up" | "down"): DemoLayout {

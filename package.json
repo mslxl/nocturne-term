@@ -8,6 +8,8 @@
     "build": "vite build",
     "test": "node --test --import tsx \"src/**/*.test.ts\"",
     "test:tauri:terminal-workspace-close-single-session": "node tests/tauri/terminal-workspace-close-single-session.test.mjs",
+    "test:tauri:terminal-workspace-new-terminal-tooltab": "node tests/tauri/terminal-workspace-new-terminal-tooltab.test.mjs",
+    "test:tauri:terminal-workspace-switch-preserves-content": "node tests/tauri/terminal-workspace-switch-preserves-content.test.mjs",
     "test:tauri:terminal-workspace-visible-content": "node tests/tauri/terminal-workspace-visible-content.test.mjs",
     "test:tauri:terminal-workspace-single-toolbar": "node tests/tauri/terminal-workspace-single-toolbar.test.mjs",
     "preview": "vite preview",
