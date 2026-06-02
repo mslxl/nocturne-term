@@ -16,6 +16,7 @@ import {
   type AppTheme,
 } from "$lib/config/document";
 import type { MessageKey } from "$lib/i18n/messages";
+import { DEFAULT_FILES_TOOLBAR_ACTION_IDS, filesToolbarActionIdsFromSettingText, filesToolbarActionSettingText } from "$lib/files/toolbar-actions";
 import { defaultKeybindingMap, terminalKeybindings, type KeybindingMap } from "$lib/terminal/keybindings";
 
 export type SettingCategoryId = "appearance" | "workspace" | "terminal" | "files" | "transfers" | "keybindings" | "profiles" | "hosts";
@@ -379,6 +380,20 @@ export const settingsSchema: SettingDefinition[] = [
     step: 1048576,
     get: (root) => integerValue(valueAt(root, ["files", "image_preview_limit_bytes"])) ?? 10485760,
     toConfigValue: (value) => configInteger(Number(value)),
+  },
+  {
+    key: "files.toolbar_actions",
+    category: "files",
+    label: "filesToolbarActions",
+    path: ["files", "toolbar_actions"],
+    kind: "textarea",
+    defaultValue: filesToolbarActionSettingText(DEFAULT_FILES_TOOLBAR_ACTION_IDS),
+    help: "filesToolbarActionsHelp",
+    get: (root) => filesToolbarActionSettingText(stringArrayValue(valueAt(root, ["files", "toolbar_actions"])) ?? DEFAULT_FILES_TOOLBAR_ACTION_IDS),
+    toConfigValue: (value) => {
+      const ids = filesToolbarActionIdsFromSettingText(String(value));
+      return ids.length ? configStringArray(ids) : undefined;
+    },
   },
   {
     key: "transfers.global_concurrency",

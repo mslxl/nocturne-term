@@ -10,6 +10,7 @@
   import FolderIcon from "~icons/lucide/folder";
   import { commands, type FileEntry, type FileListResult, type FilePreviewResult, type FileProviderKind, type FileSearchResult, type TransferEndpoint, type WorkspaceToolTab } from "$lib/bindings";
   import { clearFilesClipboard, filesClipboardSnapshot, setFilesClipboard } from "$lib/files/clipboard.svelte";
+  import { DEFAULT_FILES_TOOLBAR_ACTION_IDS, normalizeFilesToolbarActionIds, type FilesToolbarActionId } from "$lib/files/toolbar-actions";
   import { buildFileTreeRows, fileTreeClickAction, fileTreeDoubleClickAction, isRenderableFilePreview, shouldShowFilePreviewRegion } from "$lib/files/tree";
   import { hasTauriRuntime } from "$lib/tauri/runtime";
   import { unwrapCommand } from "$lib/terminal/commands";
@@ -22,6 +23,7 @@
     deleteBehavior?: "direct" | "try_remote_trash";
     textPreviewLimitBytes?: number;
     imagePreviewLimitBytes?: number;
+    toolbarActionIds?: readonly string[];
   };
 
   let {
@@ -32,6 +34,7 @@
     deleteBehavior = "direct",
     textPreviewLimitBytes = 1_048_576,
     imagePreviewLimitBytes = 10_485_760,
+    toolbarActionIds = DEFAULT_FILES_TOOLBAR_ACTION_IDS,
   }: Props = $props();
   let path = $state<string | null>(null);
   let selectedPath = $state("");
@@ -80,6 +83,17 @@
   const overlayBothOptions = {
     overflow: {
       x: "scroll",
+      y: "scroll",
+    },
+    scrollbars: {
+      autoHide: "leave",
+      autoHideDelay: 420,
+      theme: "os-theme-nocturne",
+    },
+  } as const;
+  const overlayPreviewOptions = {
+    overflow: {
+      x: "hidden",
       y: "scroll",
     },
     scrollbars: {
@@ -158,6 +172,7 @@
   const columnPaths = $derived(columnsForPath(currentPath));
   const filesClipboard = $derived(filesClipboardSnapshot());
   const canPaste = $derived(Boolean(filesClipboard && result?.provider.capabilities.can_write));
+  const visibleToolbarActionIds = $derived(normalizeFilesToolbarActionIds(toolbarActionIds));
 
   const previewQuery = createQuery(() => ({
     queryKey: ["files", "preview", toolTab.id, toolTab.host_id, previewPath, textPreviewLimitBytes, imagePreviewLimitBytes],
@@ -790,6 +805,105 @@
     );
     await refreshTransfers();
   }
+
+  function toolbarActionLabel(id: FilesToolbarActionId) {
+    if (id === "up") return "Up";
+    if (id === "refresh") return "Refresh";
+    if (id === "new_folder") return "New folder";
+    if (id === "rename") return "Rename";
+    if (id === "permissions") return "Permissions";
+    if (id === "delete") return "Delete";
+    if (id === "copy") return "Copy";
+    if (id === "cut") return "Cut";
+    if (id === "paste") return "Paste";
+    if (id === "upload_files") return "Upload files";
+    if (id === "upload_folder") return "Upload folder";
+    if (id === "download") return "Download";
+    if (id === "search") return "Search";
+    if (id === "view_mode") return "View mode";
+    if (id === "path") return "Path";
+    throw new Error(`Unsupported Files toolbar action id: ${id}`);
+  }
+
+  function toolbarActionIcon(id: FilesToolbarActionId) {
+    if (id === "up") return "↑";
+    if (id === "refresh") return "↻";
+    if (id === "new_folder") return "＋";
+    if (id === "rename") return "✎";
+    if (id === "permissions") return "◫";
+    if (id === "delete") return "⌫";
+    if (id === "copy") return "⧉";
+    if (id === "cut") return "✂";
+    if (id === "paste") return "▣";
+    if (id === "upload_files") return "⇧";
+    if (id === "upload_folder") return "⇪";
+    if (id === "download") return "⇩";
+    if (id === "search") return "⌕";
+    throw new Error(`Files toolbar action ${id} does not have an icon button`);
+  }
+
+  function toolbarActionDisabled(id: FilesToolbarActionId) {
+    if (id === "rename" || id === "delete" || id === "copy" || id === "cut" || id === "download") return !selectedEntry;
+    if (id === "permissions") return !selectedEntry || !result?.provider.capabilities.can_chmod;
+    if (id === "paste") return !canPaste;
+    return false;
+  }
+
+  async function runToolbarAction(id: FilesToolbarActionId) {
+    if (id === "up") {
+      goUp();
+      return;
+    }
+    if (id === "refresh") {
+      await refresh();
+      return;
+    }
+    if (id === "new_folder") {
+      openCreateDirectoryDialog();
+      return;
+    }
+    if (id === "rename") {
+      openRenameDialog();
+      return;
+    }
+    if (id === "permissions") {
+      openChmodDialog();
+      return;
+    }
+    if (id === "delete") {
+      await deleteSelected();
+      return;
+    }
+    if (id === "copy") {
+      copySelected();
+      return;
+    }
+    if (id === "cut") {
+      cutSelected();
+      return;
+    }
+    if (id === "paste") {
+      await pasteClipboard();
+      return;
+    }
+    if (id === "upload_files") {
+      await uploadFiles();
+      return;
+    }
+    if (id === "upload_folder") {
+      await uploadFolder();
+      return;
+    }
+    if (id === "download") {
+      await downloadSelected();
+      return;
+    }
+    if (id === "search") {
+      searchOpen = !searchOpen;
+      return;
+    }
+    throw new Error(`Unsupported executable Files toolbar action id: ${id}`);
+  }
 </script>
 
 <section class:drag-hover={dragHover} class="files-tooltab" aria-label="Files">
@@ -800,24 +914,29 @@
     </div>
   {:else}
   <header class="files-toolbar">
-    <button type="button" title="Up" aria-label="Up" onclick={goUp}>↑</button>
-    <button type="button" title="Refresh" aria-label="Refresh" onclick={() => void refresh()}>↻</button>
-    <button type="button" title="New folder" aria-label="New folder" onclick={openCreateDirectoryDialog}>＋</button>
-    <button type="button" title="Rename" aria-label="Rename" disabled={!selectedEntry} onclick={openRenameDialog}>✎</button>
-    <button type="button" title="Permissions" aria-label="Permissions" disabled={!selectedEntry || !result?.provider.capabilities.can_chmod} onclick={openChmodDialog}>◫</button>
-    <button type="button" title="Delete" aria-label="Delete" disabled={!selectedEntry} onclick={() => void deleteSelected()}>⌫</button>
-    <button type="button" title="Copy" aria-label="Copy" disabled={!selectedEntry} onclick={copySelected}>⧉</button>
-    <button type="button" title="Cut" aria-label="Cut" disabled={!selectedEntry} onclick={cutSelected}>✂</button>
-    <button type="button" title="Paste" aria-label="Paste" disabled={!canPaste} onclick={() => void pasteClipboard()}>▣</button>
-    <button type="button" title="Upload files" aria-label="Upload files" onclick={() => void uploadFiles()}>⇧</button>
-    <button type="button" title="Upload folder" aria-label="Upload folder" onclick={() => void uploadFolder()}>⇪</button>
-    <button type="button" title="Download" aria-label="Download" disabled={!selectedEntry} onclick={() => void downloadSelected()}>⇩</button>
-    <button type="button" title="Search" aria-label="Search" onclick={() => (searchOpen = !searchOpen)}>⌕</button>
-    <div class="view-toggle" role="group" aria-label="View mode">
-      <button class:active={viewMode === "tree"} type="button" title="Tree view" aria-label="Tree view" onclick={() => (viewMode = "tree")}>☰</button>
-      <button class:active={viewMode === "columns"} type="button" title="Columns view" aria-label="Columns view" onclick={() => (viewMode = "columns")}>▥</button>
-    </div>
-    <div class="path-field" title={currentPath}>{currentPath}</div>
+    {#each visibleToolbarActionIds as actionId (actionId)}
+      {#if actionId === "view_mode"}
+        <div class="view-toggle" role="group" aria-label="View mode">
+          <button class:active={viewMode === "tree"} type="button" title="Tree view" aria-label="Tree view" onclick={() => (viewMode = "tree")}>☰</button>
+          <button class:active={viewMode === "columns"} type="button" title="Columns view" aria-label="Columns view" onclick={() => (viewMode = "columns")}>▥</button>
+        </div>
+      {:else if actionId === "path"}
+        <div class="path-field" title={currentPath}>{currentPath}</div>
+      {:else}
+        <button
+          type="button"
+          title={toolbarActionLabel(actionId)}
+          aria-label={toolbarActionLabel(actionId)}
+          disabled={toolbarActionDisabled(actionId)}
+          onclick={() =>
+            void runToolbarAction(actionId).catch((error) => {
+              operationError = error instanceof Error ? error.message : String(error);
+            })}
+        >
+          {toolbarActionIcon(actionId)}
+        </button>
+      {/if}
+    {/each}
   </header>
 
   {#if searchOpen}
@@ -1028,9 +1147,9 @@
         <span>{formatPreviewModified(previewResult)}</span>
       </header>
       {#if previewResult.content.kind === "text"}
-        <OverlayScrollbarsComponent element="pre" class="preview-text" options={overlayBothOptions} defer>{previewResult.content.text}</OverlayScrollbarsComponent>
+        <OverlayScrollbarsComponent element="pre" class="preview-text" options={overlayPreviewOptions} defer>{previewResult.content.text}</OverlayScrollbarsComponent>
       {:else if previewResult.content.kind === "image"}
-        <OverlayScrollbarsComponent element="div" class="image-preview" options={overlayBothOptions} defer>
+        <OverlayScrollbarsComponent element="div" class="image-preview" options={overlayPreviewOptions} defer>
           <img alt={previewResult.name} src={previewImageSrc(previewResult)} />
         </OverlayScrollbarsComponent>
       {/if}
@@ -1073,8 +1192,8 @@
 
   .files-toolbar {
     min-width: 0;
-    display: grid;
-    grid-template-columns: repeat(13, 30px) auto minmax(0, 1fr);
+    display: flex;
+    flex-wrap: wrap;
     gap: 4px;
     align-items: center;
     padding: 4px 6px;
@@ -1088,6 +1207,7 @@
   }
 
   .files-toolbar button {
+    flex: 0 0 30px;
     width: 30px;
     height: 28px;
     border: 0;
@@ -1105,6 +1225,7 @@
   }
 
   .view-toggle {
+    flex: 0 0 58px;
     display: grid;
     grid-template-columns: repeat(2, 28px);
     height: 28px;
@@ -1124,7 +1245,10 @@
   }
 
   .path-field {
+    box-sizing: border-box;
+    flex: 1 1 132px;
     min-width: 0;
+    max-width: 100%;
     height: 28px;
     display: flex;
     align-items: center;
@@ -1417,9 +1541,11 @@
     min-width: 0;
     min-height: 0;
     height: 100%;
+    container-type: inline-size;
     display: grid;
     grid-template-rows: auto minmax(0, 1fr);
     font-size: 12px;
+    overflow: hidden;
   }
 
   .preview-content header {
@@ -1428,6 +1554,7 @@
     gap: 3px;
     border-bottom: 1px solid color-mix(in srgb, var(--app-border) 65%, transparent);
     padding: 8px 10px;
+    overflow: hidden;
   }
 
   .preview-content header strong,
@@ -1451,7 +1578,9 @@
   .preview-content :global(.preview-text) {
     min-width: 0;
     min-height: 0;
+    max-width: 100%;
     margin: 0;
+    overflow-x: hidden;
     padding: 10px;
     color: color-mix(in srgb, var(--app-fg) 86%, transparent);
     font-family: var(--terminal-font-family, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
@@ -1465,6 +1594,7 @@
     min-width: 0;
     min-height: 0;
     display: grid;
+    overflow: hidden;
     place-items: center;
     padding: 10px;
   }

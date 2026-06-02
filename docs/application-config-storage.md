@@ -352,6 +352,7 @@ clipboard_semantics = "windows" # windows | finder
 remote_helper_policy = "ask" # ask | never | allow
 text_preview_limit_bytes = 1048576
 image_preview_limit_bytes = 10485760
+toolbar_actions = ["up", "refresh", "new_folder", "rename", "permissions", "delete", "copy", "cut", "paste", "upload_files", "upload_folder", "download", "search", "view_mode", "path"]
 
 [transfers]
 global_concurrency = 3

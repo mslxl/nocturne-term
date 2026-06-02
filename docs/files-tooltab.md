@@ -175,6 +175,8 @@ The Files toolbar includes:
 
 Use icon buttons with tooltips. Enable actions based on provider capabilities and selection state.
 
+The global Files setting `files.toolbar_actions` controls which toolbar actions are shown and the display order. The setting is an ordered list of action ids. Unknown or repeated ids are ignored, and Nocturne uses the built-in default order when no configured id is usable. `view_mode` and `path` are toolbar items in the same ordered flow, so users can place or hide them like other toolbar controls.
+
 The breadcrumb/path control is a core toolbar control. It supports clickable path segments, manual path entry, and path copying.
 
 Hidden files are shown by default because remote and developer workflows often depend on dotfiles. The setting and toolbar can hide them.
@@ -241,6 +243,8 @@ Default thresholds:
 - image preview: 10 MiB
 
 Thresholds are configurable in settings. Larger files show metadata and download actions only.
+
+Preview content should avoid horizontal scrollbars. Text previews wrap long lines inside the preview column, and image previews fit within the available width.
 
 Preview requests should be cancellable. Changing selection cancels stale preview requests.
 
