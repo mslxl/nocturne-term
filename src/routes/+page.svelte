@@ -17,6 +17,7 @@
     type TerminalSettings,
     type WorkspaceDockLayout,
     type WorkspaceFloatingWindowState,
+    type WorkspaceLayoutSnapshot,
     type WorkspaceTabState,
     type WorkspaceToolSlot,
     type WorkspaceToolTab,
@@ -653,9 +654,10 @@
       const confirmed = await confirmTerminalToolRuntimeClose(tool.id);
       if (!confirmed) return;
     }
-    await workspaceStore.dispatch({ kind: "close_tool_slot", workspace_id: workspaceId, slot_id: slotId });
+    const next = await workspaceStore.dispatch({ kind: "close_tool_slot", workspace_id: workspaceId, slot_id: slotId });
     if (slot?.kind === "owned" && tool) {
       await disposeTerminalToolRuntime(tool.id);
+      await mountActiveTerminalForWorkspace(workspaceId, next);
     }
   }
 
@@ -681,10 +683,11 @@
     if (!runtime) return;
     const pane = terminalPaneById(runtime.tab, runtime.tab.activePaneId);
     if (!pane) return;
+    const shouldCloseSession = pane.status === "running";
     disposeTerminalTab(runtime.tab);
-    if (pane.status === "running") await closePaneSession(pane);
-    deleteTerminalRuntime(toolTabId);
     if (activeTerminalToolTabId === toolTabId) activeTerminalToolTabId = "";
+    deleteTerminalRuntime(toolTabId);
+    if (shouldCloseSession) await closePaneSession(pane);
   }
 
   async function closeOtherWorkspaceSlots(workspaceId: string, slotId: string) {
@@ -693,8 +696,9 @@
       const confirmed = await confirmTerminalToolRuntimeClose(toolTabId);
       if (!confirmed) return;
     }
-    await workspaceStore.dispatch({ kind: "close_other_tool_slots", workspace_id: workspaceId, slot_id: slotId });
+    const next = await workspaceStore.dispatch({ kind: "close_other_tool_slots", workspace_id: workspaceId, slot_id: slotId });
     for (const toolTabId of toolIds) await disposeTerminalToolRuntime(toolTabId);
+    await mountActiveTerminalForWorkspace(workspaceId, next);
   }
 
   async function closeWorkspaceSlotsToRight(workspaceId: string, slotId: string) {
@@ -703,8 +707,54 @@
       const confirmed = await confirmTerminalToolRuntimeClose(toolTabId);
       if (!confirmed) return;
     }
-    await workspaceStore.dispatch({ kind: "close_tool_slots_to_right", workspace_id: workspaceId, slot_id: slotId });
+    const next = await workspaceStore.dispatch({ kind: "close_tool_slots_to_right", workspace_id: workspaceId, slot_id: slotId });
     for (const toolTabId of toolIds) await disposeTerminalToolRuntime(toolTabId);
+    await mountActiveTerminalForWorkspace(workspaceId, next);
+  }
+
+  async function mountActiveTerminalForWorkspace(workspaceId: string, snapshot: WorkspaceLayoutSnapshot | null = workspaceSnapshot) {
+    const workspace = snapshot?.workspaces.find((item) => item.id === workspaceId) ?? null;
+    if (!workspace) return;
+    const toolById = (toolTabId: string) => snapshot?.tool_tabs.find((item) => item.id === toolTabId) ?? null;
+    const terminalSlot = activeTerminalSlotForWorkspaceSnapshot(workspace, toolById);
+    const tool = terminalSlot && terminalSlot.kind !== "closed_source" && terminalSlot.kind !== "floating_placeholder"
+      ? toolById(terminalSlot.tool_tab_id)
+      : null;
+    if (tool?.kind !== "terminal") return;
+    if (!terminalRuntimeForToolTab(tool.id)) return;
+    activeTerminalToolTabId = tool.id;
+    syncLegacyTerminalTabState();
+    await tick();
+    await mountTerminalToolTab(tool.id);
+  }
+
+  function activeTerminalSlotForWorkspaceSnapshot(
+    workspace: WorkspaceTabState,
+    toolById: (toolTabId: string) => WorkspaceToolTab | null,
+  ): WorkspaceToolSlot | null {
+    return activeTerminalSlotFromSnapshot(workspace.layout, toolById);
+  }
+
+  function activeTerminalSlotFromSnapshot(
+    layout: WorkspaceDockLayout,
+    toolById: (toolTabId: string) => WorkspaceToolTab | null,
+  ): WorkspaceToolSlot | null {
+    if (layout.kind === "group") {
+      const active = activeGroupSlot(layout);
+      if (slotIsTerminalForSnapshot(active, toolById)) return active;
+      return layout.slots.find((slot) => slotIsTerminalForSnapshot(slot, toolById)) ?? null;
+    }
+    return layout.children
+      .map((child) => activeTerminalSlotFromSnapshot(child, toolById))
+      .find((slot): slot is WorkspaceToolSlot => slot !== null) ?? null;
+  }
+
+  function slotIsTerminalForSnapshot(
+    slot: WorkspaceToolSlot | null,
+    toolById: (toolTabId: string) => WorkspaceToolTab | null,
+  ) {
+    if (!slot || slot.kind === "closed_source" || slot.kind === "floating_placeholder") return false;
+    return toolById(slot.tool_tab_id)?.kind === "terminal";
   }
 
   function terminalToolTabIdsClosedByOtherSlots(workspaceId: string, slotId: string) {
@@ -1442,9 +1492,15 @@
   }
 
   async function closePaneSession(pane: TerminalPane) {
-    await unwrapCommand(commands.closeTerminalSession(pane.id)).catch((error) => {
-      settingsError = error instanceof Error ? error.message : String(error);
-    });
+    try {
+      await unwrapCommand(commands.closeTerminalSession(pane.id));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (isTerminalSessionInactiveMessage(message) || message.includes("The operation completed successfully") || message.includes("os error 0")) {
+        return;
+      }
+      terminalTabs.markConnectionError(pane.id, message);
+    }
   }
 
   function pushUndoAction(action: TerminalUndoAction) {
@@ -2217,6 +2273,33 @@
     throw new Error(`terminal pane ${paneId} did not mount a container`);
   }
 
+  function terminalMount(node: HTMLDivElement, params: { pane: TerminalPane; toolTabId: string }) {
+    let current = params;
+    attachTerminalMount(node, current);
+    return {
+      update(next: { pane: TerminalPane; toolTabId: string }) {
+        if (next.pane === current.pane && next.toolTabId === current.toolTabId) return;
+        detachTerminalMount(node, current.pane);
+        current = next;
+        attachTerminalMount(node, current);
+      },
+      destroy() {
+        detachTerminalMount(node, current.pane);
+      },
+    };
+  }
+
+  function attachTerminalMount(node: HTMLDivElement, params: { pane: TerminalPane; toolTabId: string }) {
+    params.pane.container = node;
+    void mountTerminalToolTab(params.toolTabId);
+  }
+
+  function detachTerminalMount(node: HTMLDivElement, pane: TerminalPane) {
+    if (pane.container === node) {
+      pane.container = undefined;
+    }
+  }
+
   async function mountTerminalToolTab(toolTabId: string) {
     const runtime = terminalRuntimeForToolTab(toolTabId);
     const pane = runtime ? terminalPaneById(runtime.tab, runtime.tab.activePaneId) : null;
@@ -2307,28 +2390,8 @@
       changeTabTitleForPane(event.pane_id);
       return;
     }
-    if (event.action === "zoom_split") {
-      void zoomPane(event.pane_id);
-      return;
-    }
     if (event.action === "close_pane") {
       void closePane(event.pane_id, { recordHistory: true });
-      return;
-    }
-    if (event.action === "split_left") {
-      void splitPaneById(event.pane_id, "left");
-      return;
-    }
-    if (event.action === "split_right") {
-      void splitPaneById(event.pane_id, "right");
-      return;
-    }
-    if (event.action === "split_up") {
-      void splitPaneById(event.pane_id, "up");
-      return;
-    }
-    if (event.action === "split_down") {
-      void splitPaneById(event.pane_id, "down");
       return;
     }
     settingsError = `Unsupported pane menu action: ${event.action}`;
@@ -3984,25 +4047,33 @@
       <div class="tool-tabbar">
         {#each layout.slots as slot (slot.id)}
           {@const tool = slotTool(slot)}
-          <button
+          <div
+            class="tool-tab"
             class:active={slot.id === layout.active_slot_id}
             class:closed={slot.kind === "closed_source"}
             class:dragging={toolTabDragState?.slotId === slot.id}
             class:mirror={slot.kind === "mirror"}
             class:placeholder={slot.kind === "floating_placeholder"}
             class:split-target={toolTabDropTarget?.kind === "split" && toolTabDropTarget.slotId === slot.id}
-            type="button"
             data-testid={`tool-slot-${slot.id}`}
             data-session-id={tool?.kind === "terminal" ? terminalRuntimeForToolTab(tool.id)?.tab.activePaneId : undefined}
             data-tool-kind={tool?.kind ?? ""}
             data-tool-slot-id={slot.id}
             data-tool-tab-id={tool?.id ?? ""}
+            role="tab"
+            tabindex="0"
+            aria-selected={slot.id === layout.active_slot_id}
             title={slotToolTitle(slot)}
             onclick={() => workspace ? void activateWorkspaceSlot(workspace, slot.id) : undefined}
+            onkeydown={(event) => {
+              if (event.key !== "Enter" && event.key !== " ") return;
+              event.preventDefault();
+              if (workspace) void activateWorkspaceSlot(workspace, slot.id);
+            }}
             oncontextmenu={(event) => workspace ? openToolTabContextMenu(event, workspace, layout, slot) : undefined}
             onpointerdown={(event) => workspace ? startToolTabPointerDrag(event, workspace, slot) : undefined}
           >
-            <span>{slotToolTitle(slot)}</span>
+            <span class="tool-title">{slotToolTitle(slot)}</span>
             {#if slot.kind === "mirror"}
               <small>{ownerWorkspaceTitle(slot)}</small>
             {:else if slot.kind === "floating_placeholder"}
@@ -4010,21 +4081,22 @@
             {:else if slot.kind === "closed_source"}
               <small>Closed</small>
             {/if}
-          </button>
-          {#if workspace}
-            <button
-              class="tool-close"
-              type="button"
-              aria-label={`Close ${slotToolTitle(slot)}`}
-              title="Close ToolTab"
-              onclick={(event) => {
-                event.stopPropagation();
-                void closeWorkspaceSlot(workspace.id, slot.id);
-              }}
-            >
-              ×
-            </button>
-          {/if}
+            {#if workspace && slot.id === layout.active_slot_id}
+              <button
+                class="tool-close"
+                type="button"
+                aria-label={`Close ${slotToolTitle(slot)}`}
+                title="Close ToolTab"
+                onpointerdown={(event) => event.stopPropagation()}
+                onclick={(event) => {
+                  event.stopPropagation();
+                  void closeWorkspaceSlot(workspace.id, slot.id);
+                }}
+              >
+                ×
+              </button>
+            {/if}
+          </div>
         {/each}
       </div>
       {#if true}
@@ -4110,7 +4182,7 @@
               oncontextmenu={(event) => void openPaneContextMenu(event, pane.id)}
             >
               <div class="terminal-host" data-testid="terminal-host" role="presentation" onmousedown={() => void mountTerminalToolTab(tool.id)}>
-                <div class="terminal-mount" data-testid="terminal-mount" bind:this={pane.container}></div>
+                <div class="terminal-mount" data-testid="terminal-mount" use:terminalMount={{ pane, toolTabId: tool.id }}></div>
               </div>
               {#if pane.error}
                 <p class="terminal-error">{pane.error}</p>
@@ -4268,7 +4340,7 @@
     padding: 3px 5px 0;
   }
 
-  .tool-tabbar button {
+  .tool-tab {
     min-width: 0;
     max-width: 180px;
     height: 28px;
@@ -4283,54 +4355,69 @@
     color: color-mix(in srgb, var(--app-fg) 72%, transparent);
     font: inherit;
     font-size: 12px;
+    user-select: none;
+    -webkit-user-select: none;
   }
 
-  .tool-tabbar button.tool-close {
+  .tool-close {
     flex: none;
     width: 24px;
+    height: 22px;
     max-width: 24px;
     justify-content: center;
+    align-items: center;
+    display: inline-flex;
+    border: 0;
+    border-radius: 4px;
     padding: 0;
+    background: transparent;
     color: color-mix(in srgb, var(--app-fg) 48%, transparent);
+    font: inherit;
+    font-size: 13px;
   }
 
-  .tool-tabbar button.tool-close:hover {
+  .tool-close:hover {
     color: var(--app-fg);
     background: var(--app-hover);
   }
 
-  .tool-tabbar button.active {
+  .tool-tab.active {
     border-color: var(--app-border);
     background: color-mix(in srgb, var(--app-bg) 88%, var(--app-control));
     color: var(--app-fg);
   }
 
-  .tool-tabbar button.dragging {
+  .tool-tab:focus-visible {
+    outline: 1px solid color-mix(in srgb, var(--app-accent) 76%, transparent);
+    outline-offset: -2px;
+  }
+
+  .tool-tab.dragging {
     opacity: 0.45;
   }
 
-  .tool-tabbar button.split-target {
+  .tool-tab.split-target {
     border-color: color-mix(in srgb, var(--app-accent) 72%, var(--app-border));
     box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--app-accent) 45%, transparent);
   }
 
-  .tool-tabbar button.mirror {
+  .tool-tab.mirror {
     border-color: color-mix(in srgb, var(--app-accent) 58%, var(--app-border));
   }
 
-  .tool-tabbar button.closed,
-  .tool-tabbar button.placeholder {
+  .tool-tab.closed,
+  .tool-tab.placeholder {
     color: color-mix(in srgb, var(--app-fg) 54%, transparent);
   }
 
-  .tool-tabbar button span {
+  .tool-tab .tool-title {
     min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
 
-  .tool-tabbar button small {
+  .tool-tab small {
     flex: none;
     border: 1px solid color-mix(in srgb, var(--app-fg) 16%, transparent);
     border-radius: 999px;

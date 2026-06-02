@@ -3,6 +3,8 @@
   import { ask, message, open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
   import { getCurrentWebview } from "@tauri-apps/api/webview";
   import { createQuery, useQueryClient } from "@tanstack/svelte-query";
+  import { OverlayScrollbarsComponent } from "overlayscrollbars-svelte";
+  import "overlayscrollbars/overlayscrollbars.css";
   import FileIcon from "~icons/lucide/file";
   import FileSymlinkIcon from "~icons/lucide/file-symlink";
   import FolderIcon from "~icons/lucide/folder";
@@ -53,6 +55,39 @@
     value: string;
   } | null>(null);
   const queryClient = useQueryClient();
+  const overlayVerticalOptions = {
+    overflow: {
+      x: "hidden",
+      y: "scroll",
+    },
+    scrollbars: {
+      autoHide: "leave",
+      autoHideDelay: 420,
+      theme: "os-theme-nocturne",
+    },
+  } as const;
+  const overlayHorizontalOptions = {
+    overflow: {
+      x: "scroll",
+      y: "hidden",
+    },
+    scrollbars: {
+      autoHide: "leave",
+      autoHideDelay: 420,
+      theme: "os-theme-nocturne",
+    },
+  } as const;
+  const overlayBothOptions = {
+    overflow: {
+      x: "scroll",
+      y: "scroll",
+    },
+    scrollbars: {
+      autoHide: "leave",
+      autoHideDelay: 420,
+      theme: "os-theme-nocturne",
+    },
+  } as const;
 
   onMount(() => {
     if (!hasTauriRuntime()) return;
@@ -818,7 +853,7 @@
             <small>truncated</small>
           {/if}
         </header>
-        <div class="search-list">
+        <OverlayScrollbarsComponent element="div" class="search-list" options={overlayVerticalOptions} defer>
           {#each searchResult.matches as match (match.path)}
             <button class="search-row" type="button" ondblclick={() => openSearchMatch(match)} onclick={() => (selectedPath = match.path)}>
               <span>{match.name}</span>
@@ -828,15 +863,15 @@
           {#each searchResult.diagnostics as diagnostic, index (`${index}-${diagnostic}`)}
             <p class="search-diagnostic">{diagnostic}</p>
           {/each}
-        </div>
+        </OverlayScrollbarsComponent>
       </div>
     {:else if viewMode === "columns"}
-      <div class="columns-view" aria-label="Columns file browser">
+      <OverlayScrollbarsComponent element="div" class="columns-view" aria-label="Columns file browser" options={overlayHorizontalOptions} defer>
         {#each columnPaths as columnPath (columnPath)}
           <section class="file-column" aria-label={columnPath}>
             <header title={columnPath}>{basename(columnPath) || columnPath}</header>
             {#if columnPath === currentPath}
-              <div class="column-list">
+              <OverlayScrollbarsComponent element="div" class="column-list" options={overlayVerticalOptions} defer>
                 {#each entries as entry (entry.path)}
                   <button
                     class:selected={selectedPath === entry.path}
@@ -860,7 +895,7 @@
                     <small>{formatSize(entry)}</small>
                   </button>
                 {/each}
-              </div>
+              </OverlayScrollbarsComponent>
             {/if}
           </section>
         {/each}
@@ -870,10 +905,10 @@
             {@render previewPanel()}
           </section>
         {/if}
-	      </div>
+	      </OverlayScrollbarsComponent>
 	    {:else}
 	      <div class:with-preview={previewVisible} class="tree-preview-layout">
-	        <div class="files-table" role="treegrid" aria-rowcount={treeRows.length}>
+	        <OverlayScrollbarsComponent element="div" class="files-table" role="treegrid" aria-rowcount={treeRows.length} options={overlayBothOptions} defer>
 	          <div class="files-row files-head" role="row">
 	            <span>Name</span>
 	            <span>Size</span>
@@ -940,7 +975,7 @@
 	              <span>{row.error ?? row.entry.permissions ?? ""}</span>
 	            </div>
 	          {/each}
-	        </div>
+	        </OverlayScrollbarsComponent>
           {#if previewVisible}
             <aside class="tree-preview" aria-label="Preview">
               {@render previewPanel()}
@@ -993,11 +1028,11 @@
         <span>{formatPreviewModified(previewResult)}</span>
       </header>
       {#if previewResult.content.kind === "text"}
-        <pre>{previewResult.content.text}</pre>
+        <OverlayScrollbarsComponent element="pre" class="preview-text" options={overlayBothOptions} defer>{previewResult.content.text}</OverlayScrollbarsComponent>
       {:else if previewResult.content.kind === "image"}
-        <div class="image-preview">
+        <OverlayScrollbarsComponent element="div" class="image-preview" options={overlayBothOptions} defer>
           <img alt={previewResult.name} src={previewImageSrc(previewResult)} />
-        </div>
+        </OverlayScrollbarsComponent>
       {/if}
     </div>
   {/if}
@@ -1149,10 +1184,9 @@
     color: var(--app-danger);
   }
 
-  .files-table {
+  .tree-preview-layout :global(.files-table) {
     min-width: 0;
     min-height: 0;
-    overflow: auto;
     font-size: 12px;
   }
 
@@ -1197,10 +1231,9 @@
     color: var(--app-fg);
   }
 
-  .search-list {
+  .search-results :global(.search-list) {
     min-width: 0;
     min-height: 0;
-    overflow: auto;
   }
 
   .search-row {
@@ -1236,11 +1269,10 @@
     border-bottom: 1px solid color-mix(in srgb, var(--app-border) 45%, transparent);
   }
 
-  .columns-view {
+  .files-tooltab :global(.columns-view) {
     min-width: 0;
     min-height: 0;
     display: flex;
-    overflow: auto;
     font-size: 12px;
   }
 
@@ -1270,10 +1302,9 @@
     white-space: nowrap;
   }
 
-  .column-list {
+  .file-column :global(.column-list) {
     min-width: 0;
     min-height: 0;
-    overflow: auto;
   }
 
   .column-row {
@@ -1417,11 +1448,10 @@
     font-size: 11px;
   }
 
-  .preview-content pre {
+  .preview-content :global(.preview-text) {
     min-width: 0;
     min-height: 0;
     margin: 0;
-    overflow: auto;
     padding: 10px;
     color: color-mix(in srgb, var(--app-fg) 86%, transparent);
     font-family: var(--terminal-font-family, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
@@ -1431,19 +1461,28 @@
     word-break: break-word;
   }
 
-  .image-preview {
+  .preview-content :global(.image-preview) {
     min-width: 0;
     min-height: 0;
     display: grid;
     place-items: center;
-    overflow: auto;
     padding: 10px;
   }
 
-  .image-preview img {
+  .preview-content :global(.image-preview img) {
     max-width: 100%;
     max-height: 100%;
     object-fit: contain;
+  }
+
+  :global(.os-theme-nocturne.os-scrollbar) {
+    --os-size: 7px;
+    --os-padding-perpendicular: 2px;
+    --os-padding-axis: 4px;
+    --os-handle-border-radius: 999px;
+    --os-handle-bg: color-mix(in srgb, var(--app-fg) 26%, transparent);
+    --os-handle-bg-hover: color-mix(in srgb, var(--app-fg) 34%, transparent);
+    --os-handle-bg-active: color-mix(in srgb, var(--app-fg) 42%, transparent);
   }
 
   .dialog-scrim {
