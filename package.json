@@ -14,6 +14,7 @@
     "test:tauri:terminal-workspace-visible-content": "node tests/tauri/terminal-workspace-visible-content.test.mjs",
     "test:tauri:terminal-workspace-single-toolbar": "node tests/tauri/terminal-workspace-single-toolbar.test.mjs",
     "test:tauri:workspace-startup-does-not-restore-state": "node tests/tauri/workspace-startup-does-not-restore-state.test.mjs",
+    "test:tauri:files-toolbar-actions-do-not-overflow-narrow-tooltab": "node tests/tauri/files-toolbar-actions-do-not-overflow-narrow-tooltab.test.mjs",
     "preview": "vite preview",
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
     "check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",

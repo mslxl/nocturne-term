@@ -66,6 +66,11 @@ export function createWorkspaceStore() {
     unlisten = null;
   }
 
+  function replaceSnapshot(next: WorkspaceLayoutSnapshot) {
+    snapshot = next;
+    error = "";
+  }
+
   return {
     get snapshot() {
       return snapshot;
@@ -79,6 +84,7 @@ export function createWorkspaceStore() {
     load,
     dispatch,
     subscribe,
+    replaceSnapshot,
     dispose,
   };
 }

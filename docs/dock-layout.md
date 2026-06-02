@@ -69,6 +69,10 @@ type ToolSlot =
 
 Ratios are positive finite values normalized per split node. Persist ratios, not pixels. Every group and split child must have a minimum size.
 
+## Split Resizing
+
+Every visible split boundary between dock groups is a pointer resize handle. Row splits use horizontal resize behavior and column splits use vertical resize behavior. Dragging a handle updates the split node's ratios, not pixel sizes, and terminal content refits after the Dock layout changes.
+
 ## Drag And Drop
 
 Dock drag uses pointer capture and geometry hit testing. Do not use HTML5 drag-and-drop for dock operations.

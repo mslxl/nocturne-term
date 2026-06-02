@@ -22,7 +22,7 @@
     type WorkspaceToolSlot,
     type WorkspaceToolTab,
   } from "$lib/bindings";
-  import { appLanguageFromConfig, appThemeFromConfig, applyAppPreferences, booleanValue, configString, integerValue, readValue, resolveTheme, stringValue, writeValue } from "$lib/config/document";
+  import { appLanguageFromConfig, appThemeFromConfig, applyAppPreferences, booleanValue, configString, integerValue, readValue, resolveTheme, stringArrayValue, stringValue, writeValue } from "$lib/config/document";
   import CommandPalette from "$lib/command-palette/CommandPalette.svelte";
   import { staticPaletteCommands } from "$lib/command-palette/commands";
   import { localizeCommand, searchPaletteItems, type PaletteItem, type PaletteSearchResult } from "$lib/command-palette/search";
@@ -30,10 +30,12 @@
   import { resolveHostIcon } from "$lib/hosts/icons";
   import { buildHostFolderTree, hostFolderLabel, hostHasBlockingDiagnostics, hostSubtitle, type HostFolderTreeNode } from "$lib/hosts/model";
   import { hasTauriRuntime } from "$lib/tauri/runtime";
+  import { dockSplitGridTemplate, resizeWorkspaceDockSplit } from "$lib/workspace/dock/resize";
   import WorkspaceTabBar from "$lib/workspace/components/WorkspaceTabBar.svelte";
   import { createWorkspaceStore } from "$lib/workspace/state.svelte";
   import { unwrapCommand } from "$lib/terminal/commands";
   import FilesToolTab from "$lib/files/FilesToolTab.svelte";
+  import { DEFAULT_FILES_TOOLBAR_ACTION_IDS, normalizeFilesToolbarActionIds, type FilesToolbarActionId } from "$lib/files/toolbar-actions";
   import TransfersToolTab from "$lib/transfers/TransfersToolTab.svelte";
   import { isTerminalSessionInactiveMessage } from "$lib/terminal/errors";
   import {
@@ -303,6 +305,7 @@
   let filesDeleteBehavior = $state<"direct" | "try_remote_trash">("direct");
   let textPreviewLimitBytes = $state(1_048_576);
   let imagePreviewLimitBytes = $state(10_485_760);
+  let filesToolbarActionIds = $state<FilesToolbarActionId[]>([...DEFAULT_FILES_TOOLBAR_ACTION_IDS]);
   let pendingSshCredential = $state<PendingSshCredential | null>(null);
   let hostSessionRetryByPaneId = $state<Record<string, HostSessionRetry>>({});
   let commandPaletteLastFocus: HTMLElement | null = null;
@@ -323,6 +326,17 @@
     direction: SplitDirection;
     startClient: number;
     containerPixels: number;
+  } | null>(null);
+  let dockResizeDrag = $state<{
+    workspaceId: string | null;
+    floatingWindowId: string | null;
+    baseLayout: WorkspaceDockLayout;
+    splitPath: number[];
+    dividerIndex: number;
+    direction: "row" | "column";
+    startClient: number;
+    containerPixels: number;
+    pointerId: number;
   } | null>(null);
   let dragState = $state<{ kind: "pane" | "tab"; id: string } | null>(null);
   let toolTabDragState = $state<{ workspaceId: string; slotId: string; toolTabId: string | null; active: boolean } | null>(null);
@@ -420,6 +434,7 @@
       filesDeleteBehavior = "direct";
       textPreviewLimitBytes = 1_048_576;
       imagePreviewLimitBytes = 10_485_760;
+      filesToolbarActionIds = [...DEFAULT_FILES_TOOLBAR_ACTION_IDS];
       settings = demoTerminalSettings();
       tabBarOrientation = settings.tab_bar_orientation;
       syncSettingsVariables(settings);
@@ -438,6 +453,7 @@
     filesDeleteBehavior = filesDeleteBehaviorFromConfig(readValue(snapshot.effective_config.root, ["files", "delete_behavior"]));
     textPreviewLimitBytes = integerValue(readValue(snapshot.effective_config.root, ["files", "text_preview_limit_bytes"])) ?? 1_048_576;
     imagePreviewLimitBytes = integerValue(readValue(snapshot.effective_config.root, ["files", "image_preview_limit_bytes"])) ?? 10_485_760;
+    filesToolbarActionIds = normalizeFilesToolbarActionIds(stringArrayValue(readValue(snapshot.effective_config.root, ["files", "toolbar_actions"])));
     const next = await unwrapCommand(commands.getTerminalSettingsForTheme({ resolved_theme: appTheme }));
     settings = next;
     tabBarOrientation = next.tab_bar_orientation;
@@ -614,18 +630,7 @@
   }
 
   function splitStyle(layout: Extract<WorkspaceDockLayout, { kind: "split" }>) {
-    const ratios = normalizedWorkspaceRatios(layout.children.length, layout.ratios);
-    const tracks = ratios.map((ratio) => `${Math.max(0.08, ratio)}fr`).join(" ");
-    return layout.direction === "row" ? `grid-template-columns: ${tracks};` : `grid-template-rows: ${tracks};`;
-  }
-
-  function normalizedWorkspaceRatios(length: number, values: Array<number | null>) {
-    const fallback = Array.from({ length }, () => 1 / Math.max(1, length));
-    if (values.length !== length) return fallback;
-    const numeric = values.map((value) => (typeof value === "number" && Number.isFinite(value) && value > 0 ? value : 0));
-    const total = numeric.reduce((sum, value) => sum + value, 0);
-    if (total <= 0) return fallback;
-    return numeric.map((value) => value / total);
+    return dockSplitGridTemplate(layout.direction, layout.children.length, layout.ratios);
   }
 
   async function activateWorkspaceSlot(workspace: WorkspaceTabState, slotId: string) {
@@ -1722,7 +1727,70 @@
     event.stopPropagation();
   }
 
+  function startDockResize(
+    event: PointerEvent,
+    owner: { workspaceId: string | null; floatingWindowId: string | null },
+    layout: Extract<WorkspaceDockLayout, { kind: "split" }>,
+    splitPath: number[],
+    dividerIndex: number,
+  ) {
+    if (event.button !== 0) return;
+    const target = event.currentTarget;
+    if (!(target instanceof HTMLElement)) return;
+    const split = target.parentElement;
+    if (!split) return;
+    const rect = split.getBoundingClientRect();
+    dockResizeDrag = {
+      ...owner,
+      baseLayout: owner.workspaceId
+        ? (workspaceById(owner.workspaceId)?.layout ?? layout)
+        : (workspaceSnapshot?.floating_windows.find((window) => window.id === owner.floatingWindowId)?.layout ?? layout),
+      splitPath,
+      dividerIndex,
+      direction: layout.direction,
+      startClient: layout.direction === "row" ? event.clientX : event.clientY,
+      containerPixels: layout.direction === "row" ? rect.width : rect.height,
+      pointerId: event.pointerId,
+    };
+    target.setPointerCapture(event.pointerId);
+    event.preventDefault();
+    event.stopPropagation();
+  }
+
+  function updateDockResize(event: PointerEvent) {
+    const drag = dockResizeDrag;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    const currentClient = drag.direction === "row" ? event.clientX : event.clientY;
+    const nextLayout = resizeWorkspaceDockSplit({
+      layout: drag.baseLayout,
+      splitPath: drag.splitPath,
+      dividerIndex: drag.dividerIndex,
+      deltaPixels: currentClient - drag.startClient,
+      containerPixels: drag.containerPixels,
+      minChildPixels: drag.direction === "row" ? 160 : 96,
+    });
+    replaceDockOwnerLayout(drag.workspaceId, drag.floatingWindowId, nextLayout);
+  }
+
+  function replaceDockOwnerLayout(workspaceId: string | null, floatingWindowId: string | null, layout: WorkspaceDockLayout) {
+    const current = workspaceStore.snapshot;
+    if (!current) return;
+    workspaceStore.replaceSnapshot({
+      ...current,
+      workspaces: workspaceId
+        ? current.workspaces.map((workspace) => (workspace.id === workspaceId ? { ...workspace, layout } : workspace))
+        : current.workspaces,
+      floating_windows: floatingWindowId
+        ? current.floating_windows.map((window) => (window.id === floatingWindowId ? { ...window, layout } : window))
+        : current.floating_windows,
+    });
+  }
+
   function handlePointerMove(event: PointerEvent) {
+    if (dockResizeDrag) {
+      updateDockResize(event);
+      return;
+    }
     if (toolTabPointerDrag) {
       updateToolTabPointerDrag(event);
       return;
@@ -1750,6 +1818,10 @@
   }
 
   function handlePointerUp(event: PointerEvent) {
+    if (dockResizeDrag) {
+      dockResizeDrag = null;
+      return;
+    }
     if (toolTabPointerDrag) {
       void finishToolTabPointerDrag(event);
       return;
@@ -1761,6 +1833,7 @@
   }
 
   function handlePointerCancel(event: PointerEvent) {
+    if (dockResizeDrag?.pointerId === event.pointerId) dockResizeDrag = null;
     if (toolTabPointerDrag?.pointerId === event.pointerId) cancelToolTabDragInteraction();
     if (resizeDrag) resizeDrag = null;
     if (pointerDrag?.pointerId === event.pointerId) cancelDragInteraction();
@@ -2014,6 +2087,7 @@
     if (dragState || pointerDrag) cancelDragInteraction();
     if (toolTabDragState || toolTabPointerDrag) cancelToolTabDragInteraction();
     resizeDrag = null;
+    dockResizeDrag = null;
     closeHostPicker();
   }
 
@@ -3772,7 +3846,7 @@
         <span>The floating ToolTab source is no longer available.</span>
       </div>
     {:else if activeWorkspace}
-      {@render dockLayout(activeWorkspace.layout, activeWorkspace)}
+      {@render dockLayout(activeWorkspace.layout, activeWorkspace, null, [])}
     {:else}
       <div class="dock-empty">Workspace</div>
     {/if}
@@ -4018,11 +4092,11 @@
       <span>Floating ToolTabs</span>
       <button type="button" onclick={() => void restoreFloatingWindow(floatingWindow.id)}>Restore</button>
     </header>
-    {@render dockLayout(floatingWindow.layout, null)}
+    {@render dockLayout(floatingWindow.layout, null, floatingWindow.id, [])}
   </section>
 {/snippet}
 
-{#snippet dockLayout(layout: WorkspaceDockLayout, workspace: WorkspaceTabState | null)}
+{#snippet dockLayout(layout: WorkspaceDockLayout, workspace: WorkspaceTabState | null, floatingWindowId: string | null, splitPath: number[])}
   {#if layout.kind === "split"}
     <section
       class:column={layout.direction === "column"}
@@ -4031,7 +4105,24 @@
       style={splitStyle(layout)}
     >
       {#each layout.children as child, index (`${layout.kind}-${index}-${child.kind}`)}
-        {@render dockLayout(child, workspace)}
+        {@render dockLayout(child, workspace, floatingWindowId, [...splitPath, index])}
+        {#if index < layout.children.length - 1}
+          <button
+            class:column={layout.direction === "column"}
+            class:row={layout.direction === "row"}
+            class="workspace-dock-resizer"
+            type="button"
+            aria-label="Resize Dock groups"
+            onpointerdown={(event) =>
+              startDockResize(
+                event,
+                { workspaceId: workspace?.id ?? null, floatingWindowId },
+                layout,
+                splitPath,
+                index,
+              )}
+          ></button>
+        {/if}
       {/each}
     </section>
   {:else}
@@ -4140,6 +4231,7 @@
       deleteBehavior={filesDeleteBehavior}
       {textPreviewLimitBytes}
       {imagePreviewLimitBytes}
+      toolbarActionIds={filesToolbarActionIds}
     />
   {:else if tool.kind === "transfers"}
     <TransfersToolTab workspace={effectiveWorkspace} />
@@ -4310,6 +4402,34 @@
 
   .workspace-dock-split.column {
     grid-auto-flow: row;
+  }
+
+  .workspace-dock-resizer {
+    appearance: none;
+    min-width: 0;
+    min-height: 0;
+    border: 0;
+    padding: 0;
+    background: transparent;
+    touch-action: none;
+  }
+
+  .workspace-dock-resizer.row {
+    width: 5px;
+    height: 100%;
+    cursor: col-resize;
+  }
+
+  .workspace-dock-resizer.column {
+    width: 100%;
+    height: 5px;
+    cursor: row-resize;
+  }
+
+  .workspace-dock-resizer:hover,
+  .workspace-dock-resizer:focus-visible {
+    background: color-mix(in srgb, var(--app-accent) 34%, transparent);
+    outline: 0;
   }
 
   .workspace-dock-group {
