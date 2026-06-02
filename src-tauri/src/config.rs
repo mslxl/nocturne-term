@@ -28,6 +28,7 @@ use crate::{
 };
 
 const CONFIG_CHANGED_EVENT: &str = "config://changed";
+const CONFIG_ROOT_ENV: &str = "NOCTURNE_CONFIG_ROOT";
 const ROOT_DIR_NAME: &str = "nocturne";
 const MAIN_CONFIG_FILE: &str = "config.toml";
 const STATE_FILE: &str = "state.toml";
@@ -72,12 +73,28 @@ impl Default for AppStateFile {
 }
 
 fn root_dir(app: &AppHandle<impl Runtime>) -> Result<PathBuf> {
+    if let Some(root) = config_root_override_from_env_value(env::var(CONFIG_ROOT_ENV).ok())? {
+        return Ok(root);
+    }
     let dir = app
         .path()
         .app_config_dir()
         .map_err(io_error)?
         .join(ROOT_DIR_NAME);
     Ok(dir)
+}
+
+fn config_root_override_from_env_value(value: Option<String>) -> Result<Option<PathBuf>> {
+    let Some(root) = value else {
+        return Ok(None);
+    };
+    let trimmed = root.trim();
+    if trimmed.is_empty() {
+        return Err(invalid_error(format!(
+            "{CONFIG_ROOT_ENV} cannot be empty when set"
+        )));
+    }
+    Ok(Some(PathBuf::from(trimmed)))
 }
 
 pub(crate) fn root_paths(app: &AppHandle<impl Runtime>) -> Result<ConfigRootInfo> {
@@ -2496,6 +2513,24 @@ mod tests {
     use crate::error::ConfigError;
     use crate::types::{ConnectionProtocol, TelnetConnectionConfig};
     use tempfile::tempdir;
+
+    #[test]
+    fn rejects_empty_config_root_override() {
+        let error = config_root_override_from_env_value(Some("  ".to_string()))
+            .expect_err("empty override should fail");
+        assert!(matches!(error, ConfigError::Invalid { .. }));
+    }
+
+    #[test]
+    fn accepts_explicit_config_root_override() {
+        let dir = tempdir().expect("temp dir");
+        assert_eq!(
+            config_root_override_from_env_value(Some(dir.path().to_string_lossy().into_owned()))
+                .expect("override result")
+                .expect("override path"),
+            dir.path()
+        );
+    }
 
     #[test]
     fn converts_toml_integer_to_decimal_string_for_ipc_contract() {

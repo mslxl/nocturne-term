@@ -104,21 +104,9 @@ fn current_snapshot(app: &AppHandle) -> Result<WorkspaceLayoutSnapshot> {
 }
 
 fn load_snapshot(app: &AppHandle) -> Result<WorkspaceLayoutSnapshot> {
-    let path = workspace_state_path(app)?;
-    if !path.exists() {
-        let snapshot = default_snapshot(app)?;
-        save_snapshot(app, &snapshot)?;
-        return Ok(snapshot);
-    }
-    let text = fs::read_to_string(&path).map_err(io_error)?;
-    if text.trim().is_empty() {
-        let snapshot = default_snapshot(app)?;
-        save_snapshot(app, &snapshot)?;
-        return Ok(snapshot);
-    }
-    let state: WorkspaceStateFile = toml::from_str(&text).map_err(parse_error)?;
-    validate_snapshot(&state.snapshot)?;
-    Ok(state.snapshot)
+    let snapshot = default_snapshot(app)?;
+    save_snapshot(app, &snapshot)?;
+    Ok(snapshot)
 }
 
 fn save_snapshot(app: &AppHandle, snapshot: &WorkspaceLayoutSnapshot) -> Result<()> {

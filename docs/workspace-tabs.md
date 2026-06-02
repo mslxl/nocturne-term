@@ -104,9 +104,15 @@ Top-level workspace tabs and inner tool tab bars support `Close Others` and `Clo
 
 ## Restore
 
-Nocturne automatically saves the last window state like an IDE.
+Nocturne does not restore previously persisted Workspace tabs on application startup.
+Each new app process starts from the default Workspace template for the default host.
 
-Persisted state includes:
+Nocturne may still write a lightweight full Workspace snapshot during runtime so
+commands, diagnostics, and the current process have a single authoritative state
+file. Startup treats that file as disposable runtime state and overwrites it with
+the default Workspace snapshot instead of restoring it.
+
+Runtime snapshot state includes:
 
 - workspace order
 - active workspace
@@ -119,7 +125,7 @@ Persisted state includes:
 - floating windows containing owned tool tabs
 - floating placeholders in owner workspaces
 
-Persisted state excludes:
+Runtime snapshot state excludes:
 
 - mirror slots
 - scroll position
@@ -129,15 +135,19 @@ Persisted state excludes:
 - local preview panel sizing
 - transient search scroll state
 
-Restore strategy is configurable:
+Reconnect strategy is configurable for views that are created or made visible in
+the current process:
 
 - visible auto reconnect, the default
 - manual reconnect
 - safe auto restore
 
-With visible auto reconnect, restored terminal, Files, and transfer views begin as placeholders. A placeholder reconnects or reopens when its display location becomes visible. Floating windows follow the same strategy; a hidden owner placeholder does not trigger reconnect.
+With visible auto reconnect, terminal, Files, and transfer views reconnect or
+open when their display location becomes visible. Floating windows follow the
+same strategy; a hidden owner placeholder does not trigger reconnect.
 
-Terminal restore starts a new terminal session. It does not resurrect a previous process.
+Terminal reconnect starts a new terminal session. It does not resurrect a
+previous process.
 
 ## Titles
 
