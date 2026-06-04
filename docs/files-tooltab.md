@@ -129,8 +129,8 @@ Columns view is a Finder-style column browser:
 
 - each column represents one path level
 - selecting a directory opens the next column
-- selecting a file opens the preview column
-- double-clicking a directory enters that path and compresses history
+- selecting a file opens the preview as the third visible column by keeping the file's containing directory in the middle column
+- double-clicking a directory keeps the current Columns window instead of entering that path
 - Enter opens a directory or preview
 - Backspace or Left moves toward the parent path
 

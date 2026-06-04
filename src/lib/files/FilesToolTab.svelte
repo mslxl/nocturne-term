@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, tick } from "svelte";
   import { ask, message, open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
   import { getCurrentWebview } from "@tauri-apps/api/webview";
   import { createQuery, useQueryClient } from "@tanstack/svelte-query";
@@ -10,6 +10,7 @@
   import FolderIcon from "~icons/lucide/folder";
   import { commands, type FileEntry, type FileListResult, type FilePreviewResult, type FileProviderKind, type FileSearchResult, type TransferEndpoint, type WorkspaceToolTab } from "$lib/bindings";
   import { clearFilesClipboard, filesClipboardSnapshot, setFilesClipboard } from "$lib/files/clipboard.svelte";
+  import { basename, buildFilesColumnsView, columnsForVisiblePane, type FilesColumnView } from "$lib/files/columns";
   import { DEFAULT_FILES_TOOLBAR_ACTION_IDS, normalizeFilesToolbarActionIds, type FilesToolbarActionId } from "$lib/files/toolbar-actions";
   import { buildFileTreeRows, fileTreeClickAction, fileTreeDoubleClickAction, isRenderableFilePreview, shouldShowFilePreviewRegion } from "$lib/files/tree";
   import { hasTauriRuntime } from "$lib/tauri/runtime";
@@ -38,6 +39,7 @@
   }: Props = $props();
   let path = $state<string | null>(null);
   let selectedPath = $state("");
+  let lastSelectedEntry = $state<FileEntry | null>(null);
   let viewMode = $state<"tree" | "columns">("tree");
   let viewModeInitialized = false;
   let searchOpen = $state(false);
@@ -51,12 +53,31 @@
   let treeChildrenByPath = $state<Record<string, FileEntry[]>>({});
   let treeLoadingByPath = $state<Record<string, boolean>>({});
   let treeErrorByPath = $state<Record<string, string>>({});
+  let filesRoot: HTMLElement | null = null;
+  let columnsPanes = $state<ColumnsPane[]>([]);
+  let columnsMotion = $state<ColumnsMotion>("idle");
+  let columnsMotionPreparing = $state(false);
+  let columnsMotionActive = $state(false);
+  let columnsMotionSettling = $state(false);
+  let columnsResizeColumnCount = $state<number | null>(null);
   let nameDialog = $state<{
     action: "create_directory" | "rename" | "chmod";
     title: string;
     label: string;
     value: string;
   } | null>(null);
+  type FilesColumn = FilesColumnView<FileEntry>;
+  type ColumnsMotion = "idle" | "forward" | "backward" | "resize";
+  type ColumnsMotionHint = "forward" | "backward" | "none";
+  type ColumnsPane = {
+    id: string;
+    columns: FilesColumn[];
+    current: boolean;
+  };
+  let lastColumnsSignature = "";
+  let pendingColumnsMotionHint = $state<ColumnsMotionHint | null>(null);
+  let columnsMotionGeneration = 0;
+  let columnsMotionCleanup: number | null = null;
   const queryClient = useQueryClient();
   const overlayVerticalOptions = {
     overflow: {
@@ -102,9 +123,15 @@
       theme: "os-theme-nocturne",
     },
   } as const;
+  const columnsMotionDurationMs = 180;
 
   onMount(() => {
-    if (!hasTauriRuntime()) return;
+    if (!hasTauriRuntime()) {
+      return () => {
+        clearColumnsMotionCleanup();
+      };
+    }
+
     let disposed = false;
     let unlisten: (() => void) | null = null;
     void getCurrentWebview()
@@ -134,6 +161,7 @@
       });
     return () => {
       disposed = true;
+      clearColumnsMotionCleanup();
       unlisten?.();
     };
   });
@@ -169,7 +197,7 @@
     }),
   );
   const selectedEntry = $derived(findEntryByPath(selectedPath) ?? null);
-  const columnPaths = $derived(columnsForPath(currentPath));
+  const fileColumns = $derived(buildFilesColumnsView({ currentPath, selectedPath, activeEntries: entries, childrenByPath: visibleTreeChildrenByPath }));
   const filesClipboard = $derived(filesClipboardSnapshot());
   const canPaste = $derived(Boolean(filesClipboard && result?.provider.capabilities.can_write));
   const visibleToolbarActionIds = $derived(normalizeFilesToolbarActionIds(toolbarActionIds));
@@ -212,6 +240,10 @@
     viewModeInitialized = true;
   });
 
+  $effect(() => {
+    syncColumnsPanes(fileColumns);
+  });
+
   async function refresh() {
     clearTreeDirectoryCache();
     await queryClient.invalidateQueries({ queryKey: ["files", "list", toolTab.id] });
@@ -219,6 +251,7 @@
 
   async function refreshAfterMutation() {
     selectedPath = "";
+    lastSelectedEntry = null;
     previewPath = "";
     searchResult = null;
     await refresh();
@@ -285,6 +318,7 @@
 
   function openEntry(entry: FileEntry) {
     selectedPath = entry.path;
+    lastSelectedEntry = entry;
     previewPath = entry.kind === "file" || entry.kind === "symlink" ? entry.path : "";
     if (entry.kind !== "directory") return;
     path = entry.path;
@@ -292,14 +326,21 @@
     previewPath = "";
   }
 
+  function openColumnsEntry(entry: FileEntry) {
+    if (entry.kind === "directory") return;
+    openEntry(entry);
+  }
+
   async function activateTreeEntry(entry: FileEntry) {
     if (fileTreeDoubleClickAction(entry) === "ignore-directory") return;
     selectedPath = entry.path;
+    lastSelectedEntry = entry;
     previewPath = entry.kind === "file" || entry.kind === "symlink" ? entry.path : "";
   }
 
   async function clickTreeEntry(entry: FileEntry) {
     selectedPath = entry.path;
+    lastSelectedEntry = entry;
     previewPath = entry.kind === "file" || entry.kind === "symlink" ? entry.path : "";
     if (fileTreeClickAction(entry) === "toggle-directory") {
       await toggleTreeDirectory(entry);
@@ -314,6 +355,12 @@
       return;
     }
 
+    await loadDirectoryChildren(entry);
+  }
+
+  async function loadDirectoryChildren(entry: FileEntry) {
+    if (entry.kind !== "directory") return;
+    if (treeChildrenByPath[entry.path] || treeLoadingByPath[entry.path]) return;
     treeLoadingByPath = { ...treeLoadingByPath, [entry.path]: true };
     const { [entry.path]: _previousError, ...remainingErrors } = treeErrorByPath;
     treeErrorByPath = remainingErrors;
@@ -342,19 +389,379 @@
 
   function openSearchMatch(match: FileSearchResult["matches"][number]) {
     selectedPath = match.path;
+    lastSelectedEntry = null;
     if (match.kind !== "directory") return;
     path = match.path;
     clearSearch();
   }
 
-  function selectEntry(entry: FileEntry) {
+  async function selectEntry(entry: FileEntry) {
+    pendingColumnsMotionHint = classifyColumnsSelectionMotion(entry);
     selectedPath = entry.path;
+    lastSelectedEntry = entry;
     previewPath = entry.kind === "file" || entry.kind === "symlink" ? entry.path : "";
     if (viewMode === "columns" && entry.kind === "directory") {
-      path = entry.path;
       searchResult = null;
       previewPath = "";
+      await loadDirectoryChildren(entry);
     }
+  }
+
+  function syncColumnsPanes(nextColumns: FilesColumn[]) {
+    const nextSignature = columnsSignature(nextColumns);
+    if (lastColumnsSignature === nextSignature) return;
+
+    if (!lastColumnsSignature || columnsPanes.length === 0) {
+      clearColumnsMotionCleanup();
+      columnsMotion = "idle";
+      columnsMotionPreparing = false;
+      columnsMotionActive = false;
+      columnsMotionSettling = false;
+      columnsResizeColumnCount = null;
+      columnsPanes = [currentColumnsPane(nextColumns)];
+      lastColumnsSignature = nextSignature;
+      return;
+    }
+
+    const previousPane = columnsPanes.find((pane) => pane.current);
+    const previousColumns = previousPane?.columns ?? [];
+    if (columnsPathSignature(previousColumns) === columnsPathSignature(nextColumns)) {
+      if (columnsMotionInFlight()) {
+        columnsPanes = columnsPanes.map((pane) =>
+          pane.current
+            ? {
+                ...pane,
+                columns: nextColumns,
+                id: currentColumnsPaneId(),
+              }
+            : pane,
+        );
+        lastColumnsSignature = nextSignature;
+        return;
+      }
+      const scrollOffsets = captureColumnsScrollOffsets();
+      clearColumnsMotionCleanup();
+      columnsMotion = "idle";
+      columnsMotionPreparing = false;
+      columnsMotionActive = false;
+      columnsMotionSettling = false;
+      columnsResizeColumnCount = null;
+      columnsPanes = [currentColumnsPane(nextColumns)];
+      lastColumnsSignature = nextSignature;
+      scheduleColumnsScrollRestore(scrollOffsets);
+      return;
+    }
+    if (shouldReplaceColumnsWithoutMotion(previousColumns, nextColumns)) {
+      if (previousColumns.length !== nextColumns.length) {
+        startColumnsResizeMotion(previousColumns, nextColumns, nextSignature);
+        return;
+      }
+      const scrollOffsets = captureColumnsScrollOffsets();
+      clearColumnsMotionCleanup();
+      columnsMotion = "idle";
+      columnsMotionPreparing = false;
+      columnsMotionActive = false;
+      columnsMotionSettling = false;
+      columnsResizeColumnCount = null;
+      columnsPanes = [currentColumnsPane(nextColumns)];
+      lastColumnsSignature = nextSignature;
+      clearPendingColumnsMotionHintIfSettled(nextColumns);
+      scheduleColumnsScrollRestore(scrollOffsets);
+      return;
+    }
+    if (previousColumns.length !== nextColumns.length) {
+      startColumnsResizeMotion(previousColumns, nextColumns, nextSignature);
+      return;
+    }
+
+    const previousSignature = lastColumnsSignature;
+    const direction = pendingColumnsMotionHint === "forward" || pendingColumnsMotionHint === "backward" ? pendingColumnsMotionHint : inferColumnsMotion(previousColumns, nextColumns);
+    pendingColumnsMotionHint = null;
+    const generation = ++columnsMotionGeneration;
+    const previous = { id: `previous:${generation}:${previousSignature}`, columns: previousColumns, current: false };
+    const current = { id: `current:${generation}:${nextSignature}`, columns: nextColumns, current: true };
+
+    clearColumnsMotionCleanup();
+    columnsMotionSettling = false;
+    columnsMotion = direction;
+    columnsResizeColumnCount = null;
+    columnsMotionPreparing = true;
+    columnsMotionActive = false;
+    columnsPanes = direction === "backward" ? [current, previous] : [previous, current];
+    lastColumnsSignature = nextSignature;
+
+    requestAnimationFrame(() => {
+      if (columnsMotionGeneration !== generation) return;
+      columnsMotionPreparing = false;
+      columnsMotionActive = true;
+      columnsMotionCleanup = window.setTimeout(() => {
+        if (columnsMotionGeneration !== generation) return;
+        const finalPane = columnsPanes.find((pane) => pane.current);
+        const finalColumns = finalPane?.columns ?? nextColumns;
+        columnsMotionSettling = true;
+        columnsPanes = [currentColumnsPane(finalColumns)];
+        columnsMotion = "idle";
+        columnsResizeColumnCount = null;
+        columnsMotionPreparing = false;
+        columnsMotionActive = false;
+        columnsMotionCleanup = null;
+        requestAnimationFrame(() => {
+          if (columnsMotionGeneration !== generation) return;
+          columnsMotionSettling = false;
+        });
+      }, columnsMotionDurationMs + 40);
+    });
+  }
+
+  function startColumnsResizeMotion(previousColumns: FilesColumn[], nextColumns: FilesColumn[], nextSignature: string) {
+    const generation = ++columnsMotionGeneration;
+    const scrollOffsets = captureColumnsScrollOffsets();
+    clearColumnsMotionCleanup();
+    columnsMotionSettling = false;
+    columnsMotion = "resize";
+    columnsMotionPreparing = true;
+    columnsMotionActive = false;
+    columnsResizeColumnCount = Math.max(1, previousColumns.length);
+    columnsPanes = [currentColumnsPane(nextColumns)];
+    lastColumnsSignature = nextSignature;
+    pendingColumnsMotionHint = null;
+    void tick().then(() => {
+      if (columnsMotionGeneration !== generation) return;
+      restoreColumnsScrollOffsets(scrollOffsets);
+      requestAnimationFrame(() => {
+        if (columnsMotionGeneration !== generation) return;
+        columnsMotionPreparing = false;
+        columnsMotionActive = true;
+        columnsResizeColumnCount = null;
+        void tick().then(() => {
+          if (columnsMotionGeneration !== generation) return;
+          restoreColumnsScrollOffsets(scrollOffsets);
+          scheduleColumnsScrollRestore(scrollOffsets);
+          columnsMotionCleanup = window.setTimeout(() => {
+            if (columnsMotionGeneration !== generation) return;
+            columnsMotion = "idle";
+            columnsMotionPreparing = false;
+            columnsMotionActive = false;
+            columnsResizeColumnCount = null;
+            columnsMotionCleanup = null;
+          }, columnsMotionDurationMs + 40);
+        });
+      });
+    });
+  }
+
+  function columnsMotionInFlight() {
+    return columnsMotionPreparing || columnsMotionActive || columnsMotionCleanup !== null;
+  }
+
+  function shouldReplaceColumnsWithoutMotion(previous: readonly FilesColumn[], next: readonly FilesColumn[]) {
+    if (pendingColumnsMotionHint === "none") return true;
+    if (pendingColumnsMotionHint === "forward" || pendingColumnsMotionHint === "backward") return false;
+    const columnsSelectedEntry = selectedEntryForColumnsMotion();
+    if (!previous.length || !next.length || !columnsSelectedEntry) return false;
+    if (columnsSelectedEntry.kind !== "directory") return true;
+
+    const previousLastPath = previous[previous.length - 1]?.path;
+    if (!previousLastPath) return false;
+    if (sameFilePath(columnsSelectedEntry.path, previousLastPath)) return true;
+    if (pathDescendsFrom(columnsSelectedEntry.path, previousLastPath)) return false;
+    if (pathDescendsFrom(previousLastPath, columnsSelectedEntry.path)) return false;
+    return true;
+
+  }
+
+  function classifyColumnsSelectionMotion(entry: FileEntry): ColumnsMotionHint | null {
+    if (viewMode !== "columns") return null;
+    if (entry.kind !== "directory") return "none";
+
+    const currentColumns = columnsForMotionBasis();
+    const previousLastPath = currentColumns[currentColumns.length - 1]?.path;
+    if (!previousLastPath) return null;
+    if (sameFilePath(entry.path, previousLastPath)) return "none";
+    if (pathDescendsFrom(previousLastPath, entry.path)) return "backward";
+
+    const entryColumnIndex = currentColumns.findIndex((column) => column.entries.some((columnEntry) => sameFilePath(columnEntry.path, entry.path)));
+    if (entryColumnIndex >= 0 && entryColumnIndex < currentColumns.length - 1) {
+      return currentColumns.length > 2 && entryColumnIndex === 0 ? "backward" : "none";
+    }
+    return entryColumnIndex === currentColumns.length - 1 ? "forward" : "none";
+  }
+
+  function columnsForMotionBasis() {
+    return columnsPanes.find((pane) => pane.current)?.columns ?? fileColumns;
+  }
+
+  function clearPendingColumnsMotionHintIfSettled(columns: readonly FilesColumn[]) {
+    if (!pendingColumnsMotionHint) return;
+    const columnsSelectedEntry = selectedEntryForColumnsMotion();
+    if (!columnsSelectedEntry || columnsSelectedEntry.kind !== "directory" || columns.some((column) => sameFilePath(column.path, columnsSelectedEntry.path))) {
+      pendingColumnsMotionHint = null;
+    }
+  }
+
+  function selectedEntryForColumnsMotion() {
+    if (lastSelectedEntry && sameFilePath(lastSelectedEntry.path, selectedPath)) return lastSelectedEntry;
+    return selectedEntry;
+  }
+
+  function currentColumnsPane(columns: FilesColumn[]): ColumnsPane {
+    return {
+      id: currentColumnsPaneId(),
+      columns,
+      current: true,
+    };
+  }
+
+  function currentColumnsPaneId() {
+    return "current";
+  }
+
+  function columnsRenderKey(path: string) {
+    return `column:${path}`;
+  }
+
+  function previewColumnRenderKey() {
+    return "preview";
+  }
+
+  function columnsPaneColumnCount(pane: ColumnsPane) {
+    if (pane.current && columnsMotion === "resize" && columnsResizeColumnCount !== null) {
+      return columnsResizeColumnCount;
+    }
+    return columnsForRenderedPane(pane).length + (previewVisible && pane.current ? 1 : 0);
+  }
+
+  function columnsForRenderedPane(pane: ColumnsPane) {
+    return columnsForVisiblePane(pane.columns, { previewVisible: previewVisible && pane.current });
+  }
+
+  function columnsSignature(columns: readonly FilesColumn[]) {
+    return columns
+      .map((column) => `${column.path}\u001e${column.entries.map((entry) => `${entry.path}:${entry.selected ? "1" : "0"}`).join("\u001d")}`)
+      .join("\u001f");
+  }
+
+  function columnsPathSignature(columns: readonly FilesColumn[]) {
+    return columns.map((column) => column.path).join("\u001f");
+  }
+
+  function inferColumnsMotion(previous: readonly FilesColumn[], next: readonly FilesColumn[]): ColumnsMotion {
+    const previousPaths = previous.map((column) => column.path);
+    const nextPaths = next.map((column) => column.path);
+    if (sameStringArray(previousPaths.slice(1), nextPaths.slice(0, -1))) return "forward";
+    if (sameStringArray(nextPaths.slice(1), previousPaths.slice(0, -1))) return "backward";
+    return nextPaths.length >= previousPaths.length ? "forward" : "backward";
+  }
+
+  function sameStringArray(left: readonly string[], right: readonly string[]) {
+    return left.length === right.length && left.every((value, index) => value === right[index]);
+  }
+
+  function sameFilePath(left: string, right: string) {
+    return normalizeFilePath(left) === normalizeFilePath(right);
+  }
+
+  function pathDescendsFrom(pathValue: string, parentValue: string) {
+    const path = normalizeFilePath(pathValue);
+    const parent = normalizeFilePath(parentValue);
+    if (!path || !parent || path === parent) return false;
+    if (parent === "/") return path.startsWith("/");
+    return path.startsWith(`${parent}/`);
+  }
+
+  function normalizeFilePath(value: string) {
+    return value.replace(/\\/g, "/").replace(/\/+$/, "");
+  }
+
+  function clearColumnsMotionCleanup() {
+    if (columnsMotionCleanup !== null) {
+      window.clearTimeout(columnsMotionCleanup);
+      columnsMotionCleanup = null;
+    }
+    columnsMotionPreparing = false;
+    columnsMotionActive = false;
+    columnsMotionSettling = false;
+    columnsResizeColumnCount = null;
+  }
+
+  function captureColumnsScrollOffsets() {
+    const offsets = new Map<string, { scrollTop: number; anchorPath: string | null }>();
+    const columns = filesRoot?.querySelectorAll<HTMLElement>(".columns-view .columns-pane.current .file-column") ?? [];
+    for (const column of columns) {
+      const path = column.getAttribute("aria-label");
+      const viewport = columnScrollViewport(column);
+      if (path) {
+        offsets.set(path, {
+          scrollTop: viewport?.scrollTop ?? 0,
+          anchorPath: firstVisibleColumnRowPath(column),
+        });
+      }
+    }
+    return offsets;
+  }
+
+  function scheduleColumnsScrollRestore(offsets: ReadonlyMap<string, { scrollTop: number; anchorPath: string | null }>) {
+    if (!offsets.size) return;
+    let remainingFrames = 5;
+    const restore = () => {
+      restoreColumnsScrollOffsets(offsets);
+      remainingFrames -= 1;
+      if (remainingFrames > 0) requestAnimationFrame(restore);
+    };
+    requestAnimationFrame(restore);
+  }
+
+  function restoreColumnsScrollOffsets(offsets: ReadonlyMap<string, { scrollTop: number; anchorPath: string | null }>) {
+    const columns = filesRoot?.querySelectorAll<HTMLElement>(".columns-view .columns-pane.current .file-column") ?? [];
+    for (const column of columns) {
+      const path = column.getAttribute("aria-label");
+      if (!path || !offsets.has(path)) continue;
+      const viewport = columnScrollViewport(column);
+      const offset = offsets.get(path);
+      if (!offset) continue;
+      if (viewport) viewport.scrollTop = offset.scrollTop;
+      if (offset.anchorPath) {
+        const anchor = [...column.querySelectorAll<HTMLElement>(".column-row")].find((row) => row.getAttribute("data-entry-path") === offset.anchorPath);
+        if (viewport && anchor) {
+          const columnRect = column.getBoundingClientRect();
+          const anchorRect = anchor.getBoundingClientRect();
+          const delta = anchorRect.top - columnRect.top - 32;
+          if (Math.abs(delta) > 1) viewport.scrollTop += delta;
+        }
+      }
+    }
+  }
+
+  function firstVisibleColumnRowPath(column: HTMLElement) {
+    const columnRect = column.getBoundingClientRect();
+    const rows = column.querySelectorAll<HTMLElement>(".column-row");
+    for (const row of rows) {
+      const rect = row.getBoundingClientRect();
+      if (rect.bottom > columnRect.top + 32 && rect.top < columnRect.bottom - 4) {
+        return row.getAttribute("data-entry-path");
+      }
+    }
+    return null;
+  }
+
+  function columnScrollViewport(column: HTMLElement) {
+    const list = column.querySelector<HTMLElement>(".column-list");
+    if (!list) return null;
+    const overlayViewport = list.matches("[data-overlayscrollbars-viewport]")
+      ? list
+      : list.querySelector<HTMLElement>("[data-overlayscrollbars-viewport]");
+    if (overlayViewport && canWriteScrollTop(overlayViewport)) return overlayViewport;
+    const candidates = [list, ...list.querySelectorAll<HTMLElement>("*")];
+    return candidates.find((element) => canWriteScrollTop(element)) ?? list;
+  }
+
+  function canWriteScrollTop(element: HTMLElement) {
+    if (element.scrollHeight <= element.clientHeight + 4) return false;
+    const original = element.scrollTop;
+    element.scrollTop = Math.min(32, element.scrollHeight - element.clientHeight);
+    const writable = element.scrollTop > 0;
+    element.scrollTop = original;
+    return writable;
   }
 
   function goUp() {
@@ -474,35 +881,6 @@
     if (/^[A-Za-z]:\\?$/.test(parent)) return `${parent.replace(/\\?$/, "\\")}${name}`;
     const separator = parent.includes("\\") && !parent.includes("/") ? "\\" : "/";
     return `${parent.replace(/[\\/]+$/, "")}${separator}${name}`;
-  }
-
-  function basename(value: string) {
-    const slashIndex = value.lastIndexOf("/");
-    const backslashIndex = value.lastIndexOf("\\");
-    const index = Math.max(slashIndex, backslashIndex);
-    return index < 0 ? value : value.slice(index + 1);
-  }
-
-  function columnsForPath(value: string) {
-    if (!value || value === "~") return [value || "~"];
-    const normalized = value.replace(/\\/g, "/");
-    if (normalized === "/") return ["/"];
-    if (/^[A-Za-z]:\//.test(normalized)) {
-      const drive = normalized.slice(0, 2);
-      const parts = normalized.slice(3).split("/").filter(Boolean);
-      const columns = [drive];
-      for (const part of parts) {
-        columns.push(`${columns[columns.length - 1].replace(/\/$/, "")}/${part}`);
-      }
-      return columns;
-    }
-    const parts = normalized.split("/").filter(Boolean);
-    const columns = normalized.startsWith("/") ? ["/"] : [];
-    for (const part of parts) {
-      const parent = columns[columns.length - 1] ?? "";
-      columns.push(parent === "/" || parent === "" ? `${parent}${part}` : `${parent}/${part}`);
-    }
-    return columns.length ? columns : [value];
   }
 
   function providerEndpoint(filePath: string): TransferEndpoint {
@@ -906,7 +1284,7 @@
   }
 </script>
 
-<section class:drag-hover={dragHover} class="files-tooltab" aria-label="Files">
+<section bind:this={filesRoot} class:drag-hover={dragHover} class="files-tooltab" aria-label="Files">
   {#if !hasTauriRuntime()}
     <div class="files-demo-placeholder" data-testid="files-demo-placeholder">
       <strong>{toolTab.title}</strong>
@@ -986,44 +1364,67 @@
       </div>
     {:else if viewMode === "columns"}
       <OverlayScrollbarsComponent element="div" class="columns-view" aria-label="Columns file browser" options={overlayHorizontalOptions} defer>
-        {#each columnPaths as columnPath (columnPath)}
-          <section class="file-column" aria-label={columnPath}>
-            <header title={columnPath}>{basename(columnPath) || columnPath}</header>
-            {#if columnPath === currentPath}
-              <OverlayScrollbarsComponent element="div" class="column-list" options={overlayVerticalOptions} defer>
-                {#each entries as entry (entry.path)}
-                  <button
-                    class:selected={selectedPath === entry.path}
-                    class="column-row"
-                    type="button"
-                    ondblclick={() => openEntry(entry)}
-                    onclick={() => selectEntry(entry)}
-                  >
-                    <span class="name-cell" title={entry.symlink_target ? `${entry.path} -> ${entry.symlink_target}` : entry.path}>
-                      <span class="kind-icon file-kind-icon" aria-hidden="true">
-                        {#if entry.kind === "directory"}
-                          <FolderIcon />
-                        {:else if entry.kind === "symlink"}
-                          <FileSymlinkIcon />
-                        {:else}
-                          <FileIcon />
-                        {/if}
-                      </span>
-                      {entry.name}
-                    </span>
-                    <small>{formatSize(entry)}</small>
-                  </button>
-                {/each}
-              </OverlayScrollbarsComponent>
-            {/if}
-          </section>
-        {/each}
-        {#if previewVisible}
-          <section class="file-column preview-column" aria-label="Preview">
-            <header>Preview</header>
-            {@render previewPanel()}
-          </section>
-        {/if}
+        <div
+          class:motion-active={columnsMotionActive}
+          class:motion-backward={columnsMotion === "backward"}
+          class:motion-forward={columnsMotion === "forward"}
+          class:motion-preparing={columnsMotionPreparing}
+          class:motion-resize={columnsMotion === "resize"}
+          class:motion-settling={columnsMotionSettling}
+          class="columns-content"
+          style={`--columns-motion-duration: ${columnsMotionDurationMs}ms;`}
+        >
+          {#each columnsPanes as pane (pane.id)}
+            <div
+              class:current={pane.current}
+              class="columns-pane"
+              aria-hidden={!pane.current}
+              style={`--columns-count: ${columnsPaneColumnCount(pane)};`}
+            >
+              {#each columnsForRenderedPane(pane) as column (columnsRenderKey(column.path))}
+                <section class="file-column" aria-label={column.path}>
+                  <header title={column.path}>{column.title}</header>
+                  <OverlayScrollbarsComponent element="div" class="column-list" options={overlayVerticalOptions} defer>
+                    {#each column.entries as entry (entry.path)}
+                      <button
+                        class:selected={entry.selected}
+                        class="column-row"
+                        data-entry-kind={entry.kind}
+                        data-entry-path={entry.path}
+                        type="button"
+                        ondblclick={() => openColumnsEntry(entry)}
+                        onclick={() =>
+                          void selectEntry(entry).catch((error) => {
+                            operationError = error instanceof Error ? error.message : String(error);
+                          })}
+                      >
+                        <span class="name-cell" title={entry.symlink_target ? `${entry.path} -> ${entry.symlink_target}` : entry.path}>
+                          <span class="kind-icon file-kind-icon" aria-hidden="true">
+                            {#if entry.kind === "directory"}
+                              <FolderIcon />
+                            {:else if entry.kind === "symlink"}
+                              <FileSymlinkIcon />
+                            {:else}
+                              <FileIcon />
+                            {/if}
+                          </span>
+                          {entry.name}
+                        </span>
+                        <small>{formatSize(entry)}</small>
+                      </button>
+                    {/each}
+                  </OverlayScrollbarsComponent>
+                </section>
+              {/each}
+              {#if previewVisible && pane.current}
+                <section class="file-column preview-column" aria-label="Preview" data-column-key={previewColumnRenderKey()}>
+                  <header>Preview</header>
+                  {@render previewPanel()}
+                </section>
+              {/if}
+            </div>
+          {/each}
+        </div>
 	      </OverlayScrollbarsComponent>
 	    {:else}
 	      <div class:with-preview={previewVisible} class="tree-preview-layout">
@@ -1394,15 +1795,63 @@
   }
 
   .files-tooltab :global(.columns-view) {
+    width: 100%;
     min-width: 0;
     min-height: 0;
-    display: flex;
     font-size: 12px;
+    overflow: hidden;
+  }
+
+  .columns-content {
+    min-width: 100%;
+    width: 100%;
+    height: 100%;
+    min-height: 0;
+    display: flex;
+    transform: translateX(0);
+    transition: transform var(--columns-motion-duration, 180ms) cubic-bezier(0.2, 0, 0, 1);
+    will-change: transform;
+  }
+
+  .columns-content.motion-forward.motion-active {
+    transform: translateX(-100%);
+  }
+
+  .columns-content.motion-backward {
+    transform: translateX(-100%);
+  }
+
+  .columns-content.motion-backward.motion-active {
+    transform: translateX(0);
+  }
+
+  .columns-content.motion-resize {
+    transform: translateX(0);
+    transition: none;
+  }
+
+  .columns-content.motion-preparing {
+    transition: none;
+  }
+
+  .columns-content.motion-settling {
+    transform: translateX(0);
+    transition: none;
+  }
+
+  .columns-pane {
+    flex: 0 0 100%;
+    width: 100%;
+    min-width: 100%;
+    height: 100%;
+    min-height: 0;
+    display: flex;
   }
 
   .file-column {
-    width: 230px;
-    min-width: 230px;
+    flex: 0 0 calc(100% / max(var(--columns-count, 1), 1));
+    width: calc(100% / max(var(--columns-count, 1), 1));
+    min-width: 0;
     height: 100%;
     display: grid;
     grid-template-rows: 28px minmax(0, 1fr);
@@ -1410,8 +1859,15 @@
   }
 
   .preview-column {
-    width: 280px;
-    min-width: 280px;
+    flex: 0 0 calc(100% / max(var(--columns-count, 1), 1));
+    width: calc(100% / max(var(--columns-count, 1), 1));
+    min-width: 0;
+  }
+
+  .columns-content.motion-resize .file-column {
+    transition:
+      flex-basis var(--columns-motion-duration, 180ms) cubic-bezier(0.2, 0, 0, 1),
+      width var(--columns-motion-duration, 180ms) cubic-bezier(0.2, 0, 0, 1);
   }
 
   .file-column header {
@@ -1433,6 +1889,7 @@
 
   .column-row {
     width: 100%;
+    min-width: 0;
     min-height: 28px;
     display: grid;
     grid-template-columns: minmax(0, 1fr) auto;
@@ -1449,7 +1906,11 @@
   }
 
   .column-row small {
+    min-width: 0;
     color: color-mix(in srgb, var(--app-fg) 55%, transparent);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .files-row {
