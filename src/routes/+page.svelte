@@ -281,7 +281,7 @@
   let paneMenuUnlisten: undefined | (() => void);
   let terminalMenuUnlisten: undefined | (() => void);
   let terminalMeasureContainer: HTMLDivElement;
-  let appTheme: "light" | "dark" = "dark";
+  let appTheme: "light" | "dark" = "light";
   let findVisible = $state(false);
   let findQuery = $state("");
   let findCaseSensitive = $state(false);
@@ -4304,9 +4304,9 @@
 
 <style>
   :global(:root) {
-    --terminal-bg: #101113;
-    --terminal-fg: #eef1f6;
-    --terminal-selection: #36506f;
+    --terminal-bg: #fbfbfb;
+    --terminal-fg: #202124;
+    --terminal-selection: #c8ddff;
     --terminal-padding-top: 8px;
     --terminal-padding-right: 10px;
     --terminal-padding-bottom: 8px;

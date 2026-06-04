@@ -98,6 +98,13 @@ fn default_terminal_theme() -> TerminalTheme {
     scheme_to_terminal_theme(&builtin_dark_scheme())
 }
 
+fn builtin_terminal_theme_for_variant(variant: TerminalColorSchemeVariant) -> TerminalTheme {
+    match variant {
+        TerminalColorSchemeVariant::Light => scheme_to_terminal_theme(&builtin_light_scheme()),
+        TerminalColorSchemeVariant::Dark => scheme_to_terminal_theme(&builtin_dark_scheme()),
+    }
+}
+
 impl Default for TerminalPadding {
     fn default() -> Self {
         Self {
@@ -419,6 +426,9 @@ fn terminal_settings_from_config(
     resolved_theme: Option<TerminalColorSchemeVariant>,
 ) -> Result<TerminalSettings> {
     let mut settings = TerminalSettings::default();
+    if let Some(theme_variant) = resolved_theme.clone() {
+        settings.theme = builtin_terminal_theme_for_variant(theme_variant);
+    }
     let Some(table) = terminal_table(config)? else {
         return Ok(settings);
     };
@@ -462,14 +472,7 @@ fn terminal_settings_from_config(
             let scheme = terminal_color_scheme_by_id(app, &theme_id)?.scheme;
             settings.theme = scheme_to_terminal_theme(&scheme);
         } else {
-            settings.theme = match theme_variant {
-                TerminalColorSchemeVariant::Light => {
-                    scheme_to_terminal_theme(&builtin_light_scheme())
-                }
-                TerminalColorSchemeVariant::Dark => {
-                    scheme_to_terminal_theme(&builtin_dark_scheme())
-                }
-            };
+            settings.theme = builtin_terminal_theme_for_variant(theme_variant);
             apply_theme_config(&mut settings.theme, table)?;
         }
     } else {
@@ -490,6 +493,9 @@ fn terminal_settings_from_config_without_scheme_lookup(
     resolved_theme: Option<TerminalColorSchemeVariant>,
 ) -> Result<TerminalSettings> {
     let mut settings = TerminalSettings::default();
+    if let Some(theme_variant) = resolved_theme.clone() {
+        settings.theme = builtin_terminal_theme_for_variant(theme_variant);
+    }
     let Some(table) = terminal_table(config)? else {
         return Ok(settings);
     };
@@ -524,10 +530,7 @@ fn terminal_settings_from_config_without_scheme_lookup(
         settings.tab_bar_orientation = parse_tab_bar_orientation(&orientation)?;
     }
     if let Some(theme_variant) = resolved_theme {
-        settings.theme = match theme_variant {
-            TerminalColorSchemeVariant::Light => scheme_to_terminal_theme(&builtin_light_scheme()),
-            TerminalColorSchemeVariant::Dark => scheme_to_terminal_theme(&builtin_dark_scheme()),
-        };
+        settings.theme = builtin_terminal_theme_for_variant(theme_variant);
     }
     apply_theme_config(&mut settings.theme, table)?;
     apply_padding_config(&mut settings.padding, table)?;
