@@ -124,6 +124,7 @@
     },
   } as const;
   const columnsMotionDurationMs = 180;
+  const columnsMotionEasing = "cubic-bezier(0.22, 1, 0.36, 1)";
 
   onMount(() => {
     if (!hasTauriRuntime()) {
@@ -1372,7 +1373,7 @@
           class:motion-resize={columnsMotion === "resize"}
           class:motion-settling={columnsMotionSettling}
           class="columns-content"
-          style={`--columns-motion-duration: ${columnsMotionDurationMs}ms;`}
+          style={`--columns-motion-duration: ${columnsMotionDurationMs}ms; --columns-motion-easing: ${columnsMotionEasing};`}
         >
           {#each columnsPanes as pane (pane.id)}
             <div
@@ -1809,7 +1810,7 @@
     min-height: 0;
     display: flex;
     transform: translateX(0);
-    transition: transform var(--columns-motion-duration, 180ms) cubic-bezier(0.2, 0, 0, 1);
+    transition: transform var(--columns-motion-duration, 180ms) var(--columns-motion-easing, cubic-bezier(0.22, 1, 0.36, 1));
     will-change: transform;
   }
 
@@ -1866,8 +1867,14 @@
 
   .columns-content.motion-resize .file-column {
     transition:
-      flex-basis var(--columns-motion-duration, 180ms) cubic-bezier(0.2, 0, 0, 1),
-      width var(--columns-motion-duration, 180ms) cubic-bezier(0.2, 0, 0, 1);
+      flex-basis var(--columns-motion-duration, 180ms) var(--columns-motion-easing, cubic-bezier(0.22, 1, 0.36, 1)),
+      width var(--columns-motion-duration, 180ms) var(--columns-motion-easing, cubic-bezier(0.22, 1, 0.36, 1));
+  }
+
+  .columns-content.motion-resize .preview-column {
+    transition:
+      flex-basis var(--columns-motion-duration, 180ms) var(--columns-motion-easing, cubic-bezier(0.22, 1, 0.36, 1)),
+      width var(--columns-motion-duration, 180ms) var(--columns-motion-easing, cubic-bezier(0.22, 1, 0.36, 1));
   }
 
   .file-column header {
