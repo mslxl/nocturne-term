@@ -260,8 +260,14 @@
   type ToolTabDropTarget =
     | { kind: "group"; workspaceId: string; groupId: string }
     | { kind: "split"; workspaceId: string; slotId: string; side: "left" | "right" | "up" | "down" }
+    | { kind: "workspace_edge"; workspaceId: string; side: "left" | "right" | "up" | "down" }
     | { kind: "workspace"; workspaceId: string }
     | { kind: "float"; workspaceId: string };
+  type ToolTabDropPreview = {
+    kind: "group" | "split" | "workspace_edge";
+    side: "" | "left" | "right" | "up" | "down";
+    style: string;
+  };
 
   let settings = $state<TerminalSettings | null>(null);
   let lastConfigSnapshot = $state<AppConfigSnapshot | null>(null);
@@ -1786,6 +1792,19 @@
     });
   }
 
+  async function moveWorkspaceSlotToEdge(
+    workspaceId: string,
+    slotId: string,
+    side: "left" | "right" | "up" | "down",
+  ) {
+    await workspaceStore.dispatch({
+      kind: "move_tool_slot_to_workspace_edge",
+      workspace_id: workspaceId,
+      slot_id: slotId,
+      side,
+    });
+  }
+
   function handlePointerMove(event: PointerEvent) {
     if (dockResizeDrag) {
       updateDockResize(event);
@@ -1986,6 +2005,18 @@
       await mirrorToolTabToWorkspace(drag.toolTabId, target.workspaceId, groupId);
       return;
     }
+    if (target.kind === "workspace_edge") {
+      if (target.workspaceId !== drag.workspaceId) {
+        if (!drag.toolTabId) return;
+        const targetWorkspace = workspaceById(target.workspaceId);
+        const groupId = targetWorkspace ? firstDockGroupId(targetWorkspace.layout) : null;
+        if (!groupId) throw new Error(`workspace ${target.workspaceId} has no dock group`);
+        await mirrorToolTabToWorkspace(drag.toolTabId, target.workspaceId, groupId);
+        return;
+      }
+      await moveWorkspaceSlotToEdge(drag.workspaceId, drag.slotId, target.side);
+      return;
+    }
     if (target.workspaceId !== drag.workspaceId) {
       if (!drag.toolTabId) return;
       const targetWorkspace = workspaceById(target.workspaceId);
@@ -2025,6 +2056,9 @@
     const workspaceId = workspaceTarget?.dataset.workspaceId;
     if (workspaceId && workspaceId !== drag.workspaceId) return { kind: "workspace", workspaceId };
 
+    const workspaceEdgeTarget = toolTabWorkspaceEdgeDropTargetFromPoint(x, y, drag.workspaceId);
+    if (workspaceEdgeTarget) return workspaceEdgeTarget;
+
     const dockGroups = [...document.querySelectorAll<HTMLElement>("[data-dock-group-id]")];
     const containingGroup = dockGroups
       .map((element) => ({ element, rect: element.getBoundingClientRect() }))
@@ -2034,6 +2068,8 @@
       const targetWorkspaceId = containingGroup.element.dataset.workspaceId;
       const groupId = containingGroup.element.dataset.dockGroupId;
       if (!targetWorkspaceId || !groupId) return null;
+      const groupEdgeTarget = toolTabGroupEdgeDropTargetFromPoint(x, y, containingGroup.element, containingGroup.rect);
+      if (groupEdgeTarget) return groupEdgeTarget;
       const slotTarget = toolTabSlotDropTargetFromPoint(x, y, targetWorkspaceId);
       if (slotTarget) return slotTarget;
       return { kind: "group", workspaceId: targetWorkspaceId, groupId };
@@ -2045,6 +2081,46 @@
       if (x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom) return null;
     }
     return { kind: "float", workspaceId: drag.workspaceId };
+  }
+
+  function toolTabGroupEdgeDropTargetFromPoint(
+    x: number,
+    y: number,
+    group: HTMLElement,
+    rect: DOMRect,
+  ): ToolTabDropTarget | null {
+    const workspaceId = group.dataset.workspaceId;
+    const slotId = group.dataset.activeToolSlotId;
+    if (!workspaceId || !slotId) return null;
+    const edgeInset = Math.min(72, Math.max(28, Math.min(rect.width, rect.height) * 0.22));
+    const distances = [
+      { side: "left" as const, distance: x - rect.left },
+      { side: "right" as const, distance: rect.right - x },
+      { side: "up" as const, distance: y - rect.top },
+      { side: "down" as const, distance: rect.bottom - y },
+    ];
+    const nearest = distances.reduce((best, item) => (item.distance < best.distance ? item : best));
+    return nearest.distance <= edgeInset ? { kind: "split", workspaceId, slotId, side: nearest.side } : null;
+  }
+
+  function toolTabWorkspaceEdgeDropTargetFromPoint(
+    x: number,
+    y: number,
+    workspaceId: string,
+  ): ToolTabDropTarget | null {
+    const workspaceBody = document.querySelector<HTMLElement>(".workspace-body");
+    if (!workspaceBody) return null;
+    const rect = workspaceBody.getBoundingClientRect();
+    if (x < rect.left || x > rect.right || y < rect.top || y > rect.bottom) return null;
+    const edgeInset = Math.min(44, Math.max(18, Math.min(rect.width, rect.height) * 0.08));
+    const distances = [
+      { side: "left" as const, distance: x - rect.left },
+      { side: "right" as const, distance: rect.right - x },
+      { side: "up" as const, distance: y - rect.top },
+      { side: "down" as const, distance: rect.bottom - y },
+    ];
+    const nearest = distances.reduce((best, item) => (item.distance < best.distance ? item : best));
+    return nearest.distance <= edgeInset ? { kind: "workspace_edge", workspaceId, side: nearest.side } : null;
   }
 
   function toolTabSlotDropTargetFromPoint(x: number, y: number, workspaceId: string): ToolTabDropTarget | null {
@@ -2068,6 +2144,68 @@
       { side: "down" as const, distance: 1 - relativeY },
     ];
     return distances.reduce((best, item) => (item.distance < best.distance ? item : best)).side;
+  }
+
+  function toolTabDropPreview(): ToolTabDropPreview | null {
+    const target = toolTabDropTarget;
+    if (!target || target.kind === "float" || target.kind === "workspace") return null;
+    if (typeof document === "undefined") return null;
+    const workspaceBody = document.querySelector<HTMLElement>(".workspace-body");
+    if (!workspaceBody) return null;
+    const bodyRect = workspaceBody.getBoundingClientRect();
+    if (target.kind === "workspace_edge") {
+      const previewRect = sliceRect(bodyRect, target.side, 0.28);
+      return {
+        kind: target.kind,
+        side: target.side,
+        style: rectStyleWithin(previewRect, bodyRect),
+      };
+    }
+    if (target.kind === "group") {
+      const group = dockGroupElementById(target.groupId);
+      if (!group) return null;
+      return {
+        kind: target.kind,
+        side: "",
+        style: rectStyleWithin(group.getBoundingClientRect(), bodyRect),
+      };
+    }
+    const slot = toolSlotElementById(target.slotId);
+    const group = slot?.closest<HTMLElement>("[data-dock-group-id]");
+    if (!group) return null;
+    const previewRect = sliceRect(group.getBoundingClientRect(), target.side, 0.5);
+    return {
+      kind: target.kind,
+      side: target.side,
+      style: rectStyleWithin(previewRect, bodyRect),
+    };
+  }
+
+  function dockGroupElementById(groupId: string): HTMLElement | null {
+    return [...document.querySelectorAll<HTMLElement>("[data-dock-group-id]")]
+      .find((group) => group.dataset.dockGroupId === groupId) ?? null;
+  }
+
+  function toolSlotElementById(slotId: string): HTMLElement | null {
+    return [...document.querySelectorAll<HTMLElement>("[data-tool-slot-id]")]
+      .find((slot) => slot.dataset.toolSlotId === slotId) ?? null;
+  }
+
+  function sliceRect(rect: DOMRect, side: "left" | "right" | "up" | "down", ratio: number) {
+    const width = side === "left" || side === "right" ? rect.width * ratio : rect.width;
+    const height = side === "up" || side === "down" ? rect.height * ratio : rect.height;
+    const left = side === "right" ? rect.right - width : rect.left;
+    const top = side === "down" ? rect.bottom - height : rect.top;
+    return { left, top, width, height };
+  }
+
+  function rectStyleWithin(rect: { left: number; top: number; width: number; height: number }, parent: DOMRect) {
+    return [
+      `left: ${Math.round(rect.left - parent.left)}px`,
+      `top: ${Math.round(rect.top - parent.top)}px`,
+      `width: ${Math.round(rect.width)}px`,
+      `height: ${Math.round(rect.height)}px`,
+    ].join("; ");
   }
 
   function dropZoneForRect(rect: DOMRect, x: number, y: number): PaneDropZone {
@@ -3850,6 +3988,20 @@
     {:else}
       <div class="dock-empty">Workspace</div>
     {/if}
+    {#if toolTabDropPreview()}
+      {@const preview = toolTabDropPreview()!}
+      <div
+        class="tooltab-drop-preview"
+        class:edge={preview.kind === "workspace_edge"}
+        class:group={preview.kind === "group"}
+        class:split={preview.kind === "split"}
+        data-drop-kind={preview.kind}
+        data-drop-side={preview.side}
+        data-tooltab-drop-preview="true"
+        style={preview.style}
+        aria-hidden="true"
+      ></div>
+    {/if}
   </section>
 
   {#if hostPickerOpen}
@@ -4132,6 +4284,7 @@
       aria-label="Tool tabs"
       data-dock-group-id={layout.id}
       data-dock-group-role={dockGroupRole(layout)}
+      data-active-tool-slot-id={layout.active_slot_id}
       data-testid={`dock-group-${layout.id}`}
       data-workspace-id={workspace?.id ?? ""}
     >
@@ -4346,6 +4499,7 @@
   .workspace-body {
     min-width: 0;
     min-height: 0;
+    position: relative;
     display: block;
     overflow: hidden;
   }
@@ -4447,6 +4601,55 @@
   .workspace-dock-group.drop-target {
     outline: 2px solid color-mix(in srgb, var(--app-accent) 62%, transparent);
     outline-offset: -3px;
+  }
+
+  .tooltab-drop-preview {
+    position: absolute;
+    z-index: 60;
+    box-sizing: border-box;
+    border: 2px solid color-mix(in srgb, var(--app-accent) 86%, white 8%);
+    border-radius: 5px;
+    background:
+      linear-gradient(
+        135deg,
+        color-mix(in srgb, var(--app-accent) 30%, transparent),
+        color-mix(in srgb, var(--app-accent) 14%, transparent)
+      );
+    box-shadow:
+      inset 0 0 0 1px color-mix(in srgb, white 32%, transparent),
+      0 0 0 1px color-mix(in srgb, var(--app-accent) 34%, transparent),
+      0 10px 26px color-mix(in srgb, black 18%, transparent);
+    opacity: 0.96;
+    pointer-events: none;
+    transition:
+      left 120ms cubic-bezier(0.2, 0, 0, 1),
+      top 120ms cubic-bezier(0.2, 0, 0, 1),
+      width 120ms cubic-bezier(0.2, 0, 0, 1),
+      height 120ms cubic-bezier(0.2, 0, 0, 1),
+      opacity 90ms ease;
+  }
+
+  .tooltab-drop-preview.edge {
+    border-width: 3px;
+    background:
+      linear-gradient(
+        135deg,
+        color-mix(in srgb, var(--app-accent) 36%, transparent),
+        color-mix(in srgb, var(--app-accent) 18%, transparent)
+      );
+  }
+
+  .tooltab-drop-preview.split {
+    background:
+      linear-gradient(
+        135deg,
+        color-mix(in srgb, var(--app-accent) 28%, transparent),
+        color-mix(in srgb, var(--app-control) 18%, transparent)
+      );
+  }
+
+  .tooltab-drop-preview.group {
+    border-style: dashed;
   }
 
   .tool-tabbar {

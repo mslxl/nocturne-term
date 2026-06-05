@@ -296,6 +296,11 @@ fn apply_intent(
             target_slot_id,
             side,
         } => move_tool_slot_to_split(snapshot, &workspace_id, &slot_id, &target_slot_id, side),
+        WorkspaceIntent::MoveToolSlotToWorkspaceEdge {
+            workspace_id,
+            slot_id,
+            side,
+        } => move_tool_slot_to_workspace_edge(snapshot, &workspace_id, &slot_id, side),
         WorkspaceIntent::SplitToolSlot {
             workspace_id,
             target_slot_id,
@@ -799,6 +804,20 @@ fn move_tool_slot_to_split(
     Ok(())
 }
 
+fn move_tool_slot_to_workspace_edge(
+    snapshot: &mut WorkspaceLayoutSnapshot,
+    workspace_id: &str,
+    slot_id: &str,
+    side: WorkspaceDockSide,
+) -> Result<()> {
+    let workspace = require_workspace(snapshot, workspace_id)?;
+    let (layout_without_slot, removed) = remove_slot_for_move(workspace.layout.clone(), slot_id)?;
+    let removed = removed.ok_or_else(|| missing_error(format!("display slot {slot_id} not found")))?;
+    let workspace = require_workspace_mut(snapshot, workspace_id)?;
+    workspace.layout = split_workspace_edge(layout_without_slot, removed, side)?;
+    Ok(())
+}
+
 fn split_tool_slot(
     snapshot: &mut WorkspaceLayoutSnapshot,
     workspace_id: &str,
@@ -880,6 +899,43 @@ fn split_slot(
         )));
     }
     split_slot_recursive(layout, target_slot_id, inserted_slot, side)
+}
+
+fn split_workspace_edge(
+    layout: WorkspaceDockLayout,
+    inserted_slot: WorkspaceToolSlot,
+    side: WorkspaceDockSide,
+) -> Result<WorkspaceDockLayout> {
+    if contains_slot(&layout, workspace_slot_id(&inserted_slot)) {
+        return Err(invalid_error(format!(
+            "display slot {} already exists",
+            workspace_slot_id(&inserted_slot)
+        )));
+    }
+    let direction = match side {
+        WorkspaceDockSide::Left | WorkspaceDockSide::Right => WorkspaceDockDirection::Row,
+        WorkspaceDockSide::Up | WorkspaceDockSide::Down => WorkspaceDockDirection::Column,
+    };
+    let before = matches!(side, WorkspaceDockSide::Left | WorkspaceDockSide::Up);
+    let inserted_id = workspace_slot_id(&inserted_slot).to_string();
+    let inserted = WorkspaceDockLayout::Group {
+        id: new_id("group"),
+        slots: vec![inserted_slot],
+        active_slot_id: inserted_id,
+    };
+    Ok(WorkspaceDockLayout::Split {
+        direction,
+        children: if before {
+            vec![inserted, layout]
+        } else {
+            vec![layout, inserted]
+        },
+        ratios: if before {
+            vec![0.28, 0.72]
+        } else {
+            vec![0.72, 0.28]
+        },
+    })
 }
 
 fn split_slot_recursive(
@@ -1101,7 +1157,7 @@ fn remove_slot(
             "display slot {slot_id_value} not found"
         )));
     }
-    Ok(collapse_single_child(layout))
+    collapse_single_child(layout)
 }
 
 fn remove_slot_for_move(
@@ -1109,7 +1165,7 @@ fn remove_slot_for_move(
     slot_id_value: &str,
 ) -> Result<(WorkspaceDockLayout, Option<WorkspaceToolSlot>)> {
     let (layout, removed) = remove_slot_recursive(layout, slot_id_value)?;
-    let layout = collapse_single_child(layout)
+    let layout = collapse_single_child(layout)?
         .ok_or_else(|| invalid_error("cannot move the last tool slot in a workspace"))?;
     Ok((layout, removed))
 }
@@ -1485,10 +1541,30 @@ fn contains_group(layout: &WorkspaceDockLayout, needle: &str) -> bool {
     }
 }
 
-fn collapse_single_child(layout: Option<WorkspaceDockLayout>) -> Option<WorkspaceDockLayout> {
+fn collapse_single_child(layout: Option<WorkspaceDockLayout>) -> Result<Option<WorkspaceDockLayout>> {
     match layout {
-        Some(WorkspaceDockLayout::Split { mut children, .. }) if children.len() == 1 => children.pop(),
-        other => other,
+        Some(WorkspaceDockLayout::Split {
+            direction,
+            children,
+            ratios,
+        }) => {
+            let mut next_children = Vec::new();
+            for child in children {
+                if let Some(child) = collapse_single_child(Some(child))? {
+                    next_children.push(child);
+                }
+            }
+            match next_children.len() {
+                0 => Ok(None),
+                1 => collapse_single_child(next_children.into_iter().next()),
+                _ => Ok(Some(WorkspaceDockLayout::Split {
+                    direction,
+                    ratios: normalize_ratio_len(&ratios, next_children.len())?,
+                    children: next_children,
+                })),
+            }
+        }
+        other => Ok(other),
     }
 }
 
@@ -1677,6 +1753,7 @@ fn intent_name(intent: &WorkspaceIntent) -> &'static str {
         WorkspaceIntent::RestoreFloatingWindow { .. } => "restore_floating_window",
         WorkspaceIntent::MoveToolSlotToGroup { .. } => "move_tool_slot_to_group",
         WorkspaceIntent::MoveToolSlotToSplit { .. } => "move_tool_slot_to_split",
+        WorkspaceIntent::MoveToolSlotToWorkspaceEdge { .. } => "move_tool_slot_to_workspace_edge",
         WorkspaceIntent::SplitToolSlot { .. } => "split_tool_slot",
         WorkspaceIntent::CreateTerminalToolTab { .. } => "create_terminal_tool_tab",
     }
@@ -1860,6 +1937,48 @@ mod tests {
             1
         );
         assert!(matches!(workspace.layout, WorkspaceDockLayout::Split { .. }));
+    }
+
+    #[test]
+    fn moving_tool_slot_to_workspace_edge_keeps_inserted_group_on_requested_edge() {
+        for (side, before, direction) in [
+            (WorkspaceDockSide::Left, true, WorkspaceDockDirection::Row),
+            (WorkspaceDockSide::Right, false, WorkspaceDockDirection::Row),
+            (WorkspaceDockSide::Up, true, WorkspaceDockDirection::Column),
+            (WorkspaceDockSide::Down, false, WorkspaceDockDirection::Column),
+        ] {
+            let mut snapshot = test_split_snapshot();
+
+            move_tool_slot_to_workspace_edge(&mut snapshot, "workspace-a", "slot-files-a", side)
+                .unwrap();
+
+            let workspace = require_workspace(&snapshot, "workspace-a").unwrap();
+            let WorkspaceDockLayout::Split {
+                direction: actual_direction,
+                ratios,
+                children,
+            } = &workspace.layout
+            else {
+                panic!("expected root split after workspace edge docking");
+            };
+            assert!(matches!(
+                (actual_direction, direction),
+                (WorkspaceDockDirection::Row, WorkspaceDockDirection::Row)
+                    | (WorkspaceDockDirection::Column, WorkspaceDockDirection::Column)
+            ));
+            assert_eq!(
+                ratios.as_slice(),
+                if before { &[0.28, 0.72] } else { &[0.72, 0.28] }
+            );
+            let inserted_child = if before { &children[0] } else { &children[1] };
+            let WorkspaceDockLayout::Group { slots, .. } = inserted_child else {
+                panic!("expected inserted edge group");
+            };
+            assert_eq!(
+                slots.iter().map(workspace_slot_id).collect::<Vec<_>>(),
+                vec!["slot-files-a"]
+            );
+        }
     }
 
     #[test]

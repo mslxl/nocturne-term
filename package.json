@@ -15,6 +15,7 @@
     "test:tauri:terminal-workspace-visible-content": "node tests/tauri/terminal-workspace-visible-content.test.mjs",
     "test:tauri:terminal-workspace-single-toolbar": "node tests/tauri/terminal-workspace-single-toolbar.test.mjs",
     "test:tauri:workspace-startup-does-not-restore-state": "node tests/tauri/workspace-startup-does-not-restore-state.test.mjs",
+    "test:tauri:tooltab-edge-docking": "node tests/tauri/tooltab-edge-docking.test.mjs",
     "test:tauri:files-toolbar-actions-do-not-overflow-narrow-tooltab": "node tests/tauri/files-toolbar-actions-do-not-overflow-narrow-tooltab.test.mjs",
     "test:tauri:files-columns-view-shows-content": "node tests/tauri/files-columns-view-shows-content.test.mjs",
     "test:tauri:files-columns-directory-double-click-keeps-window": "node tests/tauri/files-columns-directory-double-click-keeps-window.test.mjs",
