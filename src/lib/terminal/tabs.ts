@@ -11,6 +11,7 @@ import { terminalScrollbarLineFromPointer, terminalScrollbarState, terminalWheel
 import { xtermOptions } from "./settings";
 import { normalizeTerminalFitSize, normalizeTerminalSessionSize, type TerminalFitSize } from "./sizes";
 import { refreshTerminalTabTitleModel } from "./tab-title";
+import { computeTerminalMirrorPtySize, type TerminalMirrorViewMeasurement } from "./mirror-size";
 
 export type TerminalOutputEvent = {
   session_id: string;
@@ -46,6 +47,25 @@ type TerminalScrollbarDom = {
   root: HTMLDivElement;
   track: HTMLDivElement;
   handle: HTMLDivElement;
+};
+export type TerminalView = {
+  id: string;
+  container: HTMLDivElement;
+  term: Terminal;
+  fit: FitAddon;
+  search: TerminalSearchAddon;
+  serialize: SerializeAddon;
+  image?: { dispose: () => void };
+  webgl?: WebglTerminalAddon;
+  scrollbarDom?: TerminalScrollbarDom;
+  scrollbarInteraction?: { dispose: () => void };
+  resizeObserver?: ResizeObserver;
+  dataDisposables: Array<{ dispose: () => void }>;
+  wheelRemainder: number;
+  lastFitSize: TerminalFitSize;
+  fitted: boolean;
+  tooSmall: boolean;
+  constraining: boolean;
 };
 export type TerminalTab = {
   id: string;
@@ -84,10 +104,13 @@ export type TerminalPane = {
   scrollbarDom?: TerminalScrollbarDom;
   scrollbarInteraction?: { dispose: () => void };
   container?: HTMLDivElement;
+  viewContainers: Map<string, HTMLDivElement>;
+  views: Map<string, TerminalView>;
   resizeObserver?: ResizeObserver;
   dataDisposables: Array<{ dispose: () => void }>;
   decoder: TextDecoder;
   outputQueue: string[];
+  replayBuffer: string[];
   outputFrame: number | null;
   nextOutputSequence: bigint;
   pendingOutput: Map<string, string>;
@@ -156,9 +179,12 @@ export function createTerminalPane(info: TerminalSessionInfo, tabId: string): Te
     reconnectTrust: {},
     exitText: "",
     error: "",
+    viewContainers: new Map(),
+    views: new Map(),
     dataDisposables: [],
     decoder: new TextDecoder(),
     outputQueue: initialOutput ? [initialOutput] : [],
+    replayBuffer: [],
     outputFrame: null,
     nextOutputSequence: 0n,
     pendingOutput: new Map(),
@@ -196,6 +222,7 @@ export function retargetTerminalPaneSession(pane: TerminalPane, info: TerminalSe
   pane.error = "";
   pane.decoder = new TextDecoder();
   pane.outputQueue = [];
+  pane.replayBuffer = [];
   pane.outputFrame = null;
   pane.nextOutputSequence = 0n;
   pane.pendingOutput = new Map();
@@ -208,7 +235,7 @@ export function retargetTerminalPaneSession(pane: TerminalPane, info: TerminalSe
   pane.wheelRemainder = 0;
   if (initialOutput) {
     if (pane.term) {
-      pane.term.write(`\r\n${initialOutput}`);
+      writeTerminalPaneViews(pane, `\r\n${initialOutput}`);
     } else {
       pane.outputQueue.push(initialOutput);
     }
@@ -270,19 +297,21 @@ export function createTerminalTabController(context: TerminalTabContext) {
   const tabById = (id: string) => context.tabs().find((item) => item.id === id);
   const paneById = (id: string) => context.tabs().flatMap((tab) => tab.panes).find((item) => item.id === id);
 
-  async function mountTerminal(id: string) {
+  async function mountTerminal(id: string, viewId = id) {
     const config = context.settings();
     if (!config) throw new Error("Terminal settings are not loaded");
     const pane = paneById(id);
-    const container = pane?.container;
+    const container = pane?.viewContainers.get(viewId) ?? (viewId === id ? pane?.container : undefined);
     if (!pane || !container) return;
-    if (pane.mountPromise) return pane.mountPromise;
-    if (pane.term) {
-      attachMountedTerminal(pane, container, () => scheduleFit(pane.id));
+    if (pane.mountPromise) await pane.mountPromise;
+    const existingView = pane.views.get(viewId);
+    if (existingView) {
+      existingView.container = container;
+      attachMountedTerminal(pane, existingView, () => scheduleFit(pane.id, viewId));
       return;
     }
 
-    pane.mountPromise = mountTerminalOnce(pane, config, container);
+    pane.mountPromise = mountTerminalOnce(pane, config, container, viewId);
     try {
       await pane.mountPromise;
     } finally {
@@ -290,7 +319,7 @@ export function createTerminalTabController(context: TerminalTabContext) {
     }
   }
 
-  async function mountTerminalOnce(pane: TerminalPane, config: TerminalSettings, container: HTMLDivElement) {
+  async function mountTerminalOnce(pane: TerminalPane, config: TerminalSettings, container: HTMLDivElement, viewId: string) {
     const term = new Terminal({
       ...xtermOptions(config),
       cols: pane.lastCols,
@@ -307,31 +336,52 @@ export function createTerminalTabController(context: TerminalTabContext) {
       const { ImageAddon } = await import("@xterm/addon-image");
       const image = new ImageAddon();
       term.loadAddon(image);
-      pane.image = image;
 
       container.replaceChildren();
       term.open(container);
-      pane.term = term;
-      pane.fit = fit;
-      pane.search = search;
-      pane.serialize = serialize;
-      attachTerminalScrollbar(pane);
-      fitTerminal(pane);
+      const view: TerminalView = {
+        id: viewId,
+        container,
+        term,
+        fit,
+        search,
+        serialize,
+        image,
+        dataDisposables: [],
+        wheelRemainder: 0,
+        lastFitSize: {
+          cols: pane.lastCols,
+          rows: pane.lastRows,
+          pixelWidth: pane.lastPixelWidth,
+          pixelHeight: pane.lastPixelHeight,
+        },
+        fitted: false,
+        tooSmall: false,
+        constraining: false,
+      };
+      pane.views.set(viewId, view);
+      setActivePaneView(pane, view);
+      attachTerminalScrollbar(pane, view);
+      fitTerminal(pane, view);
 
       if (config.renderer === "webgl") {
         const { WebglAddon } = await import("@xterm/addon-webgl");
         const webgl = new WebglAddon(true);
         term.loadAddon(webgl);
+        view.webgl = webgl;
         pane.webgl = webgl;
         stabilizeWebglTerminal(term, webgl);
       }
 
+      if (pane.replayBuffer.length) {
+        term.write(pane.replayBuffer.join(""));
+      }
       if (pane.outputQueue.length) {
         scheduleOutputFlush(pane);
       }
 
-      pane.dataDisposables = [
-        attachTerminalScrollSync(pane),
+      view.dataDisposables = [
+        attachTerminalScrollSync(pane, view),
         term.onTitleChange((title) => {
           pane.titleOverride = title;
           refreshPaneTitle(pane);
@@ -342,6 +392,7 @@ export function createTerminalTabController(context: TerminalTabContext) {
           return true;
         }),
         term.onData((data) => {
+          setActivePaneView(pane, view);
           if (pane.readOnly) return;
           if (pane.reconnectPending) {
             markReconnectRequested(pane.id);
@@ -353,42 +404,53 @@ export function createTerminalTabController(context: TerminalTabContext) {
           });
         }),
         term.onResize(() => {
-          const size = fitTerminal(pane);
-          if (size) scheduleResize(pane.id, size);
+          fitTerminal(pane, view);
+          scheduleResize(pane.id);
         }),
         term.onSelectionChange(() => {
+          setActivePaneView(pane, view);
           context.notifySelectionChange?.();
         }),
       ];
-      pane.resizeObserver = new ResizeObserver(() => scheduleFit(pane.id));
-      pane.resizeObserver.observe(container);
-      scheduleFit(pane.id);
+      view.resizeObserver = new ResizeObserver(() => scheduleFit(pane.id, view.id));
+      view.resizeObserver.observe(container);
+      scheduleFit(pane.id, view.id);
       requestAnimationFrame(() => {
-        fitTerminal(pane);
-        if (pane.webgl) stabilizeWebglTerminal(term, pane.webgl);
+        fitTerminal(pane, view);
+        if (view.webgl) stabilizeWebglTerminal(term, view.webgl);
       });
       term.focus();
     } catch (error) {
       term.dispose();
-      pane.term = undefined;
-      pane.fit = undefined;
-      pane.search = undefined;
-      pane.serialize = undefined;
-      pane.image = undefined;
-      pane.webgl = undefined;
+      pane.views.delete(viewId);
+      if (pane.term === term) {
+        pane.term = undefined;
+        pane.fit = undefined;
+        pane.search = undefined;
+        pane.serialize = undefined;
+        pane.image = undefined;
+        pane.webgl = undefined;
+      }
       markPaneError(pane.id, error instanceof Error ? error.message : String(error));
     }
   }
 
-  function scheduleFit(id: string) {
+  function scheduleFit(id: string, viewId?: string) {
     const pane = paneById(id);
-    if (!pane?.fit || !pane.term) return;
+    if (!pane) return;
     requestAnimationFrame(() => {
-      const size = fitTerminal(pane);
-      if (size) scheduleResize(id, size);
-      if (pane.webgl && pane.term) stabilizeWebglTerminal(pane.term, pane.webgl);
+      const views = viewId
+        ? [pane.views.get(viewId)].filter((view): view is TerminalView => view !== undefined)
+        : Array.from(pane.views.values());
+      for (const view of views) {
+        fitTerminal(pane, view);
+        if (view.webgl) stabilizeWebglTerminal(view.term, view.webgl);
+      }
+      scheduleResize(id);
       requestAnimationFrame(() => {
-        if (pane.webgl && pane.term) stabilizeWebglTerminal(pane.term, pane.webgl);
+        for (const view of views) {
+          if (view.webgl) stabilizeWebglTerminal(view.term, view.webgl);
+        }
       });
     });
   }
@@ -399,10 +461,27 @@ export function createTerminalTabController(context: TerminalTabContext) {
     refreshTerminalPanePresentation(pane);
   }
 
-  function scheduleResize(id: string, size: TerminalFitSize) {
+  function scheduleResize(id: string) {
     const pane = paneById(id);
     if (!pane || pane.status !== "running") return;
-    const normalized = normalizeTerminalFitSize(size, {
+    const result = computeTerminalMirrorPtySize({
+      views: terminalViewMeasurements(pane),
+      lastValidSize: {
+        cols: pane.lastCols,
+        rows: pane.lastRows,
+        pixelWidth: pane.lastPixelWidth,
+        pixelHeight: pane.lastPixelHeight,
+      },
+      lastSentSize: {
+        cols: pane.lastCols,
+        rows: pane.lastRows,
+        pixelWidth: pane.lastPixelWidth,
+        pixelHeight: pane.lastPixelHeight,
+      },
+    });
+    updateTerminalViewSizeState(pane, result.tooSmallViewIds, result.constrainingViewIds);
+    if (!result.shouldSendResize) return;
+    const normalized = normalizeTerminalFitSize(result.size, {
       cols: pane.lastCols,
       rows: pane.lastRows,
       pixelWidth: pane.lastPixelWidth,
@@ -454,7 +533,7 @@ export function createTerminalTabController(context: TerminalTabContext) {
     if (pane.status === "starting" && event.signal) {
       pane.status = "error";
       pane.error = event.signal;
-      pane.term?.write(`\r\n[Connection stopped: ${event.signal}]\r\n`);
+      writeTerminalPaneViews(pane, `\r\n[Connection stopped: ${event.signal}]\r\n`);
       return;
     }
     if (pane.status === "running" && event.signal && event.signal !== "closed") {
@@ -463,7 +542,7 @@ export function createTerminalTabController(context: TerminalTabContext) {
     }
     if (pane.status === "error") {
       pane.error = event.signal ?? pane.error;
-      pane.term?.write(`\r\n[Terminal error: ${pane.error || "connection failed"}]\r\n`);
+      writeTerminalPaneViews(pane, `\r\n[Terminal error: ${pane.error || "connection failed"}]\r\n`);
       return;
     }
     pane.status = "exited";
@@ -471,18 +550,14 @@ export function createTerminalTabController(context: TerminalTabContext) {
     pane.exitText = event.signal ? `Signal: ${event.signal}` : `Exit ${event.exit_code ?? "unknown"}`;
     pane.titleOverride = "";
     refreshPaneTitle(pane);
-    pane.term?.write(`\r\n[Process completed: ${pane.exitText}]\r\n`);
+    writeTerminalPaneViews(pane, `\r\n[Process completed: ${pane.exitText}]\r\n`);
   }
 
   function markTransportState(event: TerminalTransportStateEvent) {
     const pane = paneById(event.session_id);
     if (!pane) return;
     const line = `[${transportStateLabel(event.state)}]\r\n`;
-    if (pane.term) {
-      pane.term.write(line);
-    } else {
-      pane.outputQueue.push(line);
-    }
+    writeTerminalPaneViews(pane, line);
     if (event.state === "failed") {
       if (pane.everConnected) {
         return;
@@ -510,7 +585,7 @@ export function createTerminalTabController(context: TerminalTabContext) {
     pane.status = "error";
     pane.reconnectPending = false;
     pane.error = message;
-    pane.term?.write(`\r\n[Terminal error: ${message}]\r\n`);
+    writeTerminalPaneViews(pane, `\r\n[Terminal error: ${message}]\r\n`);
   }
 
   function markWriteFailure(id: string, message: string) {
@@ -531,7 +606,7 @@ export function createTerminalTabController(context: TerminalTabContext) {
     pane.reconnectPending = true;
     pane.exitText = message;
     pane.error = "";
-    pane.term?.write(`\r\n[Connection disconnected: ${message}]\r\n[Press any key to reconnect]\r\n`);
+    writeTerminalPaneViews(pane, `\r\n[Connection disconnected: ${message}]\r\n[Press any key to reconnect]\r\n`);
   }
 
   function markReconnectUnavailable(id: string, message: string) {
@@ -540,7 +615,7 @@ export function createTerminalTabController(context: TerminalTabContext) {
     pane.status = "error";
     pane.reconnectPending = false;
     pane.error = message;
-    pane.term?.write(`\r\n[Reconnect failed: ${message}]\r\n`);
+    writeTerminalPaneViews(pane, `\r\n[Reconnect failed: ${message}]\r\n`);
   }
 
   function markReconnectRequested(id: string) {
@@ -550,7 +625,7 @@ export function createTerminalTabController(context: TerminalTabContext) {
     pane.reconnectPending = false;
     pane.exitText = "Reconnecting";
     pane.error = "";
-    pane.term?.write("\r\n[Reconnecting]\r\n");
+    writeTerminalPaneViews(pane, "\r\n[Reconnecting]\r\n");
   }
 
   function markConnectionError(id: string, message: string) {
@@ -564,7 +639,7 @@ export function createTerminalTabController(context: TerminalTabContext) {
     pane.reconnectPending = false;
     pane.exitText = message;
     pane.error = "";
-    pane.term?.write(`\r\n[Connection paused: ${message}]\r\n`);
+    writeTerminalPaneViews(pane, `\r\n[Connection paused: ${message}]\r\n`);
   }
 
   function markConnectionCancelled(id: string, message: string) {
@@ -574,7 +649,7 @@ export function createTerminalTabController(context: TerminalTabContext) {
     pane.reconnectPending = false;
     pane.error = message;
     pane.exitText = message;
-    pane.term?.write(`\r\n[Connection canceled: ${message}]\r\n`);
+    writeTerminalPaneViews(pane, `\r\n[Connection canceled: ${message}]\r\n`);
   }
 
   function refreshPaneTitle(pane: TerminalPane) {
@@ -584,13 +659,17 @@ export function createTerminalTabController(context: TerminalTabContext) {
   }
 
   function scheduleOutputFlush(pane: TerminalPane) {
-    if (!pane.term || pane.outputFrame !== null) return;
+    if (pane.views.size === 0 || pane.outputFrame !== null) return;
     pane.outputFrame = requestAnimationFrame(() => {
       pane.outputFrame = null;
-      if (!pane.term || !pane.outputQueue.length) return;
+      if (pane.views.size === 0 || !pane.outputQueue.length) return;
       const text = pane.outputQueue.join("");
       pane.outputQueue = [];
-      pane.term.write(text);
+      pane.replayBuffer.push(text);
+      trimReplayBuffer(pane);
+      for (const view of pane.views.values()) {
+        view.term.write(text);
+      }
     });
   }
 
@@ -608,25 +687,27 @@ export function createTerminalTabController(context: TerminalTabContext) {
   };
 }
 
-function attachMountedTerminal(pane: TerminalPane, container: HTMLDivElement, scheduleFit: () => void) {
-  const element = pane.term?.element;
+function attachMountedTerminal(pane: TerminalPane, view: TerminalView, scheduleFit: () => void) {
+  const element = view.term.element;
   if (!element) return;
-  if (element.parentElement !== container) {
-    container.replaceChildren(element);
-    pane.resizeObserver?.disconnect();
-    pane.resizeObserver = new ResizeObserver(scheduleFit);
-    pane.resizeObserver.observe(container);
+  if (element.parentElement !== view.container) {
+    view.container.replaceChildren(element);
+    view.resizeObserver?.disconnect();
+    view.resizeObserver = new ResizeObserver(scheduleFit);
+    view.resizeObserver.observe(view.container);
   }
-  attachTerminalScrollbar(pane);
-  fitTerminal(pane);
-  pane.term?.refresh(0, Math.max(0, pane.term.rows - 1));
+  setActivePaneView(pane, view);
+  attachTerminalScrollbar(pane, view);
+  fitTerminal(pane, view);
+  view.term.refresh(0, Math.max(0, view.term.rows - 1));
 }
 
 export function refreshTerminalPanePresentation(pane: TerminalPane) {
-  if (!pane.term) return;
-  attachTerminalScrollbar(pane);
-  pane.term.refresh(0, Math.max(0, pane.term.rows - 1));
-  updateTerminalScrollbar(pane);
+  for (const view of pane.views.values()) {
+    attachTerminalScrollbar(pane, view);
+    view.term.refresh(0, Math.max(0, view.term.rows - 1));
+    updateTerminalScrollbar(view);
+  }
 }
 
 export function disposeTerminalTab(tab: TerminalTab) {
@@ -644,74 +725,84 @@ export function detachTerminalPane(pane: TerminalPane) {
   pane.outputFrame = null;
   if (pane.resizeTimer !== null) window.clearTimeout(pane.resizeTimer);
   pane.resizeTimer = null;
-  pane.resizeObserver?.disconnect();
-  pane.resizeObserver = undefined;
-  pane.dataDisposables.forEach((disposable) => disposable.dispose());
-  pane.dataDisposables = [];
-  pane.search?.dispose();
-  pane.search = undefined;
-  pane.serialize?.dispose();
-  pane.serialize = undefined;
-  pane.image?.dispose();
-  pane.image = undefined;
-  pane.webgl?.dispose();
-  pane.webgl = undefined;
-  pane.scrollbarInteraction?.dispose();
-  pane.scrollbarInteraction = undefined;
-  destroyTerminalScrollbar(pane);
-  pane.fit?.dispose();
-  pane.fit = undefined;
-  pane.term?.dispose();
+  for (const view of pane.views.values()) {
+    disposeTerminalView(view);
+  }
+  pane.views.clear();
+  pane.viewContainers.clear();
   pane.term = undefined;
+  pane.fit = undefined;
+  pane.search = undefined;
+  pane.serialize = undefined;
+  pane.image = undefined;
+  pane.webgl = undefined;
+  pane.scrollbarDom = undefined;
+  pane.scrollbarInteraction = undefined;
+  pane.resizeObserver = undefined;
+  pane.dataDisposables = [];
   pane.container?.replaceChildren();
   pane.container = undefined;
 }
 
-function fitTerminal(pane: TerminalPane): TerminalFitSize | null {
-  if (!pane.fit || !pane.term) return null;
-  const dimensions = pane.fit.proposeDimensions();
+function disposeTerminalView(view: TerminalView) {
+  view.resizeObserver?.disconnect();
+  view.dataDisposables.forEach((disposable) => disposable.dispose());
+  view.dataDisposables = [];
+  view.search.dispose();
+  view.serialize.dispose();
+  view.image?.dispose();
+  view.webgl?.dispose();
+  destroyTerminalScrollbar(view);
+  view.fit.dispose();
+  view.term.dispose();
+  view.container.replaceChildren();
+}
+
+function fitTerminal(pane: TerminalPane, view: TerminalView): TerminalFitSize | null {
+  const dimensions = view.fit.proposeDimensions();
   const fallback = {
     cols: pane.lastCols,
     rows: pane.lastRows,
     pixelWidth: pane.lastPixelWidth,
     pixelHeight: pane.lastPixelHeight,
   };
-  const pixels = pane.container ? measureTerminalPixels(pane.container) : fallback;
+  const pixels = measureTerminalPixels(view.container);
   const size = normalizeTerminalFitSize(
-    { ...(dimensions ?? { cols: pane.term.cols, rows: pane.term.rows }), ...pixels },
+    { ...(dimensions ?? { cols: view.term.cols, rows: view.term.rows }), ...pixels },
     fallback,
   );
-  if (Number.isFinite(dimensions?.cols) && Number.isFinite(dimensions?.rows)) {
-    pane.fit.fit();
-    pane.term.refresh(0, Math.max(0, pane.term.rows - 1));
+  view.lastFitSize = size;
+  view.fitted = Number.isFinite(dimensions?.cols) && Number.isFinite(dimensions?.rows);
+  if (view.fitted) {
+    view.fit.fit();
+    view.term.refresh(0, Math.max(0, view.term.rows - 1));
   }
-  updateTerminalScrollbar(pane);
+  updateTerminalScrollbar(view);
   return size;
 }
 
-function attachTerminalScrollbar(pane: TerminalPane) {
-  const previousRoot = pane.scrollbarDom?.root;
-  const dom = ensureTerminalScrollbarDom(pane);
+function attachTerminalScrollbar(_pane: TerminalPane, view: TerminalView) {
+  const previousRoot = view.scrollbarDom?.root;
+  const dom = ensureTerminalScrollbarDom(view);
   if (!dom) {
-    destroyTerminalScrollbar(pane);
+    destroyTerminalScrollbar(view);
     return;
   }
-  pane.scrollbarDom = dom;
-  if (pane.scrollbarInteraction && previousRoot === dom.root) {
-    updateTerminalScrollbar(pane);
+  view.scrollbarDom = dom;
+  if (view.scrollbarInteraction && previousRoot === dom.root) {
+    updateTerminalScrollbar(view);
     return;
   }
 
-  pane.scrollbarInteraction?.dispose();
-  pane.scrollbarInteraction = attachTerminalScrollbarInteraction(pane);
-  updateTerminalScrollbar(pane);
+  view.scrollbarInteraction?.dispose();
+  view.scrollbarInteraction = attachTerminalScrollbarInteraction(view);
+  updateTerminalScrollbar(view);
 }
 
-function attachTerminalScrollSync(pane: TerminalPane): { dispose: () => void } {
-  const term = pane.term;
-  if (!term) return { dispose: () => {} };
+function attachTerminalScrollSync(_pane: TerminalPane, view: TerminalView): { dispose: () => void } {
+  const term = view.term;
 
-  const update = () => updateTerminalScrollbar(pane);
+  const update = () => updateTerminalScrollbar(view);
   const scrollDisposable = term.onScroll(update);
   const writeDisposable = term.onWriteParsed(update);
   const wheelHandler = (event: WheelEvent) => {
@@ -721,13 +812,13 @@ function attachTerminalScrollSync(pane: TerminalPane): { dispose: () => void } {
       deltaY: event.deltaY,
       deltaMode: event.deltaMode,
       rows: term.rows,
-      previousRemainder: pane.wheelRemainder,
+      previousRemainder: view.wheelRemainder,
       normalBuffer: term.buffer.active.type === "normal",
       mouseTracking: term.modes.mouseTrackingMode !== "none",
       defaultPrevented: event.defaultPrevented,
       shiftKey: event.shiftKey,
     });
-    pane.wheelRemainder = result.remainder;
+    view.wheelRemainder = result.remainder;
     if (!result.consume) return true;
 
     event.preventDefault();
@@ -750,9 +841,9 @@ function attachTerminalScrollSync(pane: TerminalPane): { dispose: () => void } {
   };
 }
 
-function updateTerminalScrollbar(pane: TerminalPane) {
+function updateTerminalScrollbar(view: TerminalView) {
   const sync = () => {
-    syncTerminalScrollbarThumb(pane);
+    syncTerminalScrollbarThumb(view);
   };
   requestAnimationFrame(() => {
     sync();
@@ -760,16 +851,15 @@ function updateTerminalScrollbar(pane: TerminalPane) {
   });
 }
 
-function destroyTerminalScrollbar(pane: TerminalPane) {
-  pane.scrollbarInteraction?.dispose();
-  pane.scrollbarInteraction = undefined;
-  pane.scrollbarDom?.root.remove();
-  pane.scrollbarDom = undefined;
+function destroyTerminalScrollbar(view: TerminalView) {
+  view.scrollbarInteraction?.dispose();
+  view.scrollbarInteraction = undefined;
+  view.scrollbarDom?.root.remove();
+  view.scrollbarDom = undefined;
 }
 
-function ensureTerminalScrollbarDom(pane: TerminalPane): TerminalScrollbarDom | undefined {
-  const slot = pane.container;
-  if (!slot) return undefined;
+function ensureTerminalScrollbarDom(view: TerminalView): TerminalScrollbarDom | undefined {
+  const slot = view.container;
   const existingRoot = slot.querySelector<HTMLDivElement>(":scope > .terminal-scrollbar");
   if (existingRoot) {
     const track = existingRoot.querySelector<HTMLDivElement>(".terminal-scrollbar-track");
@@ -791,17 +881,16 @@ function ensureTerminalScrollbarDom(pane: TerminalPane): TerminalScrollbarDom | 
   return { root, track, handle };
 }
 
-function syncTerminalScrollbarThumb(pane: TerminalPane) {
-  const term = pane.term;
-  if (!term) return;
+function syncTerminalScrollbarThumb(view: TerminalView) {
+  const term = view.term;
 
   const state = terminalScrollbarState({
     baseY: term.buffer.active.baseY,
     viewportY: term.buffer.active.viewportY,
     rows: term.rows,
   });
-  const dom = pane.scrollbarDom ?? ensureTerminalScrollbarDom(pane);
-  if (dom) pane.scrollbarDom = dom;
+  const dom = view.scrollbarDom ?? ensureTerminalScrollbarDom(view);
+  if (dom) view.scrollbarDom = dom;
   if (!dom) return;
   const { root: vertical, track, handle } = dom;
   vertical.classList.toggle("terminal-scrollbar-visible", state.visible);
@@ -817,18 +906,17 @@ function syncTerminalScrollbarThumb(pane: TerminalPane) {
   handle.style.setProperty("width", "100%");
 }
 
-function attachTerminalScrollbarInteraction(pane: TerminalPane): { dispose: () => void } {
-  const term = pane.term;
-  const dom = pane.scrollbarDom ?? ensureTerminalScrollbarDom(pane);
-  if (!term || !dom) return { dispose: () => {} };
-  pane.scrollbarDom = dom;
+function attachTerminalScrollbarInteraction(view: TerminalView): { dispose: () => void } {
+  const term = view.term;
+  const dom = view.scrollbarDom ?? ensureTerminalScrollbarDom(view);
+  if (!dom) return { dispose: () => {} };
+  view.scrollbarDom = dom;
 
   const { root: vertical, track } = dom;
   let dragging = false;
   let pointerId: number | null = null;
 
   const scrollToPointer = (clientY: number) => {
-    if (!pane.term || pane.term !== term) return;
     const state = terminalScrollbarState({
       baseY: term.buffer.active.baseY,
       viewportY: term.buffer.active.viewportY,
@@ -845,7 +933,7 @@ function attachTerminalScrollbarInteraction(pane: TerminalPane): { dispose: () =
     });
     term.scrollToLine(line);
     term.refresh(0, Math.max(0, term.rows - 1));
-    updateTerminalScrollbar(pane);
+    updateTerminalScrollbar(view);
   };
 
   const pointerDown = (event: PointerEvent) => {
@@ -870,7 +958,7 @@ function attachTerminalScrollbarInteraction(pane: TerminalPane): { dispose: () =
     dragging = false;
     pointerId = null;
     if (vertical.hasPointerCapture(event.pointerId)) vertical.releasePointerCapture(event.pointerId);
-    updateTerminalScrollbar(pane);
+    updateTerminalScrollbar(view);
   };
 
   vertical.addEventListener("pointerdown", pointerDown, { capture: true });
@@ -886,6 +974,67 @@ function attachTerminalScrollbarInteraction(pane: TerminalPane): { dispose: () =
       vertical.removeEventListener("pointercancel", pointerEnd, { capture: true });
     },
   };
+}
+
+function setActivePaneView(pane: TerminalPane, view: TerminalView) {
+  pane.term = view.term;
+  pane.fit = view.fit;
+  pane.search = view.search;
+  pane.serialize = view.serialize;
+  pane.image = view.image;
+  pane.webgl = view.webgl;
+  pane.scrollbarDom = view.scrollbarDom;
+  pane.scrollbarInteraction = view.scrollbarInteraction;
+  pane.container = view.container;
+  pane.resizeObserver = view.resizeObserver;
+  pane.dataDisposables = view.dataDisposables;
+  pane.wheelRemainder = view.wheelRemainder;
+}
+
+function terminalViewMeasurements(pane: TerminalPane): TerminalMirrorViewMeasurement[] {
+  return Array.from(pane.views.values()).map((view) => ({
+    id: view.id,
+    visible: view.container.isConnected && view.container.getClientRects().length > 0,
+    mounted: view.term.element?.isConnected === true,
+    fitted: view.fitted,
+    ...view.lastFitSize,
+  }));
+}
+
+function updateTerminalViewSizeState(pane: TerminalPane, tooSmallViewIds: string[], constrainingViewIds: string[]) {
+  const tooSmall = new Set(tooSmallViewIds);
+  const constraining = new Set(constrainingViewIds);
+  for (const view of pane.views.values()) {
+    view.tooSmall = tooSmall.has(view.id);
+    view.constraining = constraining.has(view.id);
+    view.container.toggleAttribute("data-terminal-too-small", view.tooSmall);
+    view.container.toggleAttribute("data-terminal-size-constraining", view.constraining);
+  }
+}
+
+function trimReplayBuffer(pane: TerminalPane) {
+  const maxReplayChars = 500_000;
+  let total = 0;
+  const retained: string[] = [];
+  for (let index = pane.replayBuffer.length - 1; index >= 0; index -= 1) {
+    const chunk = pane.replayBuffer[index];
+    if (total + chunk.length > maxReplayChars && retained.length > 0) break;
+    retained.push(chunk);
+    total += chunk.length;
+  }
+  pane.replayBuffer = retained.reverse();
+}
+
+function writeTerminalPaneViews(pane: TerminalPane, text: string) {
+  if (pane.views.size === 0) {
+    pane.outputQueue.push(text);
+    return;
+  }
+  pane.replayBuffer.push(text);
+  trimReplayBuffer(pane);
+  for (const view of pane.views.values()) {
+    view.term.write(text);
+  }
 }
 
 function measureTerminalPixels(container: HTMLElement): { pixelWidth: number; pixelHeight: number } {

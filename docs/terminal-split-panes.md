@@ -30,7 +30,8 @@ Keep these concepts separate:
 
 - Workspace state: host id, title, owned tool tabs, dock layout.
 - Dock state: group/split layout, slot placement, floating displays, active slot ids.
-- Terminal tool state: terminal session id, title/alias, xterm instance, cwd/status, output queue, resize bookkeeping.
+- Terminal tool state: terminal session id, title/alias, cwd/status, output queue, resize bookkeeping.
+- Terminal view state: one mounted xterm renderer, DOM focus, scrollback viewport, selection, find UI, context menu, hover, and temporary renderer details for a specific display location.
 - Transport state: backend local PTY, SSH channel, or future terminal transport.
 
 ## Split Commands
@@ -199,11 +200,72 @@ Floating a Terminal ToolTab:
 Mirror display:
 
 - shares terminal business state and backend session
-- has view-local scroll/focus details where possible
-- writes input to the same backend session
 - receives the same output stream
+- follows the Terminal mirror target design below
 
 If the owner closes, mirrors become closed-source placeholders and stop accepting input.
+
+## Terminal Mirror Target Design
+
+This section is the target design and acceptance criteria for Terminal mirrors. If the current implementation has not yet shipped every item, update the implementation toward these rules rather than changing the product contract.
+
+Terminal mirrors are special because a single backend PTY can have multiple visible xterm views. The backend session is shared, while each rendered xterm view keeps its own view-local UI.
+
+Shared Terminal session state:
+
+- backend session id and transport session
+- PTY process state: running, exited, reconnecting, disconnected, or error
+- output buffer and alternate screen content
+- ToolTab title, shell title, cwd, and session metadata
+- backend status and reconnect/error state
+- input effects after keyboard or mouse events are written to the backend
+
+View-local Terminal UI state:
+
+- DOM focus ring for the actual focused xterm element
+- scrollback viewport
+- xterm selection
+- find UI, query, active match, and find highlights
+- context menu state and position
+- hover, drag, drop, resize, and other temporary visual state
+- renderer instance details such as canvas/WebGL state
+
+Input rules:
+
+- Terminal mirrors are editable by default.
+- A view must have real DOM focus or be the real pointer event target before it can send keyboard or mouse input.
+- Only one actual xterm view sends any given keyboard or mouse event to the backend session.
+- Input from a mirror still runs on the owner Terminal's host, not on the current workspace host.
+- Mirror UI must make the owner Workspace and Host visible through a badge, chip, tooltip, or equivalent source indicator.
+
+Scroll, selection, and find rules:
+
+- Do not synchronize scrollback viewport between views.
+- If a terminal application consumes wheel or mouse events, only the real event target sends those events to the backend. The resulting program output or alternate-screen change is shared naturally through the backend session.
+- Do not synchronize xterm selection between views.
+- Do not synchronize find UI, query, active match, or find highlights between views.
+- Search implementations may reuse the shared session buffer as a data source.
+
+PTY size rules:
+
+- The backend PTY size is computed from all visible, mounted, fitted, and usable Terminal views for that shared session.
+- Hidden Workspaces, background views, collapsed groups, unmounted views, and not-yet-fitted views do not participate.
+- A visible floating Terminal mirror participates when it is mounted, fitted, and usable.
+- The chosen PTY size is the minimum usable `cols` and minimum usable `rows` across participating views.
+- Resize updates are sent in real time, but must be coalesced to an animation frame or short debounce and sent only when the computed `cols` or `rows` changes.
+- Each Terminal view has a minimum participating size. A view below that threshold shows a compact placeholder such as `Terminal too small` and does not participate in PTY size calculation.
+- If every visible view is below the minimum participating size, keep the last valid PTY size and do not send a new resize. For a new session without a last valid size, use the default terminal size such as `80x24`.
+- Views that constrain the current PTY size may be tracked internally for diagnostics and testing, but the Terminal UI should not show a visible size-source indicator during normal use.
+
+Lifecycle rules:
+
+- Creating a mirror slot does not affect PTY size until the mirror is actually mounted, visible, fitted, and above the minimum participating size.
+- Closing a mirror removes only that display slot. It does not prompt for terminal session close and does not dispose the backend session.
+- Closing a mirror can change the visible participant set, so PTY size must be recalculated afterward.
+- Closing the owner Terminal ToolTab follows the normal Terminal close confirmation and backend dispose flow. Mirrors become closed-source placeholders.
+- Closed-source placeholders do not accept input and do not participate in PTY size calculation.
+- Terminal mirror slots are not persisted across app restarts.
+- Terminal mirrors may appear in floating windows. Closing a floating mirror does not close the backend session. Mirror-only floating windows are not restored after app restart.
 
 ## Failure Handling
 

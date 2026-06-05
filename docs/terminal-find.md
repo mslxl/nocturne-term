@@ -103,13 +103,13 @@ The button tooltip is exactly `Copy matching line`.
 
 ## State
 
-The query and find options are workspace/window-level state so the user can keep searching for the same term after switching Terminal ToolTabs.
+The first implementation may keep the query and find options as workspace/window-level state so the user can keep searching for the same term after switching ordinary Terminal ToolTabs.
 
 The active match belongs to the current Terminal ToolTab. Switching Terminal ToolTabs while the find bar is open applies the same query/options to the new active terminal and resets navigation to that terminal's first match.
 
 Closing the find bar clears find decorations for the active terminal. If later implementations keep decorations on inactive terminals, they must clear all decorated terminals when the bar closes.
 
-Mirror display uses the shared terminal business state, but find overlay focus and scroll behavior are view-local.
+Terminal mirror views do not synchronize find UI, query, active match, or find highlights. Each visible xterm view may search the shared session buffer independently, but one view's find operation must not open the find bar, decorate matches, or scroll another view.
 
 ## Native Feel Caveats
 

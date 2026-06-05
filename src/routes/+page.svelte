@@ -904,9 +904,6 @@
   }
 
   function terminalRenderMode(workspace: WorkspaceTabState | null, effectiveWorkspace: WorkspaceTabState): TerminalRenderMode | null {
-    if (!workspace && effectiveWorkspace.id !== activeTerminalWorkspaceId) {
-      return null;
-    }
     return {
       workspace: effectiveWorkspace,
     };
@@ -2470,60 +2467,93 @@
     }
   }
 
-  async function mountTerminalWhenReady(paneId: string) {
-    await waitForPaneContainer(paneId);
-    await terminalTabs.mountTerminal(paneId);
+  async function mountTerminalWhenReady(paneId: string, viewId?: string) {
+    const terminalViewId = await waitForPaneContainer(paneId, viewId);
+    await terminalTabs.mountTerminal(paneId, terminalViewId);
   }
 
-  async function waitForPaneContainer(paneId: string) {
+  async function waitForPaneContainer(paneId: string, viewId?: string) {
     for (let attempt = 0; attempt < 30; attempt += 1) {
       const pane = terminalPaneById(findTabByPaneId(paneId), paneId);
-      if (pane?.container) return;
+      if (viewId && pane?.viewContainers.has(viewId)) return viewId;
+      const visibleViewId = pane ? Array.from(pane.viewContainers.keys()).find((id) => pane.viewContainers.get(id)?.isConnected) : undefined;
+      if (!viewId && visibleViewId) return visibleViewId;
+      if (!viewId && pane?.container) return paneId;
       await tick();
       await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
     }
-    throw new Error(`terminal pane ${paneId} did not mount a container`);
+    throw new Error(viewId ? `terminal pane ${paneId} did not mount container view ${viewId}` : `terminal pane ${paneId} did not mount a visible container`);
   }
 
-  function terminalMount(node: HTMLDivElement, params: { pane: TerminalPane; toolTabId: string }) {
+  function terminalMount(node: HTMLDivElement, params: { pane: TerminalPane; toolTabId: string; viewId: string }) {
     let current = params;
     attachTerminalMount(node, current);
     return {
-      update(next: { pane: TerminalPane; toolTabId: string }) {
-        if (next.pane === current.pane && next.toolTabId === current.toolTabId) return;
-        detachTerminalMount(node, current.pane);
+      update(next: { pane: TerminalPane; toolTabId: string; viewId: string }) {
+        if (next.pane === current.pane && next.toolTabId === current.toolTabId && next.viewId === current.viewId) return;
+        detachTerminalMount(node, current.pane, current.viewId);
         current = next;
         attachTerminalMount(node, current);
       },
       destroy() {
-        detachTerminalMount(node, current.pane);
+        detachTerminalMount(node, current.pane, current.viewId);
       },
     };
   }
 
-  function attachTerminalMount(node: HTMLDivElement, params: { pane: TerminalPane; toolTabId: string }) {
-    params.pane.container = node;
-    void mountTerminalToolTab(params.toolTabId);
+  function attachTerminalMount(node: HTMLDivElement, params: { pane: TerminalPane; toolTabId: string; viewId: string }) {
+    params.pane.viewContainers.set(params.viewId, node);
+    if (params.viewId === params.pane.id) params.pane.container = node;
+    void mountTerminalToolTab(params.toolTabId, params.viewId);
   }
 
-  function detachTerminalMount(node: HTMLDivElement, pane: TerminalPane) {
+  function detachTerminalMount(node: HTMLDivElement, pane: TerminalPane, viewId: string) {
+    if (pane.viewContainers.get(viewId) === node) {
+      pane.viewContainers.delete(viewId);
+    }
     if (pane.container === node) {
       pane.container = undefined;
     }
+    terminalTabs.scheduleFit(pane.id);
   }
 
-  async function mountTerminalToolTab(toolTabId: string) {
+  async function mountTerminalToolTab(toolTabId: string, viewId?: string) {
     const runtime = terminalRuntimeForToolTab(toolTabId);
     const pane = runtime ? terminalPaneById(runtime.tab, runtime.tab.activePaneId) : null;
     if (!pane) return;
+    const terminalViewId = viewId ?? visibleTerminalViewIdForToolTab(toolTabId, pane);
     activeTerminalToolTabId = toolTabId;
     activeId = toolTabId;
     await tick();
-    await mountTerminalWhenReady(pane.id);
+    await mountTerminalWhenReady(pane.id, terminalViewId);
     await flushTerminalOutputBacklog(pane.id);
-    terminalTabs.scheduleFit(pane.id);
+    terminalTabs.scheduleFit(pane.id, terminalViewId);
     pane.term?.focus();
     syncTerminalMenuState();
+  }
+
+  function visibleTerminalViewIdForToolTab(toolTabId: string, pane: TerminalPane) {
+    const existing = Array.from(pane.viewContainers.keys()).find((id) => pane.viewContainers.get(id)?.isConnected);
+    if (existing) return existing;
+    const floatingSlot = activeFloatingWindow ? activeDisplaySlotForToolTab(activeFloatingWindow.layout, toolTabId) : null;
+    if (floatingSlot) return floatingSlot.id;
+    const workspaceSlot = activeWorkspace ? activeDisplaySlotForToolTab(activeWorkspace.layout, toolTabId) : null;
+    return workspaceSlot?.id ?? pane.id;
+  }
+
+  function activeDisplaySlotForToolTab(layout: WorkspaceDockLayout, toolTabId: string): WorkspaceToolSlot | null {
+    if (layout.kind === "group") {
+      const active = activeGroupSlot(layout);
+      if (displaySlotHasToolTab(active, toolTabId)) return active;
+      return layout.slots.find((slot) => displaySlotHasToolTab(slot, toolTabId)) ?? null;
+    }
+    return layout.children
+      .map((child) => activeDisplaySlotForToolTab(child, toolTabId))
+      .find((slot): slot is WorkspaceToolSlot => slot !== null) ?? null;
+  }
+
+  function displaySlotHasToolTab(slot: WorkspaceToolSlot | null, toolTabId: string) {
+    return slot?.kind === "owned" || slot?.kind === "mirror" ? slot.tool_tab_id === toolTabId : false;
   }
 
   function removePaneFromTab(tab: TerminalTab, paneId: string) {
@@ -3961,6 +3991,7 @@
       {integratedTitlebar}
       showHostIcons={showHostIconsInTabs}
       {hostIconById}
+      dropPreviewWorkspaceId={toolTabDropTarget?.kind === "workspace" ? toolTabDropTarget.workspaceId : null}
       {activateWorkspace}
       {closeWorkspace}
       {closeOtherWorkspaces}
@@ -4419,15 +4450,24 @@
           {:else}
             <section
               class="terminal-surface"
+              class:mirror={slot.kind === "mirror"}
               data-testid="terminal-surface"
               data-session-id={pane.id}
               data-tool-tab-id={tool.id}
+              data-terminal-view-id={slot.id}
+              data-terminal-mirror={slot.kind === "mirror" ? "true" : undefined}
               aria-label={pane.title}
               role="group"
               oncontextmenu={(event) => void openPaneContextMenu(event, pane.id)}
             >
-              <div class="terminal-host" data-testid="terminal-host" role="presentation" onmousedown={() => void mountTerminalToolTab(tool.id)}>
-                <div class="terminal-mount" data-testid="terminal-mount" use:terminalMount={{ pane, toolTabId: tool.id }}></div>
+              {#if slot.kind === "mirror"}
+                <div class="terminal-mirror-source" data-testid="terminal-mirror-source">
+                  <span>Mirror from {ownerWorkspaceTitle(slot)}</span>
+                </div>
+              {/if}
+              <div class="terminal-host" data-testid="terminal-host" role="presentation" onmousedown={() => void mountTerminalToolTab(tool.id, slot.id)}>
+                <div class="terminal-mount" data-testid="terminal-mount" use:terminalMount={{ pane, toolTabId: tool.id, viewId: slot.id }}></div>
+                <div class="terminal-too-small" aria-hidden="true">Terminal too small</div>
               </div>
               {#if pane.error}
                 <p class="terminal-error">{pane.error}</p>
@@ -4826,6 +4866,70 @@
     min-height: 0;
     position: relative;
     background: var(--terminal-bg);
+  }
+
+  .terminal-surface {
+    position: relative;
+    min-width: 0;
+    min-height: 0;
+    height: 100%;
+    display: grid;
+    grid-template-rows: minmax(0, 1fr);
+    overflow: hidden;
+    background: var(--terminal-bg);
+  }
+
+  .terminal-surface.mirror {
+    border: 1px solid color-mix(in srgb, var(--app-accent) 58%, var(--app-border));
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--app-accent) 18%, transparent);
+  }
+
+  .terminal-host {
+    min-width: 0;
+    min-height: 0;
+    position: relative;
+    overflow: hidden;
+  }
+
+  .terminal-mirror-source,
+  .terminal-too-small {
+    position: absolute;
+    z-index: 19;
+    max-width: min(360px, calc(100% - 20px));
+    border: 1px solid color-mix(in srgb, var(--app-fg) 18%, transparent);
+    border-radius: 999px;
+    padding: 3px 8px;
+    background: color-mix(in srgb, var(--app-bg) 88%, transparent);
+    color: color-mix(in srgb, var(--app-fg) 78%, transparent);
+    font-size: 11px;
+    line-height: 1.2;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    pointer-events: none;
+    -webkit-backdrop-filter: blur(14px);
+    backdrop-filter: blur(14px);
+  }
+
+  .terminal-mirror-source {
+    top: 8px;
+    left: 8px;
+    border-color: color-mix(in srgb, var(--app-accent) 48%, var(--app-border));
+  }
+
+  .terminal-too-small {
+    top: 50%;
+    left: 50%;
+    display: none;
+    transform: translate(-50%, -50%);
+  }
+
+  :global(.terminal-mount[data-terminal-too-small]) {
+    opacity: 0.28;
+  }
+
+  :global(.terminal-mount[data-terminal-too-small] ~ .terminal-too-small) {
+    display: block;
   }
 
   .placeholder {

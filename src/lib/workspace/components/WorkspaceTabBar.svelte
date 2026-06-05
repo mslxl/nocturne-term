@@ -8,6 +8,7 @@
     integratedTitlebar?: boolean;
     showHostIcons?: boolean;
     hostIconById?: Map<string, ConnectionHostIcon>;
+    dropPreviewWorkspaceId?: string | null;
     activateWorkspace: (id: string) => void | Promise<void>;
     closeWorkspace: (id: string) => void | Promise<void>;
     closeOtherWorkspaces: (id: string) => void | Promise<void>;
@@ -23,6 +24,7 @@
     integratedTitlebar = false,
     showHostIcons = false,
     hostIconById = new Map(),
+    dropPreviewWorkspaceId = null,
     activateWorkspace,
     closeWorkspace,
     closeOtherWorkspaces,
@@ -82,7 +84,13 @@
         role="group"
         oncontextmenu={(event) => handleWorkspaceContextMenu(event, workspace.id)}
       >
-        <button class="workspace-activate" type="button" onclick={(event) => activate(event, workspace.id)}>
+        <button
+          class:drop-preview={workspace.id === dropPreviewWorkspaceId}
+          class="workspace-activate"
+          data-workspace-drop-preview={workspace.id === dropPreviewWorkspaceId ? "true" : undefined}
+          type="button"
+          onclick={(event) => activate(event, workspace.id)}
+        >
           {#if icon}
             <HostIcon icon={icon} size="small" title={workspace.title} />
           {/if}
@@ -197,6 +205,10 @@
     background: var(--app-control);
   }
 
+  .workspace-tab:has(.workspace-activate.drop-preview) {
+    background: color-mix(in srgb, var(--app-accent) 9%, var(--app-control));
+  }
+
   .workspace-activate {
     min-width: 0;
     height: 39px;
@@ -210,6 +222,11 @@
   .integrated-titlebar .workspace-activate {
     height: 28px;
     padding-block: 2px;
+  }
+
+  .workspace-activate.drop-preview {
+    background: color-mix(in srgb, var(--app-accent) 16%, transparent);
+    box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--app-accent) 78%, transparent);
   }
 
   .workspace-activate span {

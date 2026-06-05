@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs,
     io::Write,
     path::{Path, PathBuf},
@@ -330,6 +330,7 @@ fn create_workspace(
     let files_group_id = new_id("group-files");
     let terminal_group_id = new_id("group-terminal");
     let transfers_group_id = new_id("group-transfers");
+    let title = unique_workspace_title(snapshot, &host.document.name);
     let default_files_path = host
         .document
         .files
@@ -340,7 +341,7 @@ fn create_workspace(
     snapshot.workspaces.push(WorkspaceTabState {
         id: workspace_id.clone(),
         host_id: host_id.clone(),
-        title: host.document.name.clone(),
+        title,
         owned_tool_tab_ids: vec![
             files_tool_id.clone(),
             terminal_tool_id.clone(),
@@ -406,6 +407,27 @@ fn create_workspace(
     });
     snapshot.active_workspace_id = workspace_id;
     Ok(())
+}
+
+fn unique_workspace_title(snapshot: &WorkspaceLayoutSnapshot, base_title: &str) -> String {
+    let fallback = "Workspace";
+    let base = base_title.trim();
+    let base = if base.is_empty() { fallback } else { base };
+    let existing = snapshot
+        .workspaces
+        .iter()
+        .map(|workspace| workspace.title.trim())
+        .collect::<HashSet<_>>();
+    if !existing.contains(base) {
+        return base.to_string();
+    }
+    for suffix in 2u32.. {
+        let candidate = format!("{base} {suffix}");
+        if !existing.contains(candidate.as_str()) {
+            return candidate;
+        }
+    }
+    unreachable!("u32 suffix space should be sufficient for Workspace titles")
 }
 
 fn close_workspace(snapshot: &mut WorkspaceLayoutSnapshot, workspace_id: &str) -> Result<()> {
@@ -2018,6 +2040,33 @@ mod tests {
             panic!("expected terminal group");
         };
         assert_eq!(active_slot_id, workspace_slot_id(created_slot));
+    }
+
+    #[test]
+    fn unique_workspace_title_appends_next_available_suffix() {
+        let mut snapshot = test_snapshot();
+
+        assert_eq!(unique_workspace_title(&snapshot, "Production"), "Production 2");
+        assert_eq!(unique_workspace_title(&snapshot, "Staging"), "Staging 2");
+        assert_eq!(unique_workspace_title(&snapshot, "Local Shell"), "Local Shell");
+
+        snapshot.workspaces.push(WorkspaceTabState {
+            id: "workspace-production-2".to_string(),
+            host_id: "host-a".to_string(),
+            title: "Production 2".to_string(),
+            owned_tool_tab_ids: vec![],
+            layout: WorkspaceDockLayout::Group {
+                id: "group-production-2".to_string(),
+                active_slot_id: "slot-production-2".to_string(),
+                slots: vec![WorkspaceToolSlot::ClosedSource {
+                    id: "slot-production-2".to_string(),
+                    previous_title: "Closed".to_string(),
+                    owner_workspace_title: "Closed Owner".to_string(),
+                }],
+            },
+        });
+
+        assert_eq!(unique_workspace_title(&snapshot, "Production"), "Production 3");
     }
 
     fn test_snapshot() -> WorkspaceLayoutSnapshot {

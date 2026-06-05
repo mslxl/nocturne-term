@@ -27,6 +27,7 @@ Rules:
 - A workspace must bind to one and only one host.
 - Local hosts are valid workspace hosts.
 - The workspace title defaults to the host display name and can be renamed without changing the host.
+- Creating a workspace must never create a duplicate visible workspace title. If the default host display name is already used, the new workspace is created with the next numeric suffix, such as `Local Shell 2`.
 - A new workspace is created from the unified host picker. The default layout contains one Files tool tab, one Terminal tool tab, and one Transfers tool tab.
 - SSH workspaces use an SFTP-backed Files provider. Local workspaces use a local filesystem provider.
 
@@ -61,11 +62,13 @@ Mirror rules:
 - The same destination workspace may contain only one live mirror of a given tool tab. Re-dragging the same tool tab focuses the existing mirror.
 - Mirror slots are not persisted across app restarts.
 
-Shared business state includes terminal input/output/session status and Files current path, selection, sorting, provider state, search task, and transfer actions.
+Shared business state includes Files current path, selection, sorting, provider state, search task, transfer actions, and Terminal backend session state.
 
-View-local state includes scroll position, focused control, hover state, Tree view expansion, Columns view column widths, preview panel width, and local panel sizing inside a rendered control.
+View-local state includes scroll position, focused control, hover state, Tree view expansion, Columns view column widths, preview panel width, find UI, selection UI, and local panel sizing inside a rendered control.
 
-Mirror UI must show a source badge such as `from Production` and use a distinct border style so the user can tell it does not belong to the current workspace host.
+Terminal mirrors have additional rules because one backend PTY can be displayed by multiple xterm views. The target Terminal mirror design is defined in [Terminal ToolTabs And Dock Splits](terminal-split-panes.md#terminal-mirror-target-design). If the current implementation has not yet shipped every Terminal mirror rule, treat that section as the acceptance criteria for future work.
+
+Mirror UI must show a source badge such as `from Production` and use a distinct border style so the user can tell it does not belong to the current workspace host. When the mirror's owner host differs from the current workspace host, the badge or tooltip must expose the owner Workspace and Host identity clearly enough to prevent accidental commands against the wrong host.
 
 If the owner tool tab or owner workspace closes, live mirrors remain as closed-source placeholders. The placeholder explains that the source workspace or tool tab was closed. The user closes that placeholder manually.
 
@@ -154,6 +157,7 @@ previous process.
 Workspace titles:
 
 - default to the host display name
+- are made unique on creation by appending the next numeric suffix when needed
 - can be renamed by the user
 - do not mutate host configuration
 
