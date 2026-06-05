@@ -249,6 +249,13 @@ function applyDemoWorkspaceIntent(
     workspace.layout = splitDemoSlot(removed.layout, intent.target_slot_id, removed.slot, intent.side);
     return bumpDemoVersion(next);
   }
+  if (intent.kind === "move_tool_slot_to_workspace_edge") {
+    const workspace = requireDemoWorkspace(next, intent.workspace_id);
+    const removed = removeDemoSlot(workspace.layout, intent.slot_id);
+    if (!removed.layout) throw new Error("cannot move the last ToolTab in a workspace");
+    workspace.layout = splitDemoWorkspaceEdge(removed.layout, removed.slot, intent.side);
+    return bumpDemoVersion(next);
+  }
   if (intent.kind === "mirror_tool_tab") {
     const tool = next.tool_tabs.find((item) => item.id === intent.source_tool_tab_id);
     if (!tool) throw new Error(`tool tab ${intent.source_tool_tab_id} not found`);
@@ -454,6 +461,18 @@ function splitDemoSlot(layout: DemoLayout, targetSlotId: string, slot: DemoSlot,
   return { ...layout, children: layout.children.map((child) => splitDemoSlot(child, targetSlotId, slot, side)) };
 }
 
+function splitDemoWorkspaceEdge(layout: DemoLayout, slot: DemoSlot, side: "left" | "right" | "up" | "down"): DemoLayout {
+  const inserted: DemoLayout = { kind: "group", id: `group-${slot.id}`, slots: [slot], active_slot_id: slot.id };
+  const direction = side === "left" || side === "right" ? "row" : "column";
+  const before = side === "left" || side === "up";
+  return {
+    kind: "split",
+    direction,
+    ratios: before ? [0.28, 0.72] : [0.72, 0.28],
+    children: before ? [inserted, layout] : [layout, inserted],
+  };
+}
+
 function replaceDemoSlot(layout: DemoLayout, slotId: string, replacement: DemoSlot): DemoLayout {
   if (layout.kind === "group") {
     if (!layout.slots.some((slot) => slot.id === slotId)) return layout;
@@ -468,7 +487,12 @@ function replaceDemoSlot(layout: DemoLayout, slotId: string, replacement: DemoSl
 
 function collapseDemoLayout(layout: DemoLayout | null): DemoLayout | null {
   if (!layout || layout.kind === "group") return layout;
-  return layout.children.length === 1 ? layout.children[0] : layout;
+  const children = layout.children
+    .map((child) => collapseDemoLayout(child))
+    .filter((child): child is DemoLayout => child !== null);
+  if (children.length === 0) return null;
+  if (children.length === 1) return collapseDemoLayout(children[0] ?? null);
+  return { ...layout, children, ratios: normalizeDemoRatios(layout.ratios, children.length) };
 }
 
 function normalizeDemoRatios(ratios: Array<number | null>, length: number) {

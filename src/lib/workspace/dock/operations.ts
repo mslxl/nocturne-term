@@ -317,6 +317,14 @@ function containsGroup(layout: DockLayout, groupId: DockGroupId): boolean {
 
 function collapseSingleChild(layout: DockLayout | null): DockLayout | null {
   if (!layout || layout.kind === "group") return layout;
-  if (layout.children.length === 1) return layout.children[0] ?? null;
-  return layout;
+  const children = layout.children
+    .map((child) => collapseSingleChild(child))
+    .filter((child): child is DockLayout => child !== null);
+  if (children.length === 0) return null;
+  if (children.length === 1) return collapseSingleChild(children[0] ?? null);
+  return {
+    ...layout,
+    children,
+    ratios: normalizeDockRatios(layout.ratios.slice(0, children.length)),
+  };
 }

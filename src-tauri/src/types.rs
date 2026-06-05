@@ -394,6 +394,11 @@ pub enum WorkspaceIntent {
         target_slot_id: String,
         side: WorkspaceDockSide,
     },
+    MoveToolSlotToWorkspaceEdge {
+        workspace_id: String,
+        slot_id: String,
+        side: WorkspaceDockSide,
+    },
     SplitToolSlot {
         workspace_id: String,
         target_slot_id: String,
