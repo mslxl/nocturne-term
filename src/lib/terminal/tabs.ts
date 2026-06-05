@@ -131,6 +131,7 @@ type TerminalTabContext = {
   tabs: () => TerminalTab[];
   setGlobalError: (message: string) => void;
   notifySelectionChange?: () => void;
+  notifyTitleChange?: () => void;
   requestReconnect?: (paneId: string) => void;
 };
 
@@ -656,6 +657,7 @@ export function createTerminalTabController(context: TerminalTabContext) {
     pane.title = derivePaneTitle(pane);
     const tab = tabById(pane.tabId);
     if (tab && tab.activePaneId === pane.id) refreshTerminalTabTitle(tab);
+    context.notifyTitleChange?.();
   }
 
   function scheduleOutputFlush(pane: TerminalPane) {

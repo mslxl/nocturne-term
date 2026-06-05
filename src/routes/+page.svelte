@@ -276,6 +276,7 @@
   let tabs = $state<TerminalTab[]>([]);
   let activeId = $state("");
   let terminalRuntimeByToolTabId = $state(new Map<string, TerminalToolRuntime>());
+  let terminalTitleRevision = $state(0);
   let activeTerminalWorkspaceId = "";
   let activeTerminalToolTabId = $state("");
   let lastActivatedContentGroupIdByWorkspace = new Map<string, string>();
@@ -397,6 +398,9 @@
     },
     notifySelectionChange: () => {
       syncTerminalMenuState();
+    },
+    notifyTitleChange: () => {
+      terminalTitleRevision += 1;
     },
     requestReconnect: (paneId) => {
       void reconnectPaneAfterDisconnect(paneId);
@@ -625,8 +629,20 @@
   function slotToolTitle(slot: WorkspaceToolSlot) {
     if (slot.kind === "closed_source") return slot.previous_title;
     const tool = slotTool(slot);
-    if (tool) return tool.title;
+    if (tool) return toolTabDisplayTitle(tool);
     return "Missing ToolTab";
+  }
+
+  function toolTabDisplayTitle(tool: WorkspaceToolTab) {
+    if (tool.kind !== "terminal") return tool.title;
+    return terminalRuntimeTitleForToolTab(tool.id) ?? tool.title;
+  }
+
+  function terminalRuntimeTitleForToolTab(toolTabId: string) {
+    terminalTitleRevision;
+    const runtime = terminalRuntimeForToolTab(toolTabId);
+    const title = runtime?.tab.title.trim() ?? "";
+    return title.length > 0 ? title : null;
   }
 
   function ownerWorkspaceTitle(slot: WorkspaceToolSlot) {
@@ -4332,6 +4348,7 @@
             class:split-target={toolTabDropTarget?.kind === "split" && toolTabDropTarget.slotId === slot.id}
             data-testid={`tool-slot-${slot.id}`}
             data-session-id={tool?.kind === "terminal" ? terminalRuntimeForToolTab(tool.id)?.tab.activePaneId : undefined}
+            data-tool-snapshot-title={tool?.title ?? ""}
             data-tool-kind={tool?.kind ?? ""}
             data-tool-slot-id={slot.id}
             data-tool-tab-id={tool?.id ?? ""}
@@ -4456,6 +4473,7 @@
               data-tool-tab-id={tool.id}
               data-terminal-view-id={slot.id}
               data-terminal-mirror={slot.kind === "mirror" ? "true" : undefined}
+              data-terminal-runtime-title={terminalRuntimeTitleForToolTab(tool.id) ?? ""}
               aria-label={pane.title}
               role="group"
               oncontextmenu={(event) => void openPaneContextMenu(event, pane.id)}
