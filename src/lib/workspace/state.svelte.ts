@@ -229,6 +229,82 @@ function applyDemoWorkspaceIntent(
     next.active_workspace_id = intent.workspace_id;
     return bumpDemoVersion(next);
   }
+  if (intent.kind === "create_workspace") {
+    const workspaceId = `workspace-demo-${next.version + 1}`;
+    const filesToolId = `files-demo-${next.version + 1}`;
+    const terminalToolId = `terminal-demo-${next.version + 1}`;
+    const transfersToolId = `transfers-demo-${next.version + 1}`;
+    const filesSlotId = `slot-files-demo-${next.version + 1}`;
+    const terminalSlotId = `slot-terminal-demo-${next.version + 1}`;
+    const transfersSlotId = `slot-transfers-demo-${next.version + 1}`;
+    const hostTitle = intent.host_id === "demo-remote" ? "Demo Remote" : "Local Shell";
+    const title = uniqueDemoWorkspaceTitle(next, hostTitle);
+    const terminalTitle = intent.host_id === "demo-remote" ? "SSH Shell" : "Local Shell";
+    const filesTitle = intent.host_id === "demo-remote" ? "/srv/demo" : "~";
+    next.workspaces.push({
+      id: workspaceId,
+      host_id: intent.host_id,
+      title,
+      owned_tool_tab_ids: [filesToolId, terminalToolId, transfersToolId],
+      layout: {
+        kind: "split",
+        direction: "row",
+        ratios: [0.28, 0.72],
+        children: [
+          {
+            kind: "group",
+            id: `group-files-demo-${next.version + 1}`,
+            active_slot_id: filesSlotId,
+            slots: [{ kind: "owned", id: filesSlotId, tool_tab_id: filesToolId }],
+          },
+          {
+            kind: "split",
+            direction: "column",
+            ratios: [0.78, 0.22],
+            children: [
+              {
+                kind: "group",
+                id: `group-terminal-demo-${next.version + 1}`,
+                active_slot_id: terminalSlotId,
+                slots: [{ kind: "owned", id: terminalSlotId, tool_tab_id: terminalToolId }],
+              },
+              {
+                kind: "group",
+                id: `group-transfers-demo-${next.version + 1}`,
+                active_slot_id: transfersSlotId,
+                slots: [{ kind: "owned", id: transfersSlotId, tool_tab_id: transfersToolId }],
+              },
+            ],
+          },
+        ],
+      },
+    });
+    next.tool_tabs.push(
+      {
+        id: filesToolId,
+        kind: "files",
+        owner_workspace_id: workspaceId,
+        host_id: intent.host_id,
+        title: filesTitle,
+      },
+      {
+        id: terminalToolId,
+        kind: "terminal",
+        owner_workspace_id: workspaceId,
+        host_id: intent.host_id,
+        title: terminalTitle,
+      },
+      {
+        id: transfersToolId,
+        kind: "transfers",
+        owner_workspace_id: workspaceId,
+        host_id: intent.host_id,
+        title: "Transfers",
+      },
+    );
+    next.active_workspace_id = workspaceId;
+    return bumpDemoVersion(next);
+  }
   if (intent.kind === "activate_tool_slot") {
     const workspace = requireDemoWorkspace(next, intent.workspace_id);
     workspace.layout = activateDemoSlot(workspace.layout, intent.slot_id);
@@ -362,6 +438,17 @@ function bumpDemoVersion(snapshot: WorkspaceLayoutSnapshot): WorkspaceLayoutSnap
 
 function cloneDemoSnapshot(snapshot: WorkspaceLayoutSnapshot): WorkspaceLayoutSnapshot {
   return JSON.parse(JSON.stringify(snapshot)) as WorkspaceLayoutSnapshot;
+}
+
+function uniqueDemoWorkspaceTitle(snapshot: WorkspaceLayoutSnapshot, baseTitle: string): string {
+  const base = baseTitle.trim() || "Workspace";
+  const existing = new Set(snapshot.workspaces.map((workspace) => workspace.title.trim()));
+  if (!existing.has(base)) return base;
+  for (let suffix = 2; suffix < Number.MAX_SAFE_INTEGER; suffix += 1) {
+    const candidate = `${base} ${suffix}`;
+    if (!existing.has(candidate)) return candidate;
+  }
+  throw new Error("workspace title suffix space exhausted");
 }
 
 function requireDemoWorkspace(snapshot: WorkspaceLayoutSnapshot, workspaceId: string) {
