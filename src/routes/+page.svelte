@@ -4424,16 +4424,18 @@
       <span>Owner workspace is no longer available.</span>
     </div>
   {:else if tool.kind === "files"}
-    <FilesToolTab
-      toolTab={tool}
-      workspaceId={effectiveWorkspace.id}
-      defaultViewMode={defaultFilesViewMode}
-      showHidden={showHiddenFiles}
-      deleteBehavior={filesDeleteBehavior}
-      {textPreviewLimitBytes}
-      {imagePreviewLimitBytes}
-      toolbarActionIds={filesToolbarActionIds}
-    />
+    {#key tool.id}
+      <FilesToolTab
+        toolTab={tool}
+        workspaceId={effectiveWorkspace.id}
+        defaultViewMode={defaultFilesViewMode}
+        showHidden={showHiddenFiles}
+        deleteBehavior={filesDeleteBehavior}
+        {textPreviewLimitBytes}
+        {imagePreviewLimitBytes}
+        toolbarActionIds={filesToolbarActionIds}
+      />
+    {/key}
   {:else if tool.kind === "transfers"}
     <TransfersToolTab workspace={effectiveWorkspace} />
   {:else}
@@ -4903,9 +4905,22 @@
   }
 
   .terminal-host {
+    box-sizing: border-box;
+    width: 100%;
+    height: 100%;
     min-width: 0;
     min-height: 0;
     position: relative;
+    padding: var(--terminal-padding-top) var(--terminal-padding-right) var(--terminal-padding-bottom) var(--terminal-padding-left);
+    overflow: hidden;
+  }
+
+  .terminal-mount {
+    position: relative;
+    width: 100%;
+    height: 100%;
+    min-width: 0;
+    min-height: 0;
     overflow: hidden;
   }
 
@@ -5167,15 +5182,6 @@
 
   .ssh-credential-sheet button:active {
     background: var(--app-active);
-  }
-
-  .terminal-mount {
-    position: relative;
-    width: 100%;
-    height: 100%;
-    min-width: 0;
-    min-height: 0;
-    overflow: hidden;
   }
 
   :global(.xterm) {

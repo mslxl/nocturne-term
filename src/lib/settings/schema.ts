@@ -256,11 +256,11 @@ export const settingsSchema: SettingDefinition[] = [
     label: edge,
     path: ["terminal", "padding", edge],
     kind: "number" as const,
-    defaultValue: 8,
+    defaultValue: edge === "left" || edge === "right" ? 10 : 8,
     min: 0,
     step: 1,
     get: (root: { values: Record<string, ConfigValue> }) =>
-      numberValue(valueAt(root, ["terminal", "padding", edge])) ?? 8,
+      numberValue(valueAt(root, ["terminal", "padding", edge])) ?? (edge === "left" || edge === "right" ? 10 : 8),
     toConfigValue: (value: unknown) => configFloat(Number(value)),
   })),
   {

@@ -24,13 +24,12 @@ use crate::{
         ssh_network_hostname, verify_ssh_host_key, SshWorkerInput,
     },
     types::{
-        ConnectionHostEntry, ConnectionHostSource, ConnectionProtocol, FileChmodInput, FileEntry,
-        FileEntryKind, FileCreateDirectoryInput, FileListInput, FileListResult, FilePathInput,
-        FilePreviewContent, FilePreviewInput, FilePreviewResult, FileProviderCapabilities,
-        FileProviderInfo, FileProviderKind, FileRenameInput, FileSearchInput, FileSearchMatch,
-        FileSearchResult, FileTrashInfo, FileTrashInfoInput, RemoteSearchHelperInfo,
-        RemoteSearchHelperInput,
-        SshConnectionConfig,
+        ConnectionHostEntry, ConnectionHostSource, ConnectionProtocol, FileChmodInput,
+        FileCreateDirectoryInput, FileEntry, FileEntryKind, FileListInput, FileListResult,
+        FilePathInput, FilePreviewContent, FilePreviewInput, FilePreviewResult,
+        FileProviderCapabilities, FileProviderInfo, FileProviderKind, FileRenameInput,
+        FileSearchInput, FileSearchMatch, FileSearchResult, FileTrashInfo, FileTrashInfoInput,
+        RemoteSearchHelperInfo, RemoteSearchHelperInput, SshConnectionConfig,
     },
 };
 
@@ -49,9 +48,23 @@ pub(crate) struct SftpConnection {
     _jump_guards: Vec<thread::JoinHandle<()>>,
 }
 
+async fn run_file_command<T, F>(command: &'static str, work: F) -> Result<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T> + Send + 'static,
+{
+    tauri::async_runtime::spawn_blocking(work)
+        .await
+        .map_err(|error| invalid_error(format!("{command} worker failed: {error}")))?
+}
+
 #[tauri::command]
 #[specta::specta]
-pub(crate) fn list_files(app: AppHandle, input: FileListInput) -> Result<FileListResult> {
+pub(crate) async fn list_files(app: AppHandle, input: FileListInput) -> Result<FileListResult> {
+    run_file_command("list_files", move || list_files_blocking(app, input)).await
+}
+
+fn list_files_blocking(app: AppHandle, input: FileListInput) -> Result<FileListResult> {
     let host = connection_host_by_id(&app, &input.host_id)?;
     match host.document.protocol {
         ConnectionProtocol::Local => list_local_files(&host, input.path),
@@ -62,10 +75,24 @@ pub(crate) fn list_files(app: AppHandle, input: FileListInput) -> Result<FileLis
 
 #[tauri::command]
 #[specta::specta]
-pub(crate) fn create_directory(app: AppHandle, input: FileCreateDirectoryInput) -> Result<()> {
+pub(crate) async fn create_directory(
+    app: AppHandle,
+    input: FileCreateDirectoryInput,
+) -> Result<()> {
+    run_file_command("create_directory", move || {
+        create_directory_blocking(app, input)
+    })
+    .await
+}
+
+fn create_directory_blocking(app: AppHandle, input: FileCreateDirectoryInput) -> Result<()> {
     validate_child_name(&input.name)?;
     let host = connection_host_by_id(&app, &input.host_id)?;
-    let path = join_provider_path(&input.parent_path, &input.name, host.document.protocol.clone());
+    let path = join_provider_path(
+        &input.parent_path,
+        &input.name,
+        host.document.protocol.clone(),
+    );
     match host.document.protocol {
         ConnectionProtocol::Local => fs::create_dir(expand_local_home(path)).map_err(io_error),
         ConnectionProtocol::Ssh => {
@@ -91,7 +118,11 @@ pub(crate) fn create_directory(app: AppHandle, input: FileCreateDirectoryInput) 
 
 #[tauri::command]
 #[specta::specta]
-pub(crate) fn rename_file(app: AppHandle, input: FileRenameInput) -> Result<()> {
+pub(crate) async fn rename_file(app: AppHandle, input: FileRenameInput) -> Result<()> {
+    run_file_command("rename_file", move || rename_file_blocking(app, input)).await
+}
+
+fn rename_file_blocking(app: AppHandle, input: FileRenameInput) -> Result<()> {
     if input.source_path.trim().is_empty() || input.destination_path.trim().is_empty() {
         return Err(invalid_error("rename paths cannot be empty"));
     }
@@ -129,7 +160,11 @@ pub(crate) fn rename_file(app: AppHandle, input: FileRenameInput) -> Result<()> 
 
 #[tauri::command]
 #[specta::specta]
-pub(crate) fn chmod_file(app: AppHandle, input: FileChmodInput) -> Result<()> {
+pub(crate) async fn chmod_file(app: AppHandle, input: FileChmodInput) -> Result<()> {
+    run_file_command("chmod_file", move || chmod_file_blocking(app, input)).await
+}
+
+fn chmod_file_blocking(app: AppHandle, input: FileChmodInput) -> Result<()> {
     if input.path.trim().is_empty() {
         return Err(invalid_error("chmod path cannot be empty"));
     }
@@ -169,7 +204,11 @@ pub(crate) fn chmod_file(app: AppHandle, input: FileChmodInput) -> Result<()> {
 
 #[tauri::command]
 #[specta::specta]
-pub(crate) fn delete_file(app: AppHandle, input: FilePathInput) -> Result<()> {
+pub(crate) async fn delete_file(app: AppHandle, input: FilePathInput) -> Result<()> {
+    run_file_command("delete_file", move || delete_file_blocking(app, input)).await
+}
+
+fn delete_file_blocking(app: AppHandle, input: FilePathInput) -> Result<()> {
     if input.path.trim().is_empty() {
         return Err(invalid_error("delete path cannot be empty"));
     }
@@ -195,7 +234,17 @@ pub(crate) fn delete_file(app: AppHandle, input: FilePathInput) -> Result<()> {
 
 #[tauri::command]
 #[specta::specta]
-pub(crate) fn remote_trash_info(app: AppHandle, input: FileTrashInfoInput) -> Result<FileTrashInfo> {
+pub(crate) async fn remote_trash_info(
+    app: AppHandle,
+    input: FileTrashInfoInput,
+) -> Result<FileTrashInfo> {
+    run_file_command("remote_trash_info", move || {
+        remote_trash_info_blocking(app, input)
+    })
+    .await
+}
+
+fn remote_trash_info_blocking(app: AppHandle, input: FileTrashInfoInput) -> Result<FileTrashInfo> {
     let host = connection_host_by_id(&app, &input.host_id)?;
     match host.document.protocol {
         ConnectionProtocol::Local => Err(invalid_error("local hosts do not use remote trash")),
@@ -210,7 +259,7 @@ pub(crate) fn remote_trash_info(app: AppHandle, input: FileTrashInfoInput) -> Re
                 "files-trash-info",
             )?;
             let sftp = connection.session.sftp().map_err(terminal_error)?;
-            remote_trash_info_for_sftp(&sftp)
+            remote_trash_info_for_sftp(&connection.session, &sftp)
         }
         ConnectionProtocol::Telnet => Err(invalid_error("telnet hosts do not support Files")),
     }
@@ -218,13 +267,25 @@ pub(crate) fn remote_trash_info(app: AppHandle, input: FileTrashInfoInput) -> Re
 
 #[tauri::command]
 #[specta::specta]
-pub(crate) fn remote_search_helper_info(
+pub(crate) async fn remote_search_helper_info(
+    app: AppHandle,
+    input: RemoteSearchHelperInput,
+) -> Result<RemoteSearchHelperInfo> {
+    run_file_command("remote_search_helper_info", move || {
+        remote_search_helper_info_blocking(app, input)
+    })
+    .await
+}
+
+fn remote_search_helper_info_blocking(
     app: AppHandle,
     input: RemoteSearchHelperInput,
 ) -> Result<RemoteSearchHelperInfo> {
     let host = connection_host_by_id(&app, &input.host_id)?;
     match host.document.protocol {
-        ConnectionProtocol::Local => Err(invalid_error("local hosts do not use a remote search helper")),
+        ConnectionProtocol::Local => Err(invalid_error(
+            "local hosts do not use a remote search helper",
+        )),
         ConnectionProtocol::Ssh => {
             let connection = connect_sftp_for_host(
                 &app,
@@ -235,7 +296,8 @@ pub(crate) fn remote_search_helper_info(
                 input.save_credential,
                 "files-remote-search-helper",
             )?;
-            let available = remote_command_succeeds(&connection.session, "command -v rg >/dev/null 2>&1")?;
+            let available =
+                remote_command_succeeds(&connection.session, "command -v rg >/dev/null 2>&1")?;
             Ok(RemoteSearchHelperInfo {
                 available,
                 provider_label: if available {
@@ -256,13 +318,19 @@ pub(crate) fn remote_search_helper_info(
 
 #[tauri::command]
 #[specta::specta]
-pub(crate) fn trash_file(app: AppHandle, input: FilePathInput) -> Result<()> {
+pub(crate) async fn trash_file(app: AppHandle, input: FilePathInput) -> Result<()> {
+    run_file_command("trash_file", move || trash_file_blocking(app, input)).await
+}
+
+fn trash_file_blocking(app: AppHandle, input: FilePathInput) -> Result<()> {
     if input.path.trim().is_empty() {
         return Err(invalid_error("trash path cannot be empty"));
     }
     let host = connection_host_by_id(&app, &input.host_id)?;
     match host.document.protocol {
-        ConnectionProtocol::Local => Err(invalid_error("local trash is not implemented by the Files provider yet")),
+        ConnectionProtocol::Local => Err(invalid_error(
+            "local trash is not implemented by the Files provider yet",
+        )),
         ConnectionProtocol::Ssh => {
             let connection = connect_sftp_for_host(
                 &app,
@@ -274,7 +342,7 @@ pub(crate) fn trash_file(app: AppHandle, input: FilePathInput) -> Result<()> {
                 "files-trash",
             )?;
             let sftp = connection.session.sftp().map_err(terminal_error)?;
-            move_sftp_path_to_trash(&sftp, Path::new(&input.path))
+            move_sftp_path_to_trash(&connection.session, &sftp, Path::new(&input.path))
         }
         ConnectionProtocol::Telnet => Err(invalid_error("telnet hosts do not support Files")),
     }
@@ -282,7 +350,14 @@ pub(crate) fn trash_file(app: AppHandle, input: FilePathInput) -> Result<()> {
 
 #[tauri::command]
 #[specta::specta]
-pub(crate) fn preview_file(app: AppHandle, input: FilePreviewInput) -> Result<FilePreviewResult> {
+pub(crate) async fn preview_file(
+    app: AppHandle,
+    input: FilePreviewInput,
+) -> Result<FilePreviewResult> {
+    run_file_command("preview_file", move || preview_file_blocking(app, input)).await
+}
+
+fn preview_file_blocking(app: AppHandle, input: FilePreviewInput) -> Result<FilePreviewResult> {
     if input.path.trim().is_empty() {
         return Err(invalid_error("preview path cannot be empty"));
     }
@@ -309,7 +384,14 @@ pub(crate) fn preview_file(app: AppHandle, input: FilePreviewInput) -> Result<Fi
 
 #[tauri::command]
 #[specta::specta]
-pub(crate) fn search_files(app: AppHandle, input: FileSearchInput) -> Result<FileSearchResult> {
+pub(crate) async fn search_files(
+    app: AppHandle,
+    input: FileSearchInput,
+) -> Result<FileSearchResult> {
+    run_file_command("search_files", move || search_files_blocking(app, input)).await
+}
+
+fn search_files_blocking(app: AppHandle, input: FileSearchInput) -> Result<FileSearchResult> {
     let query = input.query.trim();
     if query.is_empty() {
         return Err(invalid_error("search query cannot be empty"));
@@ -344,7 +426,11 @@ fn list_local_files(host: &ConnectionHostEntry, path: Option<String>) -> Result<
     })
 }
 
-fn list_sftp_files(app: AppHandle, host: ConnectionHostEntry, input: FileListInput) -> Result<FileListResult> {
+fn list_sftp_files(
+    app: AppHandle,
+    host: ConnectionHostEntry,
+    input: FileListInput,
+) -> Result<FileListResult> {
     let ssh = host
         .document
         .ssh
@@ -353,9 +439,10 @@ fn list_sftp_files(app: AppHandle, host: ConnectionHostEntry, input: FileListInp
     let username = default_ssh_username(&ssh)?;
     let proxy_jump_chain = if matches!(host.source, ConnectionHostSource::OpenSshConfig) {
         match (host.path.as_deref(), ssh.proxy_jump.as_deref()) {
-            (Some(path), Some(proxy_jump)) => {
-                Some(resolve_openssh_proxy_jump_chain(Path::new(path), proxy_jump)?)
-            }
+            (Some(path), Some(proxy_jump)) => Some(resolve_openssh_proxy_jump_chain(
+                Path::new(path),
+                proxy_jump,
+            )?),
             _ => None,
         }
     } else {
@@ -384,11 +471,15 @@ fn list_sftp_files(app: AppHandle, host: ConnectionHostEntry, input: FileListInp
     };
     let connection = connect_sftp_session(&worker_input)?;
     let sftp = connection.session.sftp().map_err(terminal_error)?;
-    let root_path = sftp_default_path(&sftp, host.document.files.as_ref().and_then(|files| files.default_path.clone()))?;
-    let current_path = input
-        .path
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| root_path.clone());
+    let root_path = sftp_default_path(
+        &connection.session,
+        &sftp,
+        host.document
+            .files
+            .as_ref()
+            .and_then(|files| files.default_path.clone()),
+    )?;
+    let current_path = sftp_current_path(input.path, &root_path);
     let entries = sftp
         .readdir(Path::new(&current_path))
         .map_err(terminal_error)?
@@ -407,7 +498,10 @@ fn list_sftp_files(app: AppHandle, host: ConnectionHostEntry, input: FileListInp
     })
 }
 
-fn search_local_files(host: &ConnectionHostEntry, input: FileSearchInput) -> Result<FileSearchResult> {
+fn search_local_files(
+    host: &ConnectionHostEntry,
+    input: FileSearchInput,
+) -> Result<FileSearchResult> {
     let root_path = if input.root_path.trim().is_empty() {
         local_default_path(host)?
     } else {
@@ -455,7 +549,14 @@ fn search_sftp_files(
     )?;
     let sftp = connection.session.sftp().map_err(terminal_error)?;
     let root_path = if input.root_path.trim().is_empty() {
-        sftp_default_path(&sftp, host.document.files.as_ref().and_then(|files| files.default_path.clone()))?
+        sftp_default_path(
+            &connection.session,
+            &sftp,
+            host.document
+                .files
+                .as_ref()
+                .and_then(|files| files.default_path.clone()),
+        )?
     } else {
         input.root_path.clone()
     };
@@ -520,7 +621,8 @@ fn search_sftp_files_with_remote_rg(
     let query = input.query.to_lowercase();
     let limit = search_limit(input.max_results);
     let mut matches = Vec::new();
-    let truncated = collect_remote_rg_matches(&output.stdout, root_path, &query, limit, &mut matches);
+    let truncated =
+        collect_remote_rg_matches(&output.stdout, root_path, &query, limit, &mut matches);
     Ok(Some(FileSearchResult {
         provider_label: "ripgrep on remote".to_string(),
         root_path: root_path.to_string(),
@@ -552,9 +654,10 @@ pub(crate) fn connect_sftp_for_host(
     let username = default_ssh_username(&ssh)?;
     let proxy_jump_chain = if matches!(host.source, ConnectionHostSource::OpenSshConfig) {
         match (host.path.as_deref(), ssh.proxy_jump.as_deref()) {
-            (Some(path), Some(proxy_jump)) => {
-                Some(resolve_openssh_proxy_jump_chain(Path::new(path), proxy_jump)?)
-            }
+            (Some(path), Some(proxy_jump)) => Some(resolve_openssh_proxy_jump_chain(
+                Path::new(path),
+                proxy_jump,
+            )?),
             _ => None,
         }
     } else {
@@ -673,9 +776,14 @@ fn run_remote_command(session: &Session, command: &str) -> Result<RemoteCommandO
     let mut channel = session.channel_session().map_err(terminal_error)?;
     channel.exec(command).map_err(terminal_error)?;
     let mut stdout = String::new();
-    channel.read_to_string(&mut stdout).map_err(terminal_error)?;
+    channel
+        .read_to_string(&mut stdout)
+        .map_err(terminal_error)?;
     let mut stderr = String::new();
-    channel.stderr().read_to_string(&mut stderr).map_err(terminal_error)?;
+    channel
+        .stderr()
+        .read_to_string(&mut stderr)
+        .map_err(terminal_error)?;
     channel.wait_close().map_err(terminal_error)?;
     Ok(RemoteCommandOutput {
         status: channel.exit_status().map_err(terminal_error)?,
@@ -740,7 +848,9 @@ fn remote_helper_policy(app: &AppHandle) -> Result<RemoteHelperPolicy> {
         "ask" => Ok(RemoteHelperPolicy::Ask),
         "never" => Ok(RemoteHelperPolicy::Never),
         "allow" => Ok(RemoteHelperPolicy::Allow),
-        _ => Err(invalid_error("files.remote_helper_policy must be ask, never, or allow")),
+        _ => Err(invalid_error(
+            "files.remote_helper_policy must be ask, never, or allow",
+        )),
     }
 }
 
@@ -780,7 +890,9 @@ fn delete_local_path(path: &str) -> Result<()> {
 fn parse_chmod_mode(value: &str) -> Result<u32> {
     let trimmed = value.trim();
     if trimmed.len() < 3 || trimmed.len() > 4 {
-        return Err(invalid_error("mode must be an octal value such as 644 or 0755"));
+        return Err(invalid_error(
+            "mode must be an octal value such as 644 or 0755",
+        ));
     }
     if !trimmed.bytes().all(|byte| (b'0'..=b'7').contains(&byte)) {
         return Err(invalid_error("mode must contain only octal digits"));
@@ -804,7 +916,9 @@ fn chmod_local_path(path: &str, mode: u32) -> Result<()> {
 
 #[cfg(not(unix))]
 fn chmod_local_path(_path: &str, _mode: u32) -> Result<()> {
-    Err(invalid_error("chmod is not supported by the local provider on this platform"))
+    Err(invalid_error(
+        "chmod is not supported by the local provider on this platform",
+    ))
 }
 
 fn delete_sftp_path(sftp: &Sftp, path: &Path) -> Result<()> {
@@ -826,8 +940,8 @@ fn delete_sftp_path(sftp: &Sftp, path: &Path) -> Result<()> {
     }
 }
 
-fn remote_trash_info_for_sftp(sftp: &Sftp) -> Result<FileTrashInfo> {
-    let home_path = sftp_default_path(sftp, None)?;
+fn remote_trash_info_for_sftp(session: &Session, sftp: &Sftp) -> Result<FileTrashInfo> {
+    let home_path = sftp_default_path(session, sftp, None)?;
     let trash_root = join_remote_path(&join_remote_path(&home_path, ".local"), "share/Trash");
     let files_path = join_remote_path(&trash_root, "files");
     let info_path = join_remote_path(&trash_root, "info");
@@ -947,7 +1061,9 @@ fn preview_sftp_file(sftp: &Sftp, input: FilePreviewInput) -> Result<FilePreview
             .unwrap_or_else(|| input.path.clone()),
         entry_kind,
         size: stat.size.map(|value| value.to_string()),
-        modified_unix_ms: stat.mtime.map(|value| (u128::from(value) * 1000).to_string()),
+        modified_unix_ms: stat
+            .mtime
+            .map(|value| (u128::from(value) * 1000).to_string()),
         permissions: stat.perm.map(octal_permissions),
         content,
     })
@@ -965,7 +1081,8 @@ fn validate_preview_limits(text_limit_bytes: u32, image_limit_bytes: u32) -> Res
 
 fn read_sftp_file_limited(sftp: &Sftp, path: &Path, limit: u32) -> Result<Vec<u8>> {
     let mut file = sftp.open(path).map_err(terminal_error)?;
-    let capacity = usize::try_from(limit).map_err(|_| invalid_error("preview limit is too large"))?;
+    let capacity =
+        usize::try_from(limit).map_err(|_| invalid_error("preview limit is too large"))?;
     let mut data = Vec::with_capacity(capacity.min(64 * 1024));
     let mut handle = std::io::Read::by_ref(&mut file).take(u64::from(limit) + 1);
     handle.read_to_end(&mut data).map_err(terminal_error)?;
@@ -976,7 +1093,11 @@ fn read_sftp_file_limited(sftp: &Sftp, path: &Path, limit: u32) -> Result<Vec<u8
 }
 
 fn image_mime_for_path(path: &Path) -> Option<String> {
-    match path.extension().and_then(|value| value.to_str()).map(|value| value.to_lowercase()) {
+    match path
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|value| value.to_lowercase())
+    {
         Some(extension) if extension == "png" => Some("image/png".to_string()),
         Some(extension) if extension == "jpg" || extension == "jpeg" => {
             Some("image/jpeg".to_string())
@@ -988,7 +1109,11 @@ fn image_mime_for_path(path: &Path) -> Option<String> {
 }
 
 fn looks_like_text_path(path: &Path) -> bool {
-    match path.extension().and_then(|value| value.to_str()).map(|value| value.to_lowercase()) {
+    match path
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|value| value.to_lowercase())
+    {
         Some(extension) => matches!(
             extension.as_str(),
             "txt"
@@ -1034,14 +1159,12 @@ fn looks_like_text_path(path: &Path) -> bool {
     }
 }
 
-fn move_sftp_path_to_trash(sftp: &Sftp, path: &Path) -> Result<()> {
-    let trash = remote_trash_info_for_sftp(sftp)?;
+fn move_sftp_path_to_trash(session: &Session, sftp: &Sftp, path: &Path) -> Result<()> {
+    let trash = remote_trash_info_for_sftp(session, sftp)?;
     if !trash.available {
-        return Err(invalid_error(
-            trash
-                .reason
-                .unwrap_or_else(|| "remote Trash is not available for this host".to_string()),
-        ));
+        return Err(invalid_error(trash.reason.unwrap_or_else(|| {
+            "remote Trash is not available for this host".to_string()
+        })));
     }
     let files_path = trash
         .files_path
@@ -1110,7 +1233,9 @@ fn unique_sftp_trash_name(
             return Ok(candidate);
         }
     }
-    Err(invalid_error("could not allocate a unique remote Trash file name"))
+    Err(invalid_error(
+        "could not allocate a unique remote Trash file name",
+    ))
 }
 
 fn sanitize_trash_name(name: &str) -> Result<String> {
@@ -1122,14 +1247,9 @@ fn trashinfo_escape_path(value: &str) -> String {
     let mut output = String::new();
     for byte in value.as_bytes() {
         match *byte {
-            b'A'..=b'Z'
-            | b'a'..=b'z'
-            | b'0'..=b'9'
-            | b'/'
-            | b'.'
-            | b'_'
-            | b'-'
-            | b'~' => output.push(char::from(*byte)),
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'/' | b'.' | b'_' | b'-' | b'~' => {
+                output.push(char::from(*byte))
+            }
             _ => output.push_str(&format!("%{byte:02X}")),
         }
     }
@@ -1282,8 +1402,14 @@ fn scan_sftp_search_path(
         if matches.len() >= limit {
             return Ok(true);
         }
-        let Some(name) = child_path.file_name().map(|value| value.to_string_lossy().into_owned()) else {
-            diagnostics.push(format!("{}: invalid remote file name", child_path.display()));
+        let Some(name) = child_path
+            .file_name()
+            .map(|value| value.to_string_lossy().into_owned())
+        else {
+            diagnostics.push(format!(
+                "{}: invalid remote file name",
+                child_path.display()
+            ));
             continue;
         };
         if name == "." || name == ".." || (!include_hidden && name.starts_with('.')) {
@@ -1342,7 +1468,9 @@ fn local_file_entry(entry: fs::DirEntry) -> Result<FileEntry> {
         owner: None,
         group: None,
         symlink_target: if file_type.is_symlink() {
-            fs::read_link(&path).ok().map(|target| target.to_string_lossy().into_owned())
+            fs::read_link(&path)
+                .ok()
+                .map(|target| target.to_string_lossy().into_owned())
         } else {
             None
         },
@@ -1373,7 +1501,9 @@ fn sftp_file_entry(parent: &str, path: PathBuf, stat: FileStat) -> Option<FileEn
         path: full_path,
         kind: sftp_entry_kind(permissions),
         size: stat.size.map(|value| value.to_string()),
-        modified_unix_ms: stat.mtime.map(|value| (u128::from(value) * 1000).to_string()),
+        modified_unix_ms: stat
+            .mtime
+            .map(|value| (u128::from(value) * 1000).to_string()),
         permissions: permissions.map(octal_permissions),
         owner: stat.uid.map(|value| value.to_string()),
         group: stat.gid.map(|value| value.to_string()),
@@ -1387,16 +1517,70 @@ fn local_default_path(host: &ConnectionHostEntry) -> Result<String> {
         .files
         .as_ref()
         .and_then(|files| files.default_path.clone())
-        .or_else(|| host.document.local.as_ref().and_then(|local| local.cwd.clone()));
+        .or_else(|| {
+            host.document
+                .local
+                .as_ref()
+                .and_then(|local| local.cwd.clone())
+        });
     Ok(configured
         .filter(|value| !value.trim().is_empty())
         .map(expand_local_home)
-        .unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| PathBuf::from("/")).to_string_lossy().into_owned()))
+        .unwrap_or_else(|| {
+            dirs::home_dir()
+                .unwrap_or_else(|| PathBuf::from("/"))
+                .to_string_lossy()
+                .into_owned()
+        }))
 }
 
-fn sftp_default_path(sftp: &ssh2::Sftp, configured: Option<String>) -> Result<String> {
-    if let Some(path) = configured.filter(|value| !value.trim().is_empty()) {
-        return Ok(path);
+fn sftp_default_path(
+    session: &Session,
+    sftp: &ssh2::Sftp,
+    configured: Option<String>,
+) -> Result<String> {
+    if let Some(path) = configured {
+        let trimmed = path.trim();
+        if !trimmed.is_empty() {
+            if trimmed == "~" {
+                return remote_home_path(session, sftp);
+            }
+            if let Some(rest) = trimmed.strip_prefix("~/") {
+                return Ok(join_remote_path(&remote_home_path(session, sftp)?, rest));
+            }
+            return Ok(trimmed.to_string());
+        }
+    }
+    remote_home_path(session, sftp)
+}
+
+fn sftp_current_path(requested: Option<String>, default_path: &str) -> String {
+    let Some(path) = requested else {
+        return default_path.to_string();
+    };
+    let trimmed = path.trim();
+    if trimmed.is_empty() || trimmed == "~" || looks_like_local_desktop_path(trimmed) {
+        return default_path.to_string();
+    }
+    if let Some(rest) = trimmed.strip_prefix("~/") {
+        return join_remote_path(default_path, rest);
+    }
+    trimmed.to_string()
+}
+
+fn looks_like_local_desktop_path(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    if bytes.len() >= 3 && bytes[1] == b':' && (bytes[2] == b'\\' || bytes[2] == b'/') && bytes[0].is_ascii_alphabetic() {
+        return true;
+    }
+    value.contains('\\')
+}
+
+fn remote_home_path(session: &Session, sftp: &ssh2::Sftp) -> Result<String> {
+    let output = run_remote_command(session, "printf %s \"$HOME\"")?;
+    let home = output.stdout.trim();
+    if !home.is_empty() {
+        return Ok(home.to_string());
     }
     sftp.realpath(Path::new("."))
         .map(|path| path.to_string_lossy().into_owned())

@@ -185,7 +185,7 @@
   }));
 
   const result = $derived(filesQuery.data as FileListResult | undefined);
-  const currentPath = $derived(result?.provider.current_path ?? path ?? toolTab.title);
+  const currentPath = $derived(result?.provider.current_path ?? toolTab.title);
   const entries = $derived((result?.entries ?? []).filter((entry) => showHidden || !entry.name.startsWith(".")));
   const visibleTreeChildrenByPath = $derived(filterEntriesByVisibility(treeChildrenByPath));
   const treeRows = $derived(
