@@ -373,7 +373,10 @@
 
   let activeTab = $derived(tabs.find((tab) => tab.id === activeId));
   let workspaceSnapshot = $derived(workspaceStore.snapshot);
-  let activeWorkspace = $derived(workspaceSnapshot?.workspaces.find((workspace) => workspace.id === workspaceSnapshot?.active_workspace_id) ?? null);
+  let activeWorkspace = $derived.by(() => {
+    const snapshot = workspaceStore.snapshot;
+    return snapshot?.workspaces.find((workspace) => workspace.id === snapshot.active_workspace_id) ?? null;
+  });
   let floatingWindowId = $state<string | null>(null);
   let activeFloatingWindow = $derived(
     floatingWindowId
@@ -624,6 +627,11 @@
 
   function workspaceById(workspaceId: string): WorkspaceTabState | null {
     return workspaceSnapshot?.workspaces.find((workspace) => workspace.id === workspaceId) ?? null;
+  }
+
+  function activeWorkspaceFromSnapshot(snapshot: WorkspaceLayoutSnapshot | null): WorkspaceTabState | null {
+    if (!snapshot) return null;
+    return snapshot.workspaces.find((workspace) => workspace.id === snapshot.active_workspace_id) ?? snapshot.workspaces[0] ?? null;
   }
 
   function slotToolTitle(slot: WorkspaceToolSlot) {
@@ -4022,19 +4030,31 @@
     </div>
   {/if}
 
-  <section class="workspace-body" aria-label={activeFloatingWindow ? "Floating ToolTabs" : (activeWorkspace?.title ?? "Workspace")}>
-    {#if activeFloatingWindow}
-      {@render floatingDockLayout(activeFloatingWindow)}
-    {:else if floatingWindowId}
-      <div class="dock-empty">
-        <strong>Floating window closed</strong>
-        <span>The floating ToolTab source is no longer available.</span>
-      </div>
-    {:else if activeWorkspace}
-      {@render dockLayout(activeWorkspace.layout, activeWorkspace, null, [])}
-    {:else}
-      <div class="dock-empty">Workspace</div>
-    {/if}
+  <section
+    class="workspace-body"
+    aria-label={activeFloatingWindow ? "Floating ToolTabs" : (activeWorkspace?.title ?? "Workspace")}
+    data-workspace-active-id={workspaceSnapshot?.active_workspace_id ?? ""}
+    data-workspace-rendered-id={activeWorkspace?.id ?? ""}
+    data-workspace-snapshot-count={workspaceSnapshot?.workspaces.length ?? 0}
+  >
+    {#key `${workspaceSnapshot?.version ?? "none"}:${workspaceSnapshot?.active_workspace_id ?? ""}`}
+      {#if workspaceSnapshot}
+        {#if activeFloatingWindow}
+          {@render floatingDockLayout(activeFloatingWindow)}
+        {:else if floatingWindowId}
+          <div class="dock-empty">
+            <strong>Floating window closed</strong>
+            <span>The floating ToolTab source is no longer available.</span>
+          </div>
+        {:else if activeWorkspace}
+          {@render dockLayout(activeWorkspace.layout, activeWorkspace, null, [])}
+        {:else}
+          <div class="dock-empty">Workspace</div>
+        {/if}
+      {:else}
+        <div class="dock-empty">Workspace</div>
+      {/if}
+    {/key}
     {#if toolTabDropPreview()}
       {@const preview = toolTabDropPreview()!}
       <div

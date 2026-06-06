@@ -1,46 +1,46 @@
 import { listen } from "@tauri-apps/api/event";
-import { commands, type WorkspaceDispatchInput, type WorkspaceLayoutSnapshot } from "$lib/bindings";
+import { commands, type WorkspaceChangedEvent, type WorkspaceDispatchInput, type WorkspaceLayoutSnapshot } from "$lib/bindings";
 import { unwrapCommand } from "$lib/terminal/commands";
 import { hasTauriRuntime } from "$lib/tauri/runtime";
 
 export type WorkspaceStore = ReturnType<typeof createWorkspaceStore>;
 
-type WorkspaceChangedEvent = {
-  version: number;
-  reason: string;
-  snapshot: WorkspaceLayoutSnapshot;
-};
-
 export function createWorkspaceStore() {
-  let snapshot = $state<WorkspaceLayoutSnapshot | null>(null);
-  let loading = $state(false);
-  let error = $state("");
+  const state = $state<{
+    error: string;
+    loading: boolean;
+    snapshot: WorkspaceLayoutSnapshot | null;
+  }>({
+    error: "",
+    loading: false,
+    snapshot: null,
+  });
   let unlisten: (() => void) | null = null;
 
   async function load() {
     if (!hasTauriRuntime()) {
-      snapshot = demoWorkspaceSnapshot();
-      error = "";
+      state.snapshot = demoWorkspaceSnapshot();
+      state.error = "";
       return;
     }
-    loading = true;
-    error = "";
+    state.loading = true;
+    state.error = "";
     try {
-      snapshot = await unwrapCommand(commands.getWorkspaceLayoutSnapshot());
+      state.snapshot = await unwrapCommand(commands.getWorkspaceLayoutSnapshot());
     } catch (caught) {
-      error = caught instanceof Error ? caught.message : String(caught);
+      state.error = caught instanceof Error ? caught.message : String(caught);
     } finally {
-      loading = false;
+      state.loading = false;
     }
   }
 
   async function dispatch(intent: WorkspaceDispatchInput["intent"]) {
-    const current = snapshot;
+    const current = state.snapshot;
     if (!current) throw new Error("workspace snapshot is not loaded");
     if (!hasTauriRuntime()) {
-      snapshot = applyDemoWorkspaceIntent(current, intent);
-      error = "";
-      return snapshot;
+      state.snapshot = applyDemoWorkspaceIntent(current, intent);
+      state.error = "";
+      return state.snapshot;
     }
     const next = await unwrapCommand(
       commands.workspaceDispatch({
@@ -48,16 +48,17 @@ export function createWorkspaceStore() {
         intent,
       }),
     );
-    snapshot = next;
-    error = "";
+    state.snapshot = next;
+    state.error = "";
     return next;
   }
 
   async function subscribe() {
     if (!hasTauriRuntime() || unlisten) return;
     unlisten = await listen<WorkspaceChangedEvent>("workspace://changed", (event) => {
-      snapshot = event.payload.snapshot;
-      error = "";
+      if (!event.payload?.snapshot) return;
+      state.snapshot = event.payload.snapshot;
+      state.error = "";
     });
   }
 
@@ -67,19 +68,19 @@ export function createWorkspaceStore() {
   }
 
   function replaceSnapshot(next: WorkspaceLayoutSnapshot) {
-    snapshot = next;
-    error = "";
+    state.snapshot = next;
+    state.error = "";
   }
 
   return {
     get snapshot() {
-      return snapshot;
+      return state.snapshot;
     },
     get loading() {
-      return loading;
+      return state.loading;
     },
     get error() {
-      return error;
+      return state.error;
     },
     load,
     dispatch,

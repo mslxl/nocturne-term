@@ -26,6 +26,7 @@
     "test:tauri:files-columns-directory-double-click-keeps-window": "node tests/tauri/files-columns-directory-double-click-keeps-window.test.mjs",
     "test:tauri:files-columns-file-preview-third-column": "node tests/tauri/files-columns-file-preview-third-column.test.mjs",
     "test:tauri:files-columns-nested-navigation-motion": "node tests/tauri/files-columns-nested-navigation-motion.test.mjs",
+    "test:tauri:files-context-menu-multi-selection": "node tests/tauri/files-context-menu-multi-selection.test.mjs",
     "preview": "vite preview",
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
     "check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",

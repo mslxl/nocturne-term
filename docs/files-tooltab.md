@@ -146,36 +146,36 @@ Selection supports:
 - multi-select
 - Shift range selection
 - Cmd/Ctrl toggle selection
+- mouse marquee selection in the active visible list
 - keyboard up/down movement
 - Space toggle
 - Enter open directory or preview
 - Cmd/Ctrl+A select all
 
-Selection and range anchor are business state because they affect operations and mirror behavior. Scroll position and focus remain view-local.
+Selection, active preview path, and range anchor are business state because they affect operations and mirror behavior. Scroll position, focus, hover, and the temporary marquee rectangle remain view-local.
+
+Right-clicking an already selected row preserves the current multi-selection and opens a context menu for that selection. Right-clicking an unselected row selects only that row before opening the context menu. Right-clicking empty space opens directory-level actions without changing the current selection.
 
 ## Toolbar
 
-The Files toolbar includes:
+The Files toolbar includes navigation, view, and directory-level actions:
 
-- Back
-- Forward
 - Up
 - Refresh
 - New Folder
 - Upload Files
 - Upload Folder
-- Download
-- Rename
-- Delete
-- Chmod or Permissions
+- Paste
 - Search
 - View mode toggle
-- Copy Path
+- Path
 - show hidden toggle
+
+Selection-scoped object actions do not belong in the toolbar. Rename, Permissions, Delete, Copy, Cut, and Download are exposed through the Files context menu and keyboard command paths instead.
 
 Use icon buttons with tooltips. Enable actions based on provider capabilities and selection state.
 
-The global Files setting `files.toolbar_actions` controls which toolbar actions are shown and the display order. The setting is an ordered list of action ids. Unknown or repeated ids are ignored, and Nocturne uses the built-in default order when no configured id is usable. `view_mode` and `path` are toolbar items in the same ordered flow, so users can place or hide them like other toolbar controls.
+The global Files setting `files.toolbar_actions` controls which toolbar actions are shown and the display order. The setting is an ordered list of action ids. Unknown, repeated, or context-menu-only ids are ignored, and Nocturne uses the built-in default order when no configured id is usable. `view_mode` and `path` are toolbar items in the same ordered flow, so users can place or hide them like other toolbar controls.
 
 The breadcrumb/path control is a core toolbar control. It supports clickable path segments, manual path entry, and path copying.
 
@@ -206,6 +206,8 @@ Operations:
 - copy
 - move
 - chmod where supported
+
+Rename only supports one selected item. Delete, Copy, Cut, Download, and Permissions support multi-selection. Multi-delete asks once for the whole selection. Multi-download asks for a destination directory and creates one transfer per selected item. Multi-permissions opens one dialog seeded from the first selected item and applies the chosen mode to every selected item.
 
 The first release does not support Open Locally, Open Copy, or remote editing.
 
