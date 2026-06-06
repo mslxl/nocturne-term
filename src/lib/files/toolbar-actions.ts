@@ -2,15 +2,9 @@ export type FilesToolbarActionId =
   | "up"
   | "refresh"
   | "new_folder"
-  | "rename"
-  | "permissions"
-  | "delete"
-  | "copy"
-  | "cut"
   | "paste"
   | "upload_files"
   | "upload_folder"
-  | "download"
   | "search"
   | "view_mode"
   | "path";
@@ -19,15 +13,9 @@ export const DEFAULT_FILES_TOOLBAR_ACTION_IDS: FilesToolbarActionId[] = [
   "up",
   "refresh",
   "new_folder",
-  "rename",
-  "permissions",
-  "delete",
-  "copy",
-  "cut",
   "paste",
   "upload_files",
   "upload_folder",
-  "download",
   "search",
   "view_mode",
   "path",

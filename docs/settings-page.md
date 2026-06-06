@@ -172,7 +172,7 @@ Settings should expose:
 - remote helper policy currently only controls whether Files may probe for `rg` on the remote host before falling back to `SFTP scan`; it does not upload a helper binary yet
 - text preview size threshold, default 1 MiB
 - image preview size threshold, default 10 MiB
-- toolbar action visibility and order as one action id per line: `up`, `refresh`, `new_folder`, `rename`, `permissions`, `delete`, `copy`, `cut`, `paste`, `upload_files`, `upload_folder`, `download`, `search`, `view_mode`, `path`
+- toolbar action visibility and order as one action id per line: `up`, `refresh`, `new_folder`, `paste`, `upload_files`, `upload_folder`, `search`, `view_mode`, `path`; selection-scoped file actions such as rename, permissions, delete, copy, cut, and download belong to the Files context menu and are ignored in toolbar settings
 - global transfer concurrency, default 3
 - per-host transfer concurrency, default 2
 
