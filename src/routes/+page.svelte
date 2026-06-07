@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount, tick } from "svelte";
   import { listen } from "@tauri-apps/api/event";
+  import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { ask } from "@tauri-apps/plugin-dialog";
   import { readText, writeText } from "@tauri-apps/plugin-clipboard-manager";
@@ -37,6 +38,7 @@
   import FilesToolTab from "$lib/files/FilesToolTab.svelte";
   import { DEFAULT_FILES_TOOLBAR_ACTION_IDS, normalizeFilesToolbarActionIds, type FilesToolbarActionId } from "$lib/files/toolbar-actions";
   import TransfersToolTab from "$lib/transfers/TransfersToolTab.svelte";
+  import { routeTerminalPaneEvent, shouldHandleTerminalPaneEvent } from "$lib/terminal/event-routing";
   import { isTerminalSessionInactiveMessage } from "$lib/terminal/errors";
   import {
     clearTerminalFindEffects,
@@ -830,12 +832,32 @@
     const after = workspaceStore.snapshot?.floating_windows ?? [];
     const created = after.find((window) => !before.includes(window.id));
     if (created && hasTauriRuntime()) {
-      await unwrapCommand(commands.openWorkspaceFloatingWindow(created.id));
+      void openFloatingWindow(created.id).catch((error) => {
+        settingsError = error instanceof Error ? error.message : String(error);
+      });
     }
   }
 
-  async function restoreFloatingWindow(floatingWindowId: string) {
-    await workspaceStore.dispatch({ kind: "restore_floating_window", floating_window_id: floatingWindowId });
+  function openFloatingWindow(floatingWindowId: string) {
+    const label = `workspace-floating-${floatingWindowId}`;
+    const window = new WebviewWindow(label, {
+      url: "/",
+      title: "Nocturne",
+      width: 760,
+      height: 520,
+      minWidth: 420,
+      minHeight: 320,
+      resizable: true,
+      center: true,
+      focus: true,
+      visible: true,
+    });
+    return new Promise<void>((resolve, reject) => {
+      window.once("tauri://created", () => resolve());
+      window.once("tauri://error", (event) => {
+        reject(new Error(String(event.payload)));
+      });
+    });
   }
 
   function openToolTabContextMenu(
@@ -935,6 +957,14 @@
 
   function currentWindowLabel() {
     return hasTauriRuntime() ? getCurrentWindow().label : "main";
+  }
+
+  function currentFloatingWindowId() {
+    const queryValue = new URL(window.location.href).searchParams.get("floating_window");
+    if (queryValue) return queryValue;
+    if (!hasTauriRuntime()) return null;
+    const label = getCurrentWindow().label;
+    return label.startsWith("workspace-floating-") ? label.slice("workspace-floating-".length) : null;
   }
 
   function isMacPlatform() {
@@ -1305,6 +1335,7 @@
 
   async function flushTerminalOutputBacklog(paneId: string) {
     if (!hasTauriRuntime()) return;
+    if (!hasLocalTerminalPane(paneId)) return;
     let event: TerminalOutputEvent | null;
     try {
       event = await unwrapCommand(commands.takeTerminalOutputBacklog({ session_id: paneId }));
@@ -1320,7 +1351,13 @@
   }
 
   function enqueueTerminalOutput(event: TerminalOutputEvent) {
-    terminalTabs.enqueueOutput(event);
+    if (
+      !routeTerminalPaneEvent(event.session_id, localTerminalPaneIds(), () => {
+        terminalTabs.enqueueOutput(event);
+      })
+    ) {
+      return;
+    }
     if (event.session_id !== activePane()?.id || !findVisible) return;
     window.requestAnimationFrame(() => {
       updateFindSnapshot();
@@ -1409,12 +1446,26 @@
     }
   }
 
-  function findTabByPaneId(paneId: string): TerminalTab {
-    const tab =
+  function findLocalTabByPaneId(paneId: string): TerminalTab | null {
+    return (
       terminalRuntimeTabs().find((item) => item.panes.some((pane) => pane.id === paneId)) ??
-      tabs.find((item) => item.panes.some((pane) => pane.id === paneId));
+      tabs.find((item) => item.panes.some((pane) => pane.id === paneId)) ??
+      null
+    );
+  }
+
+  function findTabByPaneId(paneId: string): TerminalTab {
+    const tab = findLocalTabByPaneId(paneId);
     if (!tab) throw new Error(`tab for pane ${paneId} not found`);
     return tab;
+  }
+
+  function localTerminalPaneIds() {
+    return terminalRuntimeTabs().flatMap((tab) => tab.panes.map((pane) => pane.id));
+  }
+
+  function hasLocalTerminalPane(paneId: string) {
+    return shouldHandleTerminalPaneEvent(paneId, localTerminalPaneIds());
   }
 
   async function splitActivePane(side: SplitSide, { recordHistory = true }: { recordHistory?: boolean } = {}) {
@@ -2493,12 +2544,15 @@
 
   async function mountTerminalWhenReady(paneId: string, viewId?: string) {
     const terminalViewId = await waitForPaneContainer(paneId, viewId);
+    if (terminalViewId === null) return;
     await terminalTabs.mountTerminal(paneId, terminalViewId);
   }
 
   async function waitForPaneContainer(paneId: string, viewId?: string) {
     for (let attempt = 0; attempt < 30; attempt += 1) {
-      const pane = terminalPaneById(findTabByPaneId(paneId), paneId);
+      const tab = findLocalTabByPaneId(paneId);
+      if (!tab) return null;
+      const pane = terminalPaneById(tab, paneId);
       if (viewId && pane?.viewContainers.has(viewId)) return viewId;
       const visibleViewId = pane ? Array.from(pane.viewContainers.keys()).find((id) => pane.viewContainers.get(id)?.isConnected) : undefined;
       if (!viewId && visibleViewId) return visibleViewId;
@@ -2636,6 +2690,7 @@
   }
 
   function handlePaneMenu(event: PaneMenuEvent) {
+    if (!hasLocalTerminalPane(event.pane_id)) return;
     if (event.action === "copy") {
       void copyPaneSelection(event.pane_id);
       return;
@@ -3553,6 +3608,7 @@
   }
 
   async function handleTerminalExit(event: TerminalExitEvent) {
+    if (!hasLocalTerminalPane(event.session_id)) return;
     const retry = hostSessionRetryByPaneId[event.session_id];
     if (retry && event.signal) {
       if (handleSshCredentialExit(event.session_id, retry, event.signal)) return;
@@ -3852,7 +3908,7 @@
 
   onMount(() => {
     let mounted = true;
-    floatingWindowId = new URL(window.location.href).searchParams.get("floating_window");
+    floatingWindowId = currentFloatingWindowId();
     void (async () => {
       if (hasTauriRuntime()) {
         const [outputDispose, exitDispose, transportStateDispose, configDispose, paneMenuDispose, terminalMenuDispose] = await Promise.all([
@@ -3862,7 +3918,9 @@
               settingsError = error instanceof Error ? error.message : String(error);
             });
           }),
-          listen<TerminalTransportStateEvent>("terminal://transport-state", (event) => terminalTabs.markTransportState(event.payload)),
+          listen<TerminalTransportStateEvent>("terminal://transport-state", (event) => {
+            routeTerminalPaneEvent(event.payload.session_id, localTerminalPaneIds(), () => terminalTabs.markTransportState(event.payload));
+          }),
           listen("config://changed", () => {
             void loadSettings().catch((error) => {
               settingsError = error instanceof Error ? error.message : String(error);
@@ -3894,11 +3952,13 @@
       await workspaceStore.subscribe();
       await loadSettings();
       await workspaceStore.load();
-      if (workspaceStore.snapshot?.active_workspace_id) {
+      if (!floatingWindowId && workspaceStore.snapshot?.active_workspace_id) {
         await restoreTerminalRuntimeForWorkspace(workspaceStore.snapshot.active_workspace_id);
       }
-      const restored = (await restoreTabHandoff()) || (await restoreHotTabs());
-      await ensureStartupSession(restored);
+      if (!floatingWindowId) {
+        const restored = (await restoreTabHandoff()) || (await restoreHotTabs());
+        await ensureStartupSession(restored);
+      }
     })().catch((error) => {
       settingsError = error instanceof Error ? error.message : String(error);
     });
@@ -3942,6 +4002,10 @@
       paneMenuUnlisten?.();
       terminalMenuUnlisten?.();
       workspaceStore.dispose();
+      if (floatingWindowId) {
+        for (const tab of terminalRuntimeTabs()) disposeTerminalTab(tab);
+        return;
+      }
       if (isHotModuleReplacement) {
         storeHotTabsSnapshot();
         for (const tab of terminalRuntimeTabs()) disposeTerminalTab(tab);
@@ -3958,12 +4022,14 @@
   });
 
   $effect(() => {
+    if (floatingWindowId) return;
     const workspaceId = workspaceSnapshot?.active_workspace_id ?? "";
     if (!workspaceId || workspaceId === activeTerminalWorkspaceId) return;
     void restoreTerminalRuntimeForWorkspace(workspaceId).then(() => ensureStartupSession(false));
   });
 
   $effect(() => {
+    if (floatingWindowId) return;
     const workspace = activeWorkspace;
     if (!workspace) return;
     const terminalSlot = activeTerminalSlotForWorkspace(workspace);
@@ -4309,7 +4375,6 @@
   <section class="floating-window-shell">
     <header>
       <span>Floating ToolTabs</span>
-      <button type="button" onclick={() => void restoreFloatingWindow(floatingWindow.id)}>Restore</button>
     </header>
     {@render dockLayout(floatingWindow.layout, null, floatingWindow.id, [])}
   </section>
@@ -4607,17 +4672,6 @@
     padding: 0 10px;
     background: color-mix(in srgb, var(--app-bg) 92%, var(--app-control));
     color: color-mix(in srgb, var(--app-fg) 72%, transparent);
-    font-size: 12px;
-  }
-
-  .floating-window-shell > header button {
-    height: 24px;
-    border: 1px solid var(--app-border);
-    border-radius: 5px;
-    padding: 0 9px;
-    background: var(--app-control);
-    color: var(--app-fg);
-    font: inherit;
     font-size: 12px;
   }
 

@@ -2,9 +2,7 @@ import {
   cloneDockLayout,
   createClosedSourceSlot,
   createDockGroup,
-  createFloatingPlaceholderSlot,
   createMirrorSlot,
-  createOwnedSlot,
   hasDisplaySlot,
   listDockSlots,
   normalizeDockRatios,
@@ -117,44 +115,21 @@ export function floatOwnedSlot(
   const slot = listDockSlots(ownerWorkspace.layout).find((item) => item.id === ownerSlotId);
   if (!slot) throw new Error(`owner display slot ${ownerSlotId} not found`);
   if (slot.kind !== "owned") throw new Error(`display slot ${ownerSlotId} is not owned`);
-  const placeholder = createFloatingPlaceholderSlot(ownerSlotId, slot.toolTabId, floatingWindowId);
-  const floatingSlot = createOwnedSlot(ids.slotId(), slot.toolTabId);
+  const toolTab = snapshot.toolTabs.find((item) => item.id === slot.toolTabId);
+  if (!toolTab) throw new Error(`owned slot ${ownerSlotId} references missing tool tab ${slot.toolTabId}`);
+  const floatingSlot = createMirrorSlot(ids.slotId(), slot.toolTabId, toolTab.ownerWorkspaceId);
   const floatingGroup = createDockGroup(ids.groupId(), [floatingSlot], floatingSlot.id);
   return {
     ...snapshot,
-    workspaces: snapshot.workspaces.map((workspace) =>
-      workspace.id === ownerWorkspaceId
-        ? { ...workspace, layout: replaceSlot(workspace.layout, ownerSlotId, placeholder) }
-        : workspace,
-    ),
     floatingWindows: [...snapshot.floatingWindows, { id: floatingWindowId, layout: floatingGroup }],
   };
 }
 
-export function restoreFloatingWindow(snapshot: WorkspaceLayoutSnapshot, floatingWindowId: FloatingWindowId): WorkspaceLayoutSnapshot {
+export function closeFloatingWindow(snapshot: WorkspaceLayoutSnapshot, floatingWindowId: FloatingWindowId): WorkspaceLayoutSnapshot {
   const floatingWindow = snapshot.floatingWindows.find((window) => window.id === floatingWindowId);
   if (!floatingWindow) throw new Error(`floating window ${floatingWindowId} not found`);
-  const ownedSlots = listDockSlots(floatingWindow.layout).filter((slot) => slot.kind === "owned");
-  const nextWorkspaces = snapshot.workspaces.map((workspace) => {
-    let layout = workspace.layout;
-    for (const slot of ownedSlots) {
-      const toolTab = snapshot.toolTabs.find((item) => item.id === slot.toolTabId);
-      if (!toolTab) throw new Error(`floating slot ${slot.id} references missing tool tab ${slot.toolTabId}`);
-      if (toolTab.ownerWorkspaceId !== workspace.id) continue;
-      const placeholder = listDockSlots(layout).find(
-        (item) =>
-          item.kind === "floating-placeholder" &&
-          item.toolTabId === slot.toolTabId &&
-          item.floatingWindowId === floatingWindowId,
-      );
-      const restoredSlot = createOwnedSlot(placeholder?.id ?? slot.id, slot.toolTabId);
-      layout = placeholder ? replaceSlot(layout, placeholder.id, restoredSlot) : addSlotToFirstGroup(layout, restoredSlot);
-    }
-    return { ...workspace, layout };
-  });
   return {
     ...snapshot,
-    workspaces: nextWorkspaces,
     floatingWindows: snapshot.floatingWindows.filter((window) => window.id !== floatingWindowId),
   };
 }
@@ -277,13 +252,6 @@ function removeOrCloseToolSlots(
     ...layout,
     children: layout.children.map((child) => removeOrCloseToolSlots(child, toolTabId, closedSource, removeOwned)),
   };
-}
-
-function addSlotToFirstGroup(layout: DockLayout, slot: ToolSlot): DockLayout {
-  if (layout.kind === "group") return createDockGroup(layout.id, [...layout.slots, slot], slot.id);
-  const [first, ...rest] = layout.children;
-  if (!first) throw new Error("dock split has no children");
-  return { ...layout, children: [addSlotToFirstGroup(first, slot), ...rest] };
 }
 
 function mapGroup(layout: DockLayout, groupId: DockGroupId, map: (group: DockGroup) => DockGroup): DockLayout {

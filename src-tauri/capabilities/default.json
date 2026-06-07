@@ -2,7 +2,7 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Capability for the main window",
-  "windows": ["main", "main-*", "settings", "hosts", "dialog-*"],
+  "windows": ["main", "main-*", "workspace-floating-*", "settings", "hosts", "dialog-*"],
   "permissions": [
     "core:default",
     "clipboard-manager:allow-read-text",
@@ -10,6 +10,8 @@
     "dialog:allow-open",
     "dialog:allow-message",
     "core:window:allow-internal-toggle-maximize",
+    "core:webview:allow-create-webview-window",
+    "core:window:allow-create",
     "core:window:allow-start-dragging",
     "log:default",
     "opener:default",

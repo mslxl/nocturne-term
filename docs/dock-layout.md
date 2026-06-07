@@ -87,21 +87,20 @@ Supported drop targets:
 - floating window: add to that floating window's dock layout
 - outside any window: create a floating window
 
-Dragging a mirror moves the mirror display slot only. Dragging an owned tool tab to a floating window or outside a window turns the source slot into a floating placeholder.
+Dragging a mirror moves the mirror display slot only. Dragging an owned tool tab to a floating window or outside a window creates a floating mirror and leaves the source slot in place.
 
 Dragging an owned tool tab to another workspace is not a move. It creates a mirror slot. Tool tabs cannot change owner workspace.
 
 ## Floating Windows
 
-A floating window owns a dock layout of display slots, not tool tab ownership. A floating window may contain multiple owned floating displays and mirrors.
+A floating window owns a dock layout of display slots, not tool tab ownership. Floating windows contain mirror ToolTabs only.
 
 When a floating window closes:
 
-- owned floating displays restore to their original workspace slots
 - mirrors are removed
 - closed-source placeholders are removed with the window
 
-Floating windows containing owned tool tabs are persisted. Floating windows containing only mirrors are not restored.
+Floating mirror slots are not persisted across app restart.
 
 ## Tool Tab Bars
 
@@ -170,7 +169,7 @@ Tool tab context menu:
 
 Menu actions must follow the same lifecycle rules as direct UI actions.
 
-The first implementation exposes close, close others, close to the right, mirror, float, restore, pointer move-to-group, pointer split, drag-to-workspace mirror, and drag-out floating actions. Floating windows can display owned Files/Transfers ToolTabs and restore them to the source placeholder.
+The first implementation exposes close, close others, close to the right, mirror, float, restore, pointer move-to-group, pointer split, drag-to-workspace mirror, and drag-out floating actions. Floating windows display mirror ToolTabs only, so drag-out floating actions leave the source ToolTab visible in its owner Workspace and closing the floating window removes only the floating mirror display.
 
 Follow-up work should complete floating-window-internal multi-ToolTab drag composition, full keyboard-only group focus/move commands, and richer native context menus for split left/right/up/down.
 
@@ -184,8 +183,8 @@ Vitest unit tests should cover:
 - moving slots between groups
 - creating mirrors
 - preventing duplicate mirrors in one target workspace
-- floating placeholder creation
-- floating window restore
+- floating mirror creation
+- floating window mirror cleanup
 - closed-source placeholder creation
 - close others and close to the right
 - invalid layout rejection
@@ -195,7 +194,7 @@ Tauri unit tests should cover real-app workflows such as:
 - drag to split targets
 - drag to another workspace creates a mirror
 - drag out creates a floating window
-- floating close restores source slots
+- floating close removes mirror slots without affecting source slots
 - mirror visual badge and border
 - keyboard split and focus commands
 - persistence and restore
