@@ -1,3 +1,23 @@
+/*
+ * Test content:
+ *
+ * Feature:
+ * Verifies pure Dock workspace operations for splitting slots, creating
+ * Workspace mirrors, creating floating-window mirror ToolTabs, closing owner
+ * ToolTabs, closing floating mirror displays, and validating split ratios.
+ *
+ * Operation:
+ * Builds in-memory Workspace snapshots, applies Dock operation helpers, and
+ * inspects the resulting layouts, slots, active selections, floating windows,
+ * and closed-source placeholders without launching a Tauri runtime.
+ *
+ * Expected:
+ * Dock operations preserve ownership boundaries, floating a ToolTab creates a
+ * mirror display while leaving the owner slot visible, duplicate mirrors focus
+ * the existing slot, owner close replaces mirrors with closed-source
+ * placeholders, closing a floating window removes only its mirror display, and
+ * invalid ratios fail fast.
+ */
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
@@ -11,7 +31,7 @@ import {
 import {
   createMirrorInWorkspace,
   floatOwnedSlot,
-  restoreFloatingWindow,
+  closeFloatingWindow,
   splitSlot,
   closeOwnerToolTab,
   type DockIdFactory,
@@ -59,22 +79,24 @@ describe("dock workspace operations", () => {
     assert.equal(target.layout.activeSlotId, mirrors[0]?.id);
   });
 
-  it("floats an owned slot into an independent floating window and restores it", () => {
+  it("floats an owned slot as a mirror without moving the owner slot", () => {
     const ids = sequenceIds();
     const floated = floatOwnedSlot(createSnapshot(), "workspace-a", "slot-files-a", "float-1", ids);
     const ownerWorkspace = floated.workspaces.find((workspace) => workspace.id === "workspace-a");
     const floatingWindow = floated.floatingWindows.find((window) => window.id === "float-1");
     if (!ownerWorkspace || !floatingWindow) assert.fail("expected owner workspace and floating window");
 
-    assert.equal(listDockSlots(ownerWorkspace.layout)[0]?.kind, "floating-placeholder");
-    assert.deepEqual(listDockSlots(floatingWindow.layout).map((slot) => slot.kind), ["owned"]);
+    assert.deepEqual(listDockSlots(ownerWorkspace.layout), [createOwnedSlot("slot-files-a", "files-a")]);
+    assert.deepEqual(listDockSlots(floatingWindow.layout), [
+      { kind: "mirror", id: "slot-new-1", toolTabId: "files-a", ownerWorkspaceId: "workspace-a" },
+    ]);
 
-    const restored = restoreFloatingWindow(floated, "float-1");
-    const restoredWorkspace = restored.workspaces.find((workspace) => workspace.id === "workspace-a");
-    if (!restoredWorkspace) assert.fail("expected restored owner workspace");
+    const closed = closeFloatingWindow(floated, "float-1");
+    const ownerAfterClose = closed.workspaces.find((workspace) => workspace.id === "workspace-a");
+    if (!ownerAfterClose) assert.fail("expected owner workspace after floating window close");
 
-    assert.equal(restored.floatingWindows.length, 0);
-    assert.deepEqual(listDockSlots(restoredWorkspace.layout), [createOwnedSlot("slot-files-a", "files-a")]);
+    assert.equal(closed.floatingWindows.length, 0);
+    assert.deepEqual(listDockSlots(ownerAfterClose.layout), [createOwnedSlot("slot-files-a", "files-a")]);
   });
 
   it("turns mirrors into closed-source placeholders when the owner tool tab closes", () => {

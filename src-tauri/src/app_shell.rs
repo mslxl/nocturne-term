@@ -21,6 +21,7 @@ use crate::{
         PaneContextMenuInput, PaneMenuAction, PaneMenuEvent, TabBarContextMenuInput,
         TabBarOrientation, TerminalMenuCommand, TerminalMenuEvent, TerminalMenuStateInput,
     },
+    workspace,
 };
 use std::{
     env,
@@ -975,6 +976,16 @@ pub(crate) fn handle_window_event<R: Runtime>(window: &Window<R>, event: &Window
     } else if matches!(event, WindowEvent::Destroyed) && is_main_window_label(window.label()) {
         terminal::close_terminal_sessions_for_window(window.label());
         clear_last_focused_main_window(&window.app_handle(), window.label());
+    } else if matches!(event, WindowEvent::Destroyed) {
+        if let Some(floating_window_id) = floating_window_id_from_label(window.label()) {
+            if let Err(error) =
+                workspace::close_floating_window_by_id(&window.app_handle(), floating_window_id)
+            {
+                log::warn!(
+                    "failed to close floating window mirror {floating_window_id} after window close: {error}"
+                );
+            }
+        }
     }
 }
 
@@ -1308,15 +1319,7 @@ pub(crate) fn open_workspace_floating_window(
     if let Some(window) = app.get_webview_window(&label) {
         return focus_window(&window);
     }
-    let route = format!(
-        "/?floating_window={}",
-        urlencoding::encode(&floating_window_id)
-    );
-    let builder = WebviewWindowBuilder::new(
-        &app,
-        label,
-        WebviewUrl::App(route.trim_start_matches('/').into()),
-    )
+    let builder = WebviewWindowBuilder::new(&app, label, WebviewUrl::App("".into()))
     .title("Nocturne")
     .inner_size(760.0, 520.0)
     .min_inner_size(420.0, 320.0)
@@ -1327,6 +1330,11 @@ pub(crate) fn open_workspace_floating_window(
         apply_main_window_builder_chrome(macos_integrated_titlebar_active(&app)?, builder);
     let window = builder.build().map_err(to_config_error)?;
     focus_window(&window)
+}
+
+fn floating_window_id_from_label(label: &str) -> Option<&str> {
+    label.strip_prefix("workspace-floating-")
+        .filter(|id| !id.trim().is_empty())
 }
 
 #[tauri::command]

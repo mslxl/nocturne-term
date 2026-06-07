@@ -2,10 +2,12 @@ import { debug, error, info, trace, warn } from "@tauri-apps/plugin-log";
 import { hasTauriRuntime } from "$lib/tauri/runtime";
 
 const MAX_LOG_MESSAGE_LENGTH = 20_000;
+const TAURI_IPC_FALLBACK_WARNING =
+  "IPC custom protocol failed, Tauri will now use the postMessage interface instead";
 
 let initialized = false;
 
-type ConsoleMethod = "debug" | "error" | "info" | "log" | "trace" | "warn";
+export type ConsoleMethod = "debug" | "error" | "info" | "log" | "trace" | "warn";
 
 const loggers = {
   debug,
@@ -27,11 +29,19 @@ export function forwardConsoleToBackendLogs(): void {
     console[method] = (...values: unknown[]) => {
       original(...values);
 
+      if (!shouldForwardConsoleLog(method, values)) {
+        return;
+      }
+
       void loggers[method](formatConsoleValuesForLog(values)).catch((logError: unknown) => {
         original("failed to forward console log to backend", logError);
       });
     };
   }
+}
+
+export function shouldForwardConsoleLog(method: ConsoleMethod, values: unknown[]): boolean {
+  return !isRecoverableTauriIpcFallbackWarning(method, values);
 }
 
 export function formatConsoleValuesForLog(values: unknown[]): string {
@@ -41,6 +51,10 @@ export function formatConsoleValuesForLog(values: unknown[]): string {
   }
 
   return `${message.slice(0, MAX_LOG_MESSAGE_LENGTH)}...[truncated]`;
+}
+
+function isRecoverableTauriIpcFallbackWarning(method: ConsoleMethod, values: unknown[]): boolean {
+  return method === "warn" && values[0] === TAURI_IPC_FALLBACK_WARNING;
 }
 
 function formatConsoleValue(value: unknown, ancestors: Set<object>): string {

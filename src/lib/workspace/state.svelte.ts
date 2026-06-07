@@ -357,20 +357,23 @@ function applyDemoWorkspaceIntent(
     const workspace = requireDemoWorkspace(next, intent.workspace_id);
     const slot = findDemoSlot(workspace.layout, intent.slot_id);
     if (!slot || slot.kind !== "owned") throw new Error(`owned slot ${intent.slot_id} not found`);
+    const tool = next.tool_tabs.find((item) => item.id === slot.tool_tab_id);
+    if (!tool) throw new Error(`tool tab ${slot.tool_tab_id} not found`);
     const floatingWindowId = `floating-demo-${next.version + 1}`;
-    workspace.layout = replaceDemoSlot(workspace.layout, intent.slot_id, {
-      kind: "floating_placeholder",
-      id: intent.slot_id,
-      tool_tab_id: slot.tool_tab_id,
-      floating_window_id: floatingWindowId,
-    });
     next.floating_windows.push({
       id: floatingWindowId,
       layout: {
         kind: "group",
         id: `group-${floatingWindowId}`,
         active_slot_id: `slot-${floatingWindowId}`,
-        slots: [{ kind: "owned", id: `slot-${floatingWindowId}`, tool_tab_id: slot.tool_tab_id }],
+        slots: [
+          {
+            kind: "mirror",
+            id: `slot-${floatingWindowId}`,
+            tool_tab_id: slot.tool_tab_id,
+            owner_workspace_id: tool.owner_workspace_id,
+          },
+        ],
       },
     });
     return bumpDemoVersion(next);
@@ -401,28 +404,9 @@ function applyDemoWorkspaceIntent(
         });
     return bumpDemoVersion(next);
   }
-  if (intent.kind === "restore_floating_window") {
+  if (intent.kind === "close_floating_window") {
     const floating = next.floating_windows.find((window) => window.id === intent.floating_window_id);
     if (!floating) throw new Error(`floating window ${intent.floating_window_id} not found`);
-    for (const slot of listDemoSlots(floating.layout)) {
-      if (slot.kind !== "owned") continue;
-      const tool = next.tool_tabs.find((item) => item.id === slot.tool_tab_id);
-      if (!tool) throw new Error(`tool tab ${slot.tool_tab_id} not found`);
-      const workspace = requireDemoWorkspace(next, tool.owner_workspace_id);
-      const placeholder = listDemoSlots(workspace.layout).find(
-        (item) =>
-          item.kind === "floating_placeholder" &&
-          item.tool_tab_id === slot.tool_tab_id &&
-          item.floating_window_id === intent.floating_window_id,
-      );
-      if (placeholder) {
-        workspace.layout = replaceDemoSlot(workspace.layout, placeholder.id, {
-          kind: "owned",
-          id: placeholder.id,
-          tool_tab_id: slot.tool_tab_id,
-        });
-      }
-    }
     next.floating_windows = next.floating_windows.filter((window) => window.id !== intent.floating_window_id);
     return bumpDemoVersion(next);
   }

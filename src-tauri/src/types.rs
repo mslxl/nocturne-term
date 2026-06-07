@@ -382,7 +382,7 @@ pub enum WorkspaceIntent {
         target_group_id: String,
     },
     FloatToolSlot { workspace_id: String, slot_id: String },
-    RestoreFloatingWindow { floating_window_id: String },
+    CloseFloatingWindow { floating_window_id: String },
     MoveToolSlotToGroup {
         workspace_id: String,
         slot_id: String,

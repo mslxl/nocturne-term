@@ -7,7 +7,7 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Runtime};
 use uuid::Uuid;
 
 use crate::{
@@ -86,7 +86,36 @@ pub(crate) fn workspace_dispatch(
     Ok(snapshot)
 }
 
-fn current_snapshot(app: &AppHandle) -> Result<WorkspaceLayoutSnapshot> {
+pub(crate) fn close_floating_window_by_id<R: Runtime>(
+    app: &AppHandle<R>,
+    floating_window_id: &str,
+) -> Result<WorkspaceLayoutSnapshot> {
+    let mut snapshot = current_snapshot(app)?;
+    close_floating_window(&mut snapshot, floating_window_id)?;
+    snapshot.version = snapshot
+        .version
+        .checked_add(1)
+        .ok_or_else(|| invalid_error("workspace snapshot version overflow"))?;
+    validate_snapshot(&snapshot)?;
+    save_snapshot(app, &snapshot)?;
+    {
+        let store = workspace_store();
+        let mut guard = store.lock().map_err(|_| invalid_error("workspace store lock poisoned"))?;
+        guard.snapshot = Some(snapshot.clone());
+    }
+    app.emit(
+        WORKSPACE_CHANGED_EVENT,
+        WorkspaceChangedEvent {
+            version: snapshot.version,
+            reason: "close_floating_window".to_string(),
+            snapshot: snapshot.clone(),
+        },
+    )
+    .map_err(io_error)?;
+    Ok(snapshot)
+}
+
+fn current_snapshot<R: Runtime>(app: &AppHandle<R>) -> Result<WorkspaceLayoutSnapshot> {
     {
         let store = workspace_store();
         let guard = store.lock().map_err(|_| invalid_error("workspace store lock poisoned"))?;
@@ -103,13 +132,13 @@ fn current_snapshot(app: &AppHandle) -> Result<WorkspaceLayoutSnapshot> {
     Ok(snapshot)
 }
 
-fn load_snapshot(app: &AppHandle) -> Result<WorkspaceLayoutSnapshot> {
+fn load_snapshot<R: Runtime>(app: &AppHandle<R>) -> Result<WorkspaceLayoutSnapshot> {
     let snapshot = default_snapshot(app)?;
     save_snapshot(app, &snapshot)?;
     Ok(snapshot)
 }
 
-fn save_snapshot(app: &AppHandle, snapshot: &WorkspaceLayoutSnapshot) -> Result<()> {
+fn save_snapshot<R: Runtime>(app: &AppHandle<R>, snapshot: &WorkspaceLayoutSnapshot) -> Result<()> {
     let path = workspace_state_path(app)?;
     ensure_parent(&path)?;
     write_atomic(
@@ -121,11 +150,11 @@ fn save_snapshot(app: &AppHandle, snapshot: &WorkspaceLayoutSnapshot) -> Result<
     )
 }
 
-fn workspace_state_path(app: &AppHandle) -> Result<PathBuf> {
+fn workspace_state_path<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf> {
     Ok(PathBuf::from(root_paths(app)?.root_dir).join(WORKSPACE_STATE_FILE))
 }
 
-fn default_snapshot(app: &AppHandle) -> Result<WorkspaceLayoutSnapshot> {
+fn default_snapshot<R: Runtime>(app: &AppHandle<R>) -> Result<WorkspaceLayoutSnapshot> {
     let host_id = default_connection_host_id(app)?;
     let host = connection_host_by_id(app, &host_id)?;
     let workspace_id = new_id("workspace");
@@ -222,8 +251,8 @@ fn default_snapshot(app: &AppHandle) -> Result<WorkspaceLayoutSnapshot> {
     })
 }
 
-fn apply_intent(
-    app: &AppHandle,
+fn apply_intent<R: Runtime>(
+    app: &AppHandle<R>,
     snapshot: &mut WorkspaceLayoutSnapshot,
     intent: WorkspaceIntent,
 ) -> Result<()> {
@@ -282,8 +311,8 @@ fn apply_intent(
             workspace_id,
             slot_id,
         } => float_tool_slot(snapshot, &workspace_id, &slot_id),
-        WorkspaceIntent::RestoreFloatingWindow { floating_window_id } => {
-            restore_floating_window(snapshot, &floating_window_id)
+        WorkspaceIntent::CloseFloatingWindow { floating_window_id } => {
+            close_floating_window(snapshot, &floating_window_id)
         }
         WorkspaceIntent::MoveToolSlotToGroup {
             workspace_id,
@@ -314,8 +343,8 @@ fn apply_intent(
     }
 }
 
-fn create_workspace(
-    app: &AppHandle,
+fn create_workspace<R: Runtime>(
+    app: &AppHandle<R>,
     snapshot: &mut WorkspaceLayoutSnapshot,
     host_id: String,
 ) -> Result<()> {
@@ -453,14 +482,14 @@ fn close_workspace(snapshot: &mut WorkspaceLayoutSnapshot, workspace_id: &str) -
             &closing_workspace_title,
         )?;
     }
-    let live_tool_tab_ids = snapshot
-        .tool_tabs
-        .iter()
-        .map(|tool_tab| tool_tab.id.clone())
-        .collect::<Vec<_>>();
-    snapshot
-        .floating_windows
-        .retain(|window| contains_owned_slot_for_live_tool_tab(window, &live_tool_tab_ids));
+    for window in &mut snapshot.floating_windows {
+        window.layout = close_mirrors_for_tool_tabs(
+            window.layout.clone(),
+            &owned_tool_tab_ids,
+            &closing_tool_titles,
+            &closing_workspace_title,
+        )?;
+    }
     if snapshot.active_workspace_id == workspace_id {
         let next = snapshot
             .workspaces
@@ -535,14 +564,14 @@ fn close_workspace_without_last_guard(
             &closing_workspace_title,
         )?;
     }
-    let live_tool_tab_ids = snapshot
-        .tool_tabs
-        .iter()
-        .map(|tool_tab| tool_tab.id.clone())
-        .collect::<Vec<_>>();
-    snapshot
-        .floating_windows
-        .retain(|window| contains_owned_slot_for_live_tool_tab(window, &live_tool_tab_ids));
+    for window in &mut snapshot.floating_windows {
+        window.layout = close_mirrors_for_tool_tabs(
+            window.layout.clone(),
+            &owned_tool_tab_ids,
+            &closing_tool_titles,
+            &closing_workspace_title,
+        )?;
+    }
     if snapshot.active_workspace_id == workspace_id {
         let next = snapshot
             .workspaces
@@ -694,18 +723,19 @@ fn float_tool_slot(
     let WorkspaceToolSlot::Owned { tool_tab_id, .. } = slot else {
         return Err(invalid_error("display slot is not owned"));
     };
+    let owner_workspace_id = snapshot
+        .tool_tabs
+        .iter()
+        .find(|tool_tab| tool_tab.id == tool_tab_id)
+        .ok_or_else(|| missing_error(format!("tool tab {tool_tab_id} not found")))?
+        .owner_workspace_id
+        .clone();
     let floating_window_id = new_id("floating-window");
-    let floating_slot = WorkspaceToolSlot::Owned {
+    let floating_slot = WorkspaceToolSlot::Mirror {
         id: new_id("slot-floating"),
         tool_tab_id: tool_tab_id.clone(),
+        owner_workspace_id,
     };
-    let placeholder = WorkspaceToolSlot::FloatingPlaceholder {
-        id: slot_id.to_string(),
-        tool_tab_id,
-        floating_window_id: floating_window_id.clone(),
-    };
-    let workspace = require_workspace_mut(snapshot, workspace_id)?;
-    workspace.layout = replace_slot(workspace.layout.clone(), slot_id, placeholder)?;
     snapshot.floating_windows.push(WorkspaceFloatingWindowState {
         id: floating_window_id,
         layout: WorkspaceDockLayout::Group {
@@ -717,7 +747,7 @@ fn float_tool_slot(
     Ok(())
 }
 
-fn restore_floating_window(
+fn close_floating_window(
     snapshot: &mut WorkspaceLayoutSnapshot,
     floating_window_id: &str,
 ) -> Result<()> {
@@ -730,49 +760,7 @@ fn restore_floating_window(
             "floating window {floating_window_id} not found"
         )));
     };
-    let window = snapshot.floating_windows.remove(window_index);
-    let owned_slots = collect_slots(&window.layout)
-        .into_iter()
-        .filter_map(|slot| match slot {
-            WorkspaceToolSlot::Owned { tool_tab_id, .. } => Some(tool_tab_id.clone()),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    for tool_tab_id in owned_slots {
-        let owner_workspace_id = snapshot
-            .tool_tabs
-            .iter()
-            .find(|tool_tab| tool_tab.id == tool_tab_id)
-            .ok_or_else(|| missing_error(format!("tool tab {tool_tab_id} not found")))?
-            .owner_workspace_id
-            .clone();
-        let workspace = require_workspace_mut(snapshot, &owner_workspace_id)?;
-        let placeholder_id = collect_slots(&workspace.layout)
-            .into_iter()
-            .find_map(|slot| match slot {
-                WorkspaceToolSlot::FloatingPlaceholder {
-                    id,
-                    tool_tab_id: slot_tool_tab_id,
-                    floating_window_id: slot_floating_window_id,
-                } if slot_tool_tab_id == &tool_tab_id
-                    && slot_floating_window_id == floating_window_id =>
-                {
-                    Some(id.clone())
-                }
-                _ => None,
-            });
-        let restored_slot = WorkspaceToolSlot::Owned {
-            id: placeholder_id
-                .clone()
-                .unwrap_or_else(|| new_id("slot-restored")),
-            tool_tab_id,
-        };
-        workspace.layout = if let Some(placeholder_id) = placeholder_id {
-            replace_slot(workspace.layout.clone(), &placeholder_id, restored_slot)?
-        } else {
-            add_slot_to_first_group(workspace.layout.clone(), restored_slot)?
-        };
-    }
+    snapshot.floating_windows.remove(window_index);
     Ok(())
 }
 
@@ -1163,7 +1151,7 @@ fn close_owner_tool_tab(snapshot: &mut WorkspaceLayoutSnapshot, tool_tab_id_valu
     }
     for window in &mut snapshot.floating_windows {
         window.layout =
-            remove_or_close_tool_slots(window.layout.clone(), tool_tab_id_value, &closed_source, true)?;
+            remove_or_close_tool_slots(window.layout.clone(), tool_tab_id_value, &closed_source, false)?;
     }
     snapshot.tool_tabs.retain(|item| item.id != tool_tab_id_value);
     Ok(())
@@ -1271,79 +1259,6 @@ fn remove_slot_recursive(
             };
             Ok((next_layout, removed))
         }
-    }
-}
-
-fn replace_slot(
-    layout: WorkspaceDockLayout,
-    slot_id_value: &str,
-    replacement: WorkspaceToolSlot,
-) -> Result<WorkspaceDockLayout> {
-    if !contains_slot(&layout, slot_id_value) {
-        return Err(missing_error(format!(
-            "display slot {slot_id_value} not found"
-        )));
-    }
-    if slot_id_value != workspace_slot_id(&replacement) && contains_slot(&layout, workspace_slot_id(&replacement)) {
-        return Err(invalid_error(format!(
-            "display slot {} already exists",
-            workspace_slot_id(&replacement)
-        )));
-    }
-    replace_slot_recursive(layout, slot_id_value, replacement)
-}
-
-fn replace_slot_recursive(
-    layout: WorkspaceDockLayout,
-    slot_id_value: &str,
-    replacement: WorkspaceToolSlot,
-) -> Result<WorkspaceDockLayout> {
-    match layout {
-        WorkspaceDockLayout::Group {
-            id,
-            slots,
-            active_slot_id,
-        } => {
-            if !slots.iter().any(|slot| workspace_slot_id(slot) == slot_id_value) {
-                return Ok(WorkspaceDockLayout::Group {
-                    id,
-                    slots,
-                    active_slot_id,
-                });
-            }
-            let replacement_id = workspace_slot_id(&replacement).to_string();
-            let slots = slots
-                .into_iter()
-                .map(|slot| {
-                    if workspace_slot_id(&slot) == slot_id_value {
-                        replacement.clone()
-                    } else {
-                        slot
-                    }
-                })
-                .collect::<Vec<_>>();
-            Ok(WorkspaceDockLayout::Group {
-                id,
-                slots,
-                active_slot_id: if active_slot_id == slot_id_value {
-                    replacement_id
-                } else {
-                    active_slot_id
-                },
-            })
-        }
-        WorkspaceDockLayout::Split {
-            direction,
-            children,
-            ratios,
-        } => Ok(WorkspaceDockLayout::Split {
-            direction,
-            ratios,
-            children: children
-                .into_iter()
-                .map(|child| replace_slot_recursive(child, slot_id_value, replacement.clone()))
-                .collect::<Result<Vec<_>>>()?,
-        }),
     }
 }
 
@@ -1600,18 +1515,6 @@ fn normalize_ratio_len(ratios: &[f64], len: usize) -> Result<Vec<f64>> {
     Ok(vec![1.0 / len as f64; len])
 }
 
-fn contains_owned_slot_for_live_tool_tab(
-    window: &WorkspaceFloatingWindowState,
-    live_tool_tab_ids: &[String],
-) -> bool {
-    collect_slots(&window.layout).into_iter().any(|slot| {
-        let WorkspaceToolSlot::Owned { tool_tab_id, .. } = slot else {
-            return false;
-        };
-        live_tool_tab_ids.iter().any(|id| id == tool_tab_id)
-    })
-}
-
 fn validate_snapshot(snapshot: &WorkspaceLayoutSnapshot) -> Result<()> {
     if !snapshot
         .workspaces
@@ -1772,7 +1675,7 @@ fn intent_name(intent: &WorkspaceIntent) -> &'static str {
         WorkspaceIntent::CloseToolSlotsToRight { .. } => "close_tool_slots_to_right",
         WorkspaceIntent::MirrorToolTab { .. } => "mirror_tool_tab",
         WorkspaceIntent::FloatToolSlot { .. } => "float_tool_slot",
-        WorkspaceIntent::RestoreFloatingWindow { .. } => "restore_floating_window",
+        WorkspaceIntent::CloseFloatingWindow { .. } => "close_floating_window",
         WorkspaceIntent::MoveToolSlotToGroup { .. } => "move_tool_slot_to_group",
         WorkspaceIntent::MoveToolSlotToSplit { .. } => "move_tool_slot_to_split",
         WorkspaceIntent::MoveToolSlotToWorkspaceEdge { .. } => "move_tool_slot_to_workspace_edge",
@@ -1862,7 +1765,7 @@ mod tests {
     }
 
     #[test]
-    fn floating_owned_slot_restores_to_original_placeholder() {
+    fn floating_tool_slot_creates_mirror_without_moving_owner() {
         let mut snapshot = test_snapshot();
 
         float_tool_slot(&mut snapshot, "workspace-a", "slot-files-a").unwrap();
@@ -1870,16 +1773,35 @@ mod tests {
         let owner = require_workspace(&snapshot, "workspace-a").unwrap();
         assert!(matches!(
             find_slot(&owner.layout, "slot-files-a"),
-            Some(WorkspaceToolSlot::FloatingPlaceholder { .. })
+            Some(WorkspaceToolSlot::Owned { tool_tab_id, .. }) if tool_tab_id == "files-a"
+        ));
+        assert!(matches!(
+            collect_slots(&snapshot.floating_windows[0].layout).first(),
+            Some(WorkspaceToolSlot::Mirror { tool_tab_id, owner_workspace_id, .. })
+                if tool_tab_id == "files-a" && owner_workspace_id == "workspace-a"
         ));
 
-        restore_floating_window(&mut snapshot, &floating_window_id).unwrap();
+        close_floating_window(&mut snapshot, &floating_window_id).unwrap();
 
         assert!(snapshot.floating_windows.is_empty());
         let owner = require_workspace(&snapshot, "workspace-a").unwrap();
         assert!(matches!(
             find_slot(&owner.layout, "slot-files-a"),
             Some(WorkspaceToolSlot::Owned { tool_tab_id, .. }) if tool_tab_id == "files-a"
+        ));
+    }
+
+    #[test]
+    fn closing_floating_mirror_source_keeps_closed_source_placeholder() {
+        let mut snapshot = test_snapshot();
+
+        float_tool_slot(&mut snapshot, "workspace-a", "slot-files-a").unwrap();
+        close_owner_tool_tab(&mut snapshot, "files-a").unwrap();
+
+        assert!(matches!(
+            collect_slots(&snapshot.floating_windows[0].layout).first(),
+            Some(WorkspaceToolSlot::ClosedSource { previous_title, owner_workspace_title, .. })
+                if previous_title == "/home/a" && owner_workspace_title == "Production"
         ));
     }
 

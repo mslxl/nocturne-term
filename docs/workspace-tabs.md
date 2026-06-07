@@ -79,14 +79,12 @@ Tool tabs can be dragged into floating Tauri windows.
 Floating rules:
 
 - A floating window can contain a full dock layout with multiple tool tabs.
-- Dragging an owned tool tab to a floating window keeps the owner workspace unchanged.
-- The owner workspace shows a lightweight placeholder at the source slot: the tool is in a floating window.
-- The placeholder offers Show and Restore actions.
-- Closing the floating window restores each owned tool tab to its original workspace slot.
-- If the original group no longer exists, restore to the owner workspace's main group and show a one-time notice.
-- Mirror slots inside floating windows behave like ordinary mirrors.
-- Closing an owned floating slot restores it to the owner placeholder. Closing a mirror floating slot closes only the mirror.
-- Floating windows are persisted when they contain owned tool tabs. Floating windows containing only mirrors are not restored after app restart.
+- Floating windows contain mirror ToolTabs only.
+- Dragging an owned tool tab to a floating window keeps the owned ToolTab visible in its original Workspace.
+- Floating mirrors follow the same business-state and view-local-state rules as Workspace mirror slots.
+- Closing a floating window closes only the floating mirror display slots.
+- Closing a floating mirror never closes the owner ToolTab, backend terminal session, Files session, or transfer state.
+- Floating mirror slots are not persisted across app restart.
 
 The floating window is a display location, not a new owner. Nocturne does not support "Move to New Workspace" for tool tabs.
 
@@ -96,12 +94,12 @@ Closing semantics:
 
 - Closing an owned live tool tab closes its business object and backend sessions. Mirrors become closed-source placeholders.
 - Closing a mirror slot only removes that mirror display.
-- Closing a floating window applies each contained slot's floating close rule.
+- Closing a floating window removes its mirror display slots.
 - Closing a workspace closes all owned tool tabs after confirmation.
 - Closing a workspace also turns mirrors of its owned tool tabs in other workspaces into closed-source placeholders.
 - Workspace itself is never mirrored.
 
-Workspace close confirmation must include running terminals, active Files sessions, visible floating owned tool tabs, and related transfer tasks. If the user confirms closing a workspace with related running, queued, or paused transfers, those application-level transfer tasks are canceled before the workspace closes.
+Workspace close confirmation must include running terminals, active Files sessions, visible floating mirrors of owned tool tabs, and related transfer tasks. If the user confirms closing a workspace with related running, queued, or paused transfers, those application-level transfer tasks are canceled before the workspace closes.
 
 Top-level workspace tabs and inner tool tab bars support `Close Others` and `Close to the Right`. These commands must use the same close rules and confirmation paths as direct close actions.
 
@@ -109,6 +107,9 @@ Top-level workspace tabs and inner tool tab bars support `Close Others` and `Clo
 
 Nocturne does not restore previously persisted Workspace tabs on application startup.
 Each new app process starts from the default Workspace template for the default host.
+Floating windows are mirror-only display locations. Closing a floating window
+removes only that floating mirror display; there is no separate floating-window
+restore action because the owner ToolTab never leaves its Workspace.
 
 Nocturne may still write a lightweight full Workspace snapshot during runtime so
 commands, diagnostics, and the current process have a single authoritative state
@@ -125,12 +126,12 @@ Runtime snapshot state includes:
 - dock layout
 - split ratios
 - active dock groups and active tool tabs
-- floating windows containing owned tool tabs
-- floating placeholders in owner workspaces
+- floating windows containing mirror display slots for the current process
 
 Runtime snapshot state excludes:
 
 - mirror slots
+- floating mirror slots
 - scroll position
 - hover and focus
 - file Tree expansion
@@ -147,7 +148,7 @@ the current process:
 
 With visible auto reconnect, terminal, Files, and transfer views reconnect or
 open when their display location becomes visible. Floating windows follow the
-same strategy; a hidden owner placeholder does not trigger reconnect.
+same strategy when their mirror display is visible.
 
 Terminal reconnect starts a new terminal session. It does not resurrect a
 previous process.

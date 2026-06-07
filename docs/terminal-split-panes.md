@@ -130,7 +130,6 @@ ToolTab/Dock menu actions:
 - Split Up
 - Split Down
 - Float
-- Restore Floating
 - Close
 - Close Others
 - Close to the Right
@@ -193,9 +192,9 @@ Moving a Terminal ToolTab between Dock groups:
 Floating a Terminal ToolTab:
 
 - keeps the owner Workspace unchanged
-- hides the owner slot behind a floating placeholder
-- remounts or mirrors the terminal renderer into the floating window display
-- restores to the owner slot when the floating display closes
+- creates a floating Terminal mirror display
+- leaves the owner Terminal ToolTab visible in its original Dock slot
+- closes only the floating mirror display when the floating window closes
 
 Mirror display:
 
