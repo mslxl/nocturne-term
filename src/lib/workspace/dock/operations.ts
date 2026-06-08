@@ -62,7 +62,7 @@ export function addSlotToGroup(layout: DockLayout, groupId: DockGroupId, slot: T
   if (hasDisplaySlot(layout, slot.id)) {
     throw new Error(`display slot ${slot.id} already exists`);
   }
-  return mapGroup(layout, groupId, (group) => createDockGroup(group.id, [...group.slots, slot], slot.id));
+  return mapGroup(layout, groupId, (group) => createDockGroup(group.id, group.role, [...group.slots, slot], slot.id));
 }
 
 export function createMirrorInWorkspace(
@@ -118,7 +118,7 @@ export function floatOwnedSlot(
   const toolTab = snapshot.toolTabs.find((item) => item.id === slot.toolTabId);
   if (!toolTab) throw new Error(`owned slot ${ownerSlotId} references missing tool tab ${slot.toolTabId}`);
   const floatingSlot = createMirrorSlot(ids.slotId(), slot.toolTabId, toolTab.ownerWorkspaceId);
-  const floatingGroup = createDockGroup(ids.groupId(), [floatingSlot], floatingSlot.id);
+  const floatingGroup = createDockGroup(ids.groupId(), "content", [floatingSlot], floatingSlot.id);
   return {
     ...snapshot,
     floatingWindows: [...snapshot.floatingWindows, { id: floatingWindowId, layout: floatingGroup }],
@@ -172,7 +172,7 @@ function splitSlotRecursive(
     const direction = side === "left" || side === "right" ? "row" : "column";
     const before = side === "left" || side === "up";
     const existing = cloneDockLayout(layout);
-    const insertedGroup = createDockGroup(ids.groupId(), [insertedSlot], insertedSlot.id);
+    const insertedGroup = createDockGroup(ids.groupId(), layout.role, [insertedSlot], insertedSlot.id);
     return {
       kind: "split",
       direction,
@@ -193,10 +193,15 @@ function removeSlotRecursive(layout: DockLayout, slotId: DisplaySlotId): { layou
     const removed = layout.slots.find((slot) => slot.id === slotId) ?? null;
     if (!removed) return { layout, removed: null };
     const remaining = layout.slots.filter((slot) => slot.id !== slotId);
-    if (remaining.length === 0) return { layout: null, removed };
+    if (remaining.length === 0) {
+      return {
+        layout: layout.role === "content" ? createDockGroup(layout.id, layout.role, [], "") : null,
+        removed,
+      };
+    }
     const activeSlotId = layout.activeSlotId === slotId ? remaining[0]?.id : layout.activeSlotId;
     if (!activeSlotId) throw new Error(`dock group ${layout.id} lost active slot after removal`);
-    return { layout: createDockGroup(layout.id, remaining, activeSlotId), removed };
+    return { layout: createDockGroup(layout.id, layout.role, remaining, activeSlotId), removed };
   }
   let removed: ToolSlot | null = null;
   const children: DockLayout[] = [];
@@ -220,7 +225,7 @@ function replaceSlotRecursive(layout: DockLayout, slotId: DisplaySlotId, replace
     if (!layout.slots.some((slot) => slot.id === slotId)) return layout;
     const slots = layout.slots.map((slot) => (slot.id === slotId ? replacement : slot));
     const activeSlotId = layout.activeSlotId === slotId ? replacement.id : layout.activeSlotId;
-    return createDockGroup(layout.id, slots, activeSlotId);
+    return createDockGroup(layout.id, layout.role, slots, activeSlotId);
   }
   return { ...layout, children: layout.children.map((child) => replaceSlotRecursive(child, slotId, replacement)) };
 }
@@ -241,12 +246,13 @@ function removeOrCloseToolSlots(
       })
       .filter((slot): slot is ToolSlot => slot !== null);
     if (slots.length === 0) {
+      if (layout.role === "content") return createDockGroup(layout.id, layout.role, [], "");
       const closedSlot = closedSource(`${layout.id}-closed`);
-      return createDockGroup(layout.id, [closedSlot], closedSlot.id);
+      return createDockGroup(layout.id, layout.role, [closedSlot], closedSlot.id);
     }
     const activeSlotId = slots.some((slot) => slot.id === layout.activeSlotId) ? layout.activeSlotId : slots[0]?.id;
     if (!activeSlotId) throw new Error(`dock group ${layout.id} has no active slot`);
-    return createDockGroup(layout.id, slots, activeSlotId);
+    return createDockGroup(layout.id, layout.role, slots, activeSlotId);
   }
   return {
     ...layout,

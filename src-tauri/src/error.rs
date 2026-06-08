@@ -9,6 +9,10 @@ pub enum ConfigError {
     Missing { message: String },
     Invalid { message: String },
     Terminal { message: String },
+    SshWorkspaceChallenge {
+        challenge: crate::types::SshWorkspaceChallenge,
+        message: String,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, ConfigError>;
@@ -21,6 +25,7 @@ impl std::fmt::Display for ConfigError {
             Self::Missing { message } => write!(f, "missing value: {message}"),
             Self::Invalid { message } => write!(f, "invalid value: {message}"),
             Self::Terminal { message } => write!(f, "terminal error: {message}"),
+            Self::SshWorkspaceChallenge { message, .. } => write!(f, "{message}"),
         }
     }
 }
@@ -54,5 +59,15 @@ pub(crate) fn invalid_error(message: impl Into<String>) -> ConfigError {
 pub(crate) fn terminal_error(message: impl std::fmt::Display) -> ConfigError {
     ConfigError::Terminal {
         message: message.to_string(),
+    }
+}
+
+pub(crate) fn ssh_workspace_challenge_error(
+    challenge: crate::types::SshWorkspaceChallenge,
+    message: impl Into<String>,
+) -> ConfigError {
+    ConfigError::SshWorkspaceChallenge {
+        challenge,
+        message: message.into(),
     }
 }

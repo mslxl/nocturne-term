@@ -40,6 +40,18 @@ The UI must branch on capabilities rather than hard-coding local/SFTP checks.
 
 Provider operations include list, stat, mkdir, rename, delete, trash when supported, chmod when supported, read preview, and search.
 
+Every Files Tauri command must receive `workspace_id` and `tool_tab_id`, not a
+frontend-supplied host id. The Rust backend validates that the ToolTab is an
+owned Files ToolTab in that Workspace and derives the Host from authoritative
+Workspace state before opening a Local or SFTP provider session. This keeps
+Files, mirrors, and future floating displays from accidentally authenticating
+against the wrong Host.
+
+For SFTP, credential and host-key verification challenges are emitted as
+Workspace-owned structured SSH verification events. While the backend waits for
+the Workspace prompt result, Files should remain in a loading or prompt state
+instead of converting the challenge into a final provider error.
+
 ## Host Defaults
 
 Hosts may define a default file path:
@@ -193,7 +205,7 @@ Default copy/cut/paste semantics are Windows-style:
 
 Settings can switch to Finder-style semantics.
 
-The first implementation keeps an application-local clipboard of provider endpoint references, not file bytes. Copy may cross local/SFTP providers and hosts by creating Transfer Service tasks. Cut/paste performs same-provider moves through rename. Cross-provider or cross-host moves must not delete the source until the transfer service can atomically mark copy completion and then remove the source; until then, the UI should ask the user to copy first and delete manually after completion.
+The first implementation keeps an application-local clipboard of provider endpoint references, not file bytes. Copy may cross local/SFTP providers and hosts by creating Transfer Service tasks. Transfer SFTP authentication uses the initiating Workspace scope, so a task can reuse only that Workspace's encrypted temporary credential and must not cross into another Workspace's temporary credential scope. Cut/paste performs same-provider moves through rename. Cross-provider or cross-host moves must not delete the source until the transfer service can atomically mark copy completion and then remove the source; until then, the UI should ask the user to copy first and delete manually after completion.
 
 Operations:
 

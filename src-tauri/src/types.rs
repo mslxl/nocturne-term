@@ -261,7 +261,7 @@ pub struct ConfigKeyPathInput {
     pub path: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkspaceToolKind {
     Files,
@@ -283,6 +283,14 @@ pub enum WorkspaceDockSide {
     Right,
     Up,
     Down,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceDockGroupRole {
+    Content,
+    Sidebar,
+    Panel,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
@@ -319,6 +327,7 @@ pub enum WorkspaceDockLayout {
     },
     Group {
         id: String,
+        role: WorkspaceDockGroupRole,
         slots: Vec<WorkspaceToolSlot>,
         active_slot_id: String,
     },
@@ -476,7 +485,8 @@ pub struct FileEntry {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
 pub struct FileListInput {
-    pub host_id: String,
+    pub workspace_id: String,
+    pub tool_tab_id: String,
     pub path: Option<String>,
     pub accept_new_host_key: bool,
     pub update_changed_host_key: bool,
@@ -492,7 +502,8 @@ pub struct FileListResult {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
 pub struct FilePathInput {
-    pub host_id: String,
+    pub workspace_id: String,
+    pub tool_tab_id: String,
     pub path: String,
     pub accept_new_host_key: bool,
     pub update_changed_host_key: bool,
@@ -502,7 +513,8 @@ pub struct FilePathInput {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
 pub struct FileTrashInfoInput {
-    pub host_id: String,
+    pub workspace_id: String,
+    pub tool_tab_id: String,
     pub accept_new_host_key: bool,
     pub update_changed_host_key: bool,
     pub credential: Option<SshCredentialInput>,
@@ -520,7 +532,8 @@ pub struct FileTrashInfo {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
 pub struct RemoteSearchHelperInput {
-    pub host_id: String,
+    pub workspace_id: String,
+    pub tool_tab_id: String,
     pub accept_new_host_key: bool,
     pub update_changed_host_key: bool,
     pub credential: Option<SshCredentialInput>,
@@ -536,7 +549,8 @@ pub struct RemoteSearchHelperInfo {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
 pub struct FileCreateDirectoryInput {
-    pub host_id: String,
+    pub workspace_id: String,
+    pub tool_tab_id: String,
     pub parent_path: String,
     pub name: String,
     pub accept_new_host_key: bool,
@@ -547,7 +561,8 @@ pub struct FileCreateDirectoryInput {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
 pub struct FileRenameInput {
-    pub host_id: String,
+    pub workspace_id: String,
+    pub tool_tab_id: String,
     pub source_path: String,
     pub destination_path: String,
     pub accept_new_host_key: bool,
@@ -558,7 +573,8 @@ pub struct FileRenameInput {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
 pub struct FileChmodInput {
-    pub host_id: String,
+    pub workspace_id: String,
+    pub tool_tab_id: String,
     pub path: String,
     pub mode: String,
     pub accept_new_host_key: bool,
@@ -569,7 +585,8 @@ pub struct FileChmodInput {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
 pub struct FilePreviewInput {
-    pub host_id: String,
+    pub workspace_id: String,
+    pub tool_tab_id: String,
     pub path: String,
     pub text_limit_bytes: u32,
     pub image_limit_bytes: u32,
@@ -601,7 +618,8 @@ pub struct FilePreviewResult {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
 pub struct FileSearchInput {
-    pub host_id: String,
+    pub workspace_id: String,
+    pub tool_tab_id: String,
     pub root_path: String,
     pub query: String,
     pub include_hidden: bool,
@@ -910,6 +928,7 @@ pub enum TerminalTransportState {
     Connecting,
     VerifyingHostKey,
     Authenticating,
+    WaitingForWorkspaceVerification,
     Connected,
     Disconnected,
     Failed,
@@ -923,7 +942,8 @@ pub struct CreateHostTerminalSessionInput {
     pub pixel_height: u16,
     pub resolved_theme: Option<TerminalColorSchemeVariant>,
     pub cwd: Option<String>,
-    pub connection_host_id: String,
+    pub workspace_id: String,
+    pub tool_tab_id: String,
     pub window_label: String,
     pub accept_new_host_key: bool,
     pub update_changed_host_key: bool,
@@ -937,11 +957,90 @@ pub struct SshCredentialInput {
     pub value: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Type)]
 #[serde(rename_all = "snake_case")]
 pub enum SshCredentialKind {
     Password,
     KeyPassphrase,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum SshAuthTargetKind {
+    ConnectionHost,
+    ProxyJump,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct SshAuthTarget {
+    pub id: String,
+    pub kind: SshAuthTargetKind,
+    pub label: String,
+    pub username: String,
+    pub hostname: String,
+    pub port: u16,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct SshCredentialChallenge {
+    pub workspace_id: String,
+    pub source_tool_tab_id: Option<String>,
+    pub auth_target: SshAuthTarget,
+    pub credential_kind: SshCredentialKind,
+    pub identity_file: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum SshHostKeyChallengeKind {
+    Unknown,
+    Changed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct SshHostKeyChallenge {
+    pub workspace_id: String,
+    pub source_tool_tab_id: Option<String>,
+    pub auth_target: SshAuthTarget,
+    pub challenge_kind: SshHostKeyChallengeKind,
+    pub target: String,
+    pub algorithm: String,
+    pub fingerprint: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SshWorkspaceChallenge {
+    Credential { challenge: SshCredentialChallenge },
+    HostKey { challenge: SshHostKeyChallenge },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct WorkspaceSshVerificationRequiredEvent {
+    pub workspace_id: String,
+    pub verification_id: String,
+    pub challenge: SshWorkspaceChallenge,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct WorkspaceSshVerificationSubmitInput {
+    pub workspace_id: String,
+    pub verification_id: String,
+    pub response: WorkspaceSshVerificationResponse,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WorkspaceSshVerificationResponse {
+    Credential {
+        credential: SshCredentialInput,
+        save_credential: bool,
+    },
+    HostKey {
+        accept_new_host_key: bool,
+        update_changed_host_key: bool,
+    },
+    Cancel,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
@@ -1003,6 +1102,7 @@ pub struct TerminalExitEvent {
     pub session_id: String,
     pub exit_code: Option<u32>,
     pub signal: Option<String>,
+    pub error: Option<crate::error::ConfigError>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]

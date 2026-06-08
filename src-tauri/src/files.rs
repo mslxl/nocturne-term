@@ -31,6 +31,8 @@ use crate::{
         FileSearchInput, FileSearchMatch, FileSearchResult, FileTrashInfo, FileTrashInfoInput,
         RemoteSearchHelperInfo, RemoteSearchHelperInput, SshConnectionConfig,
     },
+    workspace,
+    workspace_ssh::connection_host_auth_target,
 };
 
 const DEFAULT_SEARCH_LIMIT: usize = 500;
@@ -46,6 +48,25 @@ enum RemoteHelperPolicy {
 pub(crate) struct SftpConnection {
     pub(crate) session: Session,
     _jump_guards: Vec<thread::JoinHandle<()>>,
+}
+
+pub(crate) struct SftpAuthScope<'a> {
+    pub(crate) workspace_id: &'a str,
+    pub(crate) source_tool_tab_id: Option<&'a str>,
+}
+
+fn files_input_host(
+    app: &AppHandle,
+    workspace_id: &str,
+    tool_tab_id: &str,
+) -> Result<ConnectionHostEntry> {
+    let host_id = workspace::owned_workspace_tool_host(
+        app,
+        workspace_id,
+        tool_tab_id,
+        crate::types::WorkspaceToolKind::Files,
+    )?;
+    connection_host_by_id(app, &host_id)
 }
 
 async fn run_file_command<T, F>(command: &'static str, work: F) -> Result<T>
@@ -65,7 +86,7 @@ pub(crate) async fn list_files(app: AppHandle, input: FileListInput) -> Result<F
 }
 
 fn list_files_blocking(app: AppHandle, input: FileListInput) -> Result<FileListResult> {
-    let host = connection_host_by_id(&app, &input.host_id)?;
+    let host = files_input_host(&app, &input.workspace_id, &input.tool_tab_id)?;
     match host.document.protocol {
         ConnectionProtocol::Local => list_local_files(&host, input.path),
         ConnectionProtocol::Ssh => list_sftp_files(app, host, input),
@@ -87,7 +108,7 @@ pub(crate) async fn create_directory(
 
 fn create_directory_blocking(app: AppHandle, input: FileCreateDirectoryInput) -> Result<()> {
     validate_child_name(&input.name)?;
-    let host = connection_host_by_id(&app, &input.host_id)?;
+    let host = files_input_host(&app, &input.workspace_id, &input.tool_tab_id)?;
     let path = join_provider_path(
         &input.parent_path,
         &input.name,
@@ -99,6 +120,7 @@ fn create_directory_blocking(app: AppHandle, input: FileCreateDirectoryInput) ->
             let connection = connect_sftp_for_host(
                 &app,
                 &host,
+                SftpAuthScope { workspace_id: &input.workspace_id, source_tool_tab_id: Some(&input.tool_tab_id) },
                 input.accept_new_host_key,
                 input.update_changed_host_key,
                 input.credential,
@@ -126,7 +148,7 @@ fn rename_file_blocking(app: AppHandle, input: FileRenameInput) -> Result<()> {
     if input.source_path.trim().is_empty() || input.destination_path.trim().is_empty() {
         return Err(invalid_error("rename paths cannot be empty"));
     }
-    let host = connection_host_by_id(&app, &input.host_id)?;
+    let host = files_input_host(&app, &input.workspace_id, &input.tool_tab_id)?;
     match host.document.protocol {
         ConnectionProtocol::Local => fs::rename(
             expand_local_home(input.source_path),
@@ -137,6 +159,7 @@ fn rename_file_blocking(app: AppHandle, input: FileRenameInput) -> Result<()> {
             let connection = connect_sftp_for_host(
                 &app,
                 &host,
+                SftpAuthScope { workspace_id: &input.workspace_id, source_tool_tab_id: Some(&input.tool_tab_id) },
                 input.accept_new_host_key,
                 input.update_changed_host_key,
                 input.credential,
@@ -169,13 +192,14 @@ fn chmod_file_blocking(app: AppHandle, input: FileChmodInput) -> Result<()> {
         return Err(invalid_error("chmod path cannot be empty"));
     }
     let mode = parse_chmod_mode(&input.mode)?;
-    let host = connection_host_by_id(&app, &input.host_id)?;
+    let host = files_input_host(&app, &input.workspace_id, &input.tool_tab_id)?;
     match host.document.protocol {
         ConnectionProtocol::Local => chmod_local_path(&expand_local_home(input.path), mode),
         ConnectionProtocol::Ssh => {
             let connection = connect_sftp_for_host(
                 &app,
                 &host,
+                SftpAuthScope { workspace_id: &input.workspace_id, source_tool_tab_id: Some(&input.tool_tab_id) },
                 input.accept_new_host_key,
                 input.update_changed_host_key,
                 input.credential,
@@ -212,13 +236,14 @@ fn delete_file_blocking(app: AppHandle, input: FilePathInput) -> Result<()> {
     if input.path.trim().is_empty() {
         return Err(invalid_error("delete path cannot be empty"));
     }
-    let host = connection_host_by_id(&app, &input.host_id)?;
+    let host = files_input_host(&app, &input.workspace_id, &input.tool_tab_id)?;
     match host.document.protocol {
         ConnectionProtocol::Local => delete_local_path(&expand_local_home(input.path)),
         ConnectionProtocol::Ssh => {
             let connection = connect_sftp_for_host(
                 &app,
                 &host,
+                SftpAuthScope { workspace_id: &input.workspace_id, source_tool_tab_id: Some(&input.tool_tab_id) },
                 input.accept_new_host_key,
                 input.update_changed_host_key,
                 input.credential,
@@ -245,13 +270,14 @@ pub(crate) async fn remote_trash_info(
 }
 
 fn remote_trash_info_blocking(app: AppHandle, input: FileTrashInfoInput) -> Result<FileTrashInfo> {
-    let host = connection_host_by_id(&app, &input.host_id)?;
+    let host = files_input_host(&app, &input.workspace_id, &input.tool_tab_id)?;
     match host.document.protocol {
         ConnectionProtocol::Local => Err(invalid_error("local hosts do not use remote trash")),
         ConnectionProtocol::Ssh => {
             let connection = connect_sftp_for_host(
                 &app,
                 &host,
+                SftpAuthScope { workspace_id: &input.workspace_id, source_tool_tab_id: Some(&input.tool_tab_id) },
                 input.accept_new_host_key,
                 input.update_changed_host_key,
                 input.credential,
@@ -281,7 +307,7 @@ fn remote_search_helper_info_blocking(
     app: AppHandle,
     input: RemoteSearchHelperInput,
 ) -> Result<RemoteSearchHelperInfo> {
-    let host = connection_host_by_id(&app, &input.host_id)?;
+    let host = files_input_host(&app, &input.workspace_id, &input.tool_tab_id)?;
     match host.document.protocol {
         ConnectionProtocol::Local => Err(invalid_error(
             "local hosts do not use a remote search helper",
@@ -290,6 +316,7 @@ fn remote_search_helper_info_blocking(
             let connection = connect_sftp_for_host(
                 &app,
                 &host,
+                SftpAuthScope { workspace_id: &input.workspace_id, source_tool_tab_id: Some(&input.tool_tab_id) },
                 input.accept_new_host_key,
                 input.update_changed_host_key,
                 input.credential,
@@ -326,7 +353,7 @@ fn trash_file_blocking(app: AppHandle, input: FilePathInput) -> Result<()> {
     if input.path.trim().is_empty() {
         return Err(invalid_error("trash path cannot be empty"));
     }
-    let host = connection_host_by_id(&app, &input.host_id)?;
+    let host = files_input_host(&app, &input.workspace_id, &input.tool_tab_id)?;
     match host.document.protocol {
         ConnectionProtocol::Local => Err(invalid_error(
             "local trash is not implemented by the Files provider yet",
@@ -335,6 +362,7 @@ fn trash_file_blocking(app: AppHandle, input: FilePathInput) -> Result<()> {
             let connection = connect_sftp_for_host(
                 &app,
                 &host,
+                SftpAuthScope { workspace_id: &input.workspace_id, source_tool_tab_id: Some(&input.tool_tab_id) },
                 input.accept_new_host_key,
                 input.update_changed_host_key,
                 input.credential,
@@ -362,13 +390,14 @@ fn preview_file_blocking(app: AppHandle, input: FilePreviewInput) -> Result<File
         return Err(invalid_error("preview path cannot be empty"));
     }
     validate_preview_limits(input.text_limit_bytes, input.image_limit_bytes)?;
-    let host = connection_host_by_id(&app, &input.host_id)?;
+    let host = files_input_host(&app, &input.workspace_id, &input.tool_tab_id)?;
     match host.document.protocol {
         ConnectionProtocol::Local => preview_local_file(input),
         ConnectionProtocol::Ssh => {
             let connection = connect_sftp_for_host(
                 &app,
                 &host,
+                SftpAuthScope { workspace_id: &input.workspace_id, source_tool_tab_id: Some(&input.tool_tab_id) },
                 input.accept_new_host_key,
                 input.update_changed_host_key,
                 input.credential.clone(),
@@ -396,7 +425,7 @@ fn search_files_blocking(app: AppHandle, input: FileSearchInput) -> Result<FileS
     if query.is_empty() {
         return Err(invalid_error("search query cannot be empty"));
     }
-    let host = connection_host_by_id(&app, &input.host_id)?;
+    let host = files_input_host(&app, &input.workspace_id, &input.tool_tab_id)?;
     match host.document.protocol {
         ConnectionProtocol::Local => search_local_files(&host, input),
         ConnectionProtocol::Ssh => search_sftp_files(&app, &host, input),
@@ -431,45 +460,16 @@ fn list_sftp_files(
     host: ConnectionHostEntry,
     input: FileListInput,
 ) -> Result<FileListResult> {
-    let ssh = host
-        .document
-        .ssh
-        .clone()
-        .ok_or_else(|| invalid_error("ssh connection host requires ssh config"))?;
-    let username = default_ssh_username(&ssh)?;
-    let proxy_jump_chain = if matches!(host.source, ConnectionHostSource::OpenSshConfig) {
-        match (host.path.as_deref(), ssh.proxy_jump.as_deref()) {
-            (Some(path), Some(proxy_jump)) => Some(resolve_openssh_proxy_jump_chain(
-                Path::new(path),
-                proxy_jump,
-            )?),
-            _ => None,
-        }
-    } else {
-        None
-    };
-    let trust_path = ssh_known_hosts_path(&app)?;
-    let worker_input = SshWorkerInput {
-        app: None,
-        session_id: "files-list".to_string(),
-        display_name: host.document.name.clone(),
-        host_id: host.id.clone(),
-        ssh: ssh.clone(),
-        proxy_jump_chain,
-        username: username.clone(),
-        size: PtySize {
-            rows: 24,
-            cols: 80,
-            pixel_width: 800,
-            pixel_height: 600,
-        },
-        trust_path,
-        accept_new_host_key: input.accept_new_host_key,
-        update_changed_host_key: input.update_changed_host_key,
-        credential: input.credential,
-        save_credential: input.save_credential,
-    };
-    let connection = connect_sftp_session(&worker_input)?;
+    let connection = connect_sftp_for_host(
+        &app,
+        &host,
+        SftpAuthScope { workspace_id: &input.workspace_id, source_tool_tab_id: Some(&input.tool_tab_id) },
+        input.accept_new_host_key,
+        input.update_changed_host_key,
+        input.credential,
+        input.save_credential,
+        "files-list",
+    )?;
     let sftp = connection.session.sftp().map_err(terminal_error)?;
     let root_path = sftp_default_path(
         &connection.session,
@@ -541,6 +541,7 @@ fn search_sftp_files(
     let connection = connect_sftp_for_host(
         app,
         host,
+        SftpAuthScope { workspace_id: &input.workspace_id, source_tool_tab_id: Some(&input.tool_tab_id) },
         input.accept_new_host_key,
         input.update_changed_host_key,
         input.credential.clone(),
@@ -640,6 +641,7 @@ fn search_sftp_files_with_remote_rg(
 pub(crate) fn connect_sftp_for_host(
     app: &AppHandle,
     host: &ConnectionHostEntry,
+    auth_scope: SftpAuthScope<'_>,
     accept_new_host_key: bool,
     update_changed_host_key: bool,
     credential: Option<crate::types::SshCredentialInput>,
@@ -652,6 +654,13 @@ pub(crate) fn connect_sftp_for_host(
         .clone()
         .ok_or_else(|| invalid_error("ssh connection host requires ssh config"))?;
     let username = default_ssh_username(&ssh)?;
+    let auth_target = connection_host_auth_target(
+        &host.id,
+        &host.document.name,
+        &username,
+        &ssh.hostname,
+        ssh.port,
+    );
     let proxy_jump_chain = if matches!(host.source, ConnectionHostSource::OpenSshConfig) {
         match (host.path.as_deref(), ssh.proxy_jump.as_deref()) {
             (Some(path), Some(proxy_jump)) => Some(resolve_openssh_proxy_jump_chain(
@@ -664,10 +673,12 @@ pub(crate) fn connect_sftp_for_host(
         None
     };
     let worker_input = SshWorkerInput {
-        app: None,
+        app: Some(app.clone()),
         session_id: session_id.to_string(),
+        workspace_id: auth_scope.workspace_id.to_string(),
+        source_tool_tab_id: auth_scope.source_tool_tab_id.map(ToOwned::to_owned),
         display_name: host.document.name.clone(),
-        host_id: host.id.clone(),
+        auth_target,
         ssh,
         proxy_jump_chain,
         username,

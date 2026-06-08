@@ -2,7 +2,7 @@ import { FitAddon } from "@xterm/addon-fit";
 import { SearchAddon } from "@xterm/addon-search";
 import { SerializeAddon } from "@xterm/addon-serialize";
 import { Terminal } from "@xterm/xterm";
-import { commands, type TerminalSessionInfo, type TerminalSettings, type TerminalTransportState } from "$lib/bindings";
+import { commands, type ConfigError, type TerminalSessionInfo, type TerminalSettings, type TerminalTransportState } from "$lib/bindings";
 import { unwrapCommand } from "./commands";
 import { isTerminalSessionInactiveMessage } from "./errors";
 import { orderedTerminalOutputChunks } from "./output";
@@ -24,6 +24,7 @@ export type TerminalExitEvent = {
   session_id: string;
   exit_code: number | null;
   signal: string | null;
+  error?: ConfigError | null;
 };
 export type TerminalTransportStateEvent = {
   session_id: string;
@@ -253,6 +254,7 @@ function transportStateLabel(state: TerminalTransportState): string {
   if (state === "connecting") return "Connecting";
   if (state === "verifying_host_key") return "Verifying host key";
   if (state === "authenticating") return "Authenticating";
+  if (state === "waiting_for_workspace_verification") return "Waiting for Workspace verification";
   if (state === "connected") return "Connected";
   if (state === "disconnected") return "Disconnected";
   if (state === "failed") return "Failed";

@@ -231,7 +231,6 @@
     queryFn: () =>
       unwrapCommand(
         commands.previewFile({
-          host_id: toolTab.host_id,
           path: previewPath,
           text_limit_bytes: textPreviewLimitBytes,
           image_limit_bytes: imagePreviewLimitBytes,
@@ -306,12 +305,8 @@
         queryFn: () =>
           unwrapCommand(
             commands.listFiles({
-              host_id: options.hostId,
               path: targetPath,
-              accept_new_host_key: false,
-              update_changed_host_key: false,
-              credential: null,
-              save_credential: false,
+              ...providerCommandAuth(),
             }),
           ),
         staleTime: options.force ? 0 : 8_000,
@@ -339,7 +334,6 @@
         remoteHelperChecked = true;
         const helper = await unwrapCommand(
           commands.remoteSearchHelperInfo({
-            host_id: toolTab.host_id,
             ...providerCommandAuth(),
           }),
         );
@@ -361,7 +355,6 @@
       }
       searchResult = await unwrapCommand(
         commands.searchFiles({
-          host_id: toolTab.host_id,
           root_path: currentPath,
           query,
           include_hidden: showHidden,
@@ -426,7 +419,6 @@
     try {
       const childResult = await unwrapCommand(
         commands.listFiles({
-          host_id: toolTab.host_id,
           path: entry.path,
           ...providerCommandAuth(),
         }),
@@ -921,6 +913,8 @@
 
   function providerCommandAuth() {
     return {
+      workspace_id: workspaceId,
+      tool_tab_id: toolTab.id,
       accept_new_host_key: false,
       update_changed_host_key: false,
       credential: null,
@@ -1063,7 +1057,6 @@
     if (nameDialog.action === "create_directory") {
       await unwrapCommand(
         commands.createDirectory({
-          host_id: toolTab.host_id,
           parent_path: currentPath,
           name: value,
           ...providerCommandAuth(),
@@ -1075,7 +1068,6 @@
       const destinationPath = joinPath(parentPathOf(entry.path), value);
       await unwrapCommand(
         commands.renameFile({
-          host_id: toolTab.host_id,
           source_path: entry.path,
           destination_path: destinationPath,
           ...providerCommandAuth(),
@@ -1086,7 +1078,6 @@
       for (const entry of selectedEntries) {
         await unwrapCommand(
           commands.chmodFile({
-            host_id: toolTab.host_id,
             path: entry.path,
             mode: value,
             ...providerCommandAuth(),
@@ -1105,7 +1096,6 @@
     if (deleteBehavior === "try_remote_trash" && result?.provider.kind === "sftp") {
       const trashInfo = await unwrapCommand(
         commands.remoteTrashInfo({
-          host_id: toolTab.host_id,
           ...providerCommandAuth(),
         }),
       );
@@ -1123,7 +1113,6 @@
           for (const entry of selectedEntries) {
             await unwrapCommand(
               commands.trashFile({
-                host_id: toolTab.host_id,
                 path: entry.path,
                 ...providerCommandAuth(),
               }),
@@ -1143,7 +1132,6 @@
     for (const entry of selectedEntries) {
       await unwrapCommand(
         commands.deleteFile({
-          host_id: toolTab.host_id,
           path: entry.path,
           ...providerCommandAuth(),
         }),
@@ -1181,7 +1169,6 @@
       if (snapshot.mode === "cut" && sameProviderEndpoint(item.endpoint, destinationDirectory)) {
         await unwrapCommand(
           commands.renameFile({
-            host_id: toolTab.host_id,
             source_path: item.endpoint.path,
             destination_path: destinationPath,
             ...providerCommandAuth(),

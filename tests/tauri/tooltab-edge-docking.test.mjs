@@ -19,7 +19,7 @@
  * Expected:
  * After the left-edge drag, Files is docked in a left sidebar group before the
  * content group. After the right-edge drag, Transfers is docked in a right-side
- * group after the content group. The hover preview must be visible and must
+ * sidebar group after the content group. The hover preview must be visible and must
  * mark the area that will receive the ToolTab before the pointer is released.
  * Edge docking must work even when the pointer is over a Dock group's surface
  * rather than directly over an existing tab.
@@ -110,8 +110,8 @@ try {
   await waitUntil(async () => {
     const state = await dockState();
     const content = contentGroup(state);
-    const rightPanel = state.groups.find((group) => group.role === "panel" && group.kinds.includes("transfers"));
-    return Boolean(content && rightPanel && rightPanel.rect.left > content.rect.left && !content.kinds.includes("transfers"));
+    const rightSidebar = state.groups.find((group) => group.role === "sidebar" && group.kinds.includes("transfers"));
+    return Boolean(content && rightSidebar && rightSidebar.rect.left > content.rect.left && !content.kinds.includes("transfers"));
   }, async () => `Transfers ToolTab did not dock to the right Workspace edge\n${await pageSummary()}`);
 
   console.log("tauri ToolTab edge docking unit test passed");

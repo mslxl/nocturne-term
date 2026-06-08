@@ -16,6 +16,7 @@
     type TabBarOrientation,
     type TerminalSessionInfo,
     type TerminalSettings,
+    type WorkspaceSshVerificationRequiredEvent,
     type WorkspaceDockLayout,
     type WorkspaceFloatingWindowState,
     type WorkspaceLayoutSnapshot,
@@ -167,15 +168,17 @@
   type SshCredentialKind = "password" | "key_passphrase";
   type HostSessionRetry = {
     connectionHostId: string;
+    workspaceId: string;
+    toolTabId: string;
     acceptNewHostKey?: boolean;
     updateChangedHostKey?: boolean;
   };
   type PendingSshCredential = {
-    paneId: string | null;
-    connectionHostId: string;
+    verificationId: string;
+    workspaceId: string;
+    toolTabId: string | null;
+    authTargetLabel: string;
     kind: SshCredentialKind;
-    acceptNewHostKey: boolean;
-    updateChangedHostKey: boolean;
     value: string;
     save: boolean;
   };
@@ -287,6 +290,7 @@
   let exitUnlisten: undefined | (() => void);
   let transportStateUnlisten: undefined | (() => void);
   let configUnlisten: undefined | (() => void);
+  let workspaceSshVerificationUnlisten: undefined | (() => void);
   let paneMenuUnlisten: undefined | (() => void);
   let terminalMenuUnlisten: undefined | (() => void);
   let terminalMeasureContainer: HTMLDivElement;
@@ -553,15 +557,7 @@
   }
 
   function dockGroupRole(group: Extract<WorkspaceDockLayout, { kind: "group" }>) {
-    const kinds = group.slots
-      .map((slot) => {
-        const toolTabId = workspaceSlotToolTabId(slot);
-        return toolTabId ? workspaceToolById(toolTabId)?.kind : null;
-      })
-      .filter((kind): kind is WorkspaceToolTab["kind"] => kind !== null);
-    if (kinds.includes("terminal")) return "content";
-    if (kinds.includes("transfers")) return "panel";
-    return "sidebar";
+    return group.role;
   }
 
   function firstContentGroupId(workspace: WorkspaceTabState): string | null {
@@ -992,11 +988,13 @@
       cwd = null,
       recordHistory = true,
       toolTabId = "",
+      workspaceId = "",
       trust = {},
     }: {
       cwd?: string | null;
       recordHistory?: boolean;
       toolTabId?: string;
+      workspaceId?: string;
       trust?: {
         acceptNewHostKey?: boolean;
         updateChangedHostKey?: boolean;
@@ -1005,6 +1003,8 @@
       };
     } = {},
   ) {
+    if (!workspaceId) throw new Error("Terminal session requires a workspace id");
+    if (!toolTabId) throw new Error("Terminal session requires a ToolTab id");
     let info: TerminalSessionInfo;
     try {
       if (!settings) await loadSettings();
@@ -1013,7 +1013,8 @@
       info = await unwrapCommand(
         commands.createHostTerminalSession({
           ...measured,
-          connection_host_id: connectionHostId,
+          workspace_id: workspaceId,
+          tool_tab_id: toolTabId,
           accept_new_host_key: trust.acceptNewHostKey === true,
           update_changed_host_key: trust.updateChangedHostKey === true,
           credential: trust.credential ?? null,
@@ -1021,7 +1022,7 @@
         }),
       );
     } catch (error) {
-      await handleHostSessionError(connectionHostId, error, trust);
+      await handleHostSessionError(connectionHostId, workspaceId, toolTabId, error, trust);
       return;
     }
 
@@ -1048,6 +1049,8 @@
       ...hostSessionRetryByPaneId,
       [tab.activePaneId]: {
         connectionHostId,
+        workspaceId,
+        toolTabId,
         acceptNewHostKey: trust.acceptNewHostKey,
         updateChangedHostKey: trust.updateChangedHostKey,
       },
@@ -1081,12 +1084,17 @@
     const tab = findTabByPaneId(paneId);
     const pane = terminalPaneById(tab, paneId);
     if (!pane) throw new Error(`pane ${paneId} not found`);
+    const toolTabId = pane.tabId || tab.id;
+    const tool = workspaceToolById(toolTabId);
+    if (!tool) throw new Error(`terminal ToolTab ${toolTabId} not found`);
+    const workspaceId = tool.owner_workspace_id;
     if (!settings) await loadSettings();
     await tick();
     const info = await unwrapCommand(
       commands.createHostTerminalSession({
         ...measureNewTerminal(pane.currentDirectory.trim() || null),
-        connection_host_id: connectionHostId,
+        workspace_id: workspaceId,
+        tool_tab_id: toolTabId,
         accept_new_host_key: trust.acceptNewHostKey === true,
         update_changed_host_key: trust.updateChangedHostKey === true,
         credential: trust.credential ?? null,
@@ -1108,6 +1116,8 @@
       ...hostSessionRetryByPaneId,
       [nextPaneId]: {
         connectionHostId,
+        workspaceId,
+        toolTabId,
         acceptNewHostKey: trust.acceptNewHostKey,
         updateChangedHostKey: trust.updateChangedHostKey,
       },
@@ -1135,12 +1145,6 @@
     }
   }
 
-  function activeWorkspaceHostId() {
-    const hostId = activeWorkspace?.host_id;
-    if (!hostId) throw new Error("active workspace host is not loaded");
-    return hostId;
-  }
-
   async function openWorkspaceTerminalSession({ recordHistory = true }: { recordHistory?: boolean } = {}) {
     if (!hasTauriRuntime()) return;
     const workspace = activeWorkspace;
@@ -1165,7 +1169,7 @@
     );
     if (!tool) throw new Error("created Terminal ToolTab was not found in workspace snapshot");
     activeTerminalToolTabId = tool.id;
-    await createHostSession(tool.host_id, { recordHistory, toolTabId: tool.id });
+    await createHostSession(tool.host_id, { recordHistory, toolTabId: tool.id, workspaceId: workspace.id });
   }
 
   async function openDefaultWorkspace() {
@@ -1301,7 +1305,7 @@
         () => terminalRuntimeByToolTabId.has(tool.id),
         async () => {
           activeTerminalToolTabId = tool.id;
-          await createHostSession(tool.host_id, { recordHistory: false, toolTabId: tool.id });
+          await createHostSession(tool.host_id, { recordHistory: false, toolTabId: tool.id, workspaceId: workspace.id });
         },
       );
     }
@@ -1469,55 +1473,11 @@
   }
 
   async function splitActivePane(side: SplitSide, { recordHistory = true }: { recordHistory?: boolean } = {}) {
-    const tab = activeTab;
-    if (!tab) return;
-    await splitPaneById(tab.activePaneId, side, { recordHistory });
+    await openWorkspaceTerminalSession({ recordHistory });
   }
 
   async function splitPaneById(paneId: string, side: SplitSide, { recordHistory = true }: { recordHistory?: boolean } = {}) {
-    try {
-      const tab = tabs.find((item) => item.panes.some((pane) => pane.id === paneId));
-      if (!tab) throw new Error(`tab for pane ${paneId} not found`);
-      const sourcePane = terminalPaneById(tab, paneId);
-      if (!sourcePane) throw new Error(`pane ${paneId} not found`);
-      if (!settings) await loadSettings();
-      await tick();
-      const cwd = sourcePane.currentDirectory.trim() || null;
-      const workspaceHostId = activeWorkspaceHostId();
-      const info = await createHostPaneSession(workspaceHostId, cwd);
-      const nextPane = createTerminalPane(info, tab.id);
-      nextPane.connectionHostId = workspaceHostId;
-      tab.panes = [...tab.panes, nextPane];
-      tab.tree = splitPane(tab.tree, paneId, nextPane.id, side);
-      tab.activePaneId = nextPane.id;
-      refreshTerminalTabTitle(tab);
-      await tick();
-      await mountTerminalWhenReady(nextPane.id);
-      await flushTerminalOutputBacklog(nextPane.id);
-      await mountAndFitTabPanes(tab);
-      nextPane.term?.focus();
-      if (recordHistory) {
-        pushUndoAction({ kind: "create_pane", paneId: nextPane.id, side, tabId: tab.id, targetPaneId: paneId });
-      } else {
-        syncTerminalMenuState();
-      }
-    } catch (error) {
-      settingsError = error instanceof Error ? error.message : String(error);
-    }
-  }
-
-  async function createHostPaneSession(connectionHostId: string, cwd: string | null) {
-    const measured = measureNewTerminal(cwd);
-    return unwrapCommand(
-      commands.createHostTerminalSession({
-        ...measured,
-        connection_host_id: connectionHostId,
-        accept_new_host_key: false,
-        update_changed_host_key: false,
-        credential: null,
-        save_credential: false,
-      }),
-    );
+    await openWorkspaceTerminalSession({ recordHistory });
   }
 
   async function closePane(paneId: string, { recordHistory = false }: { recordHistory?: boolean } = {}) {
@@ -3544,6 +3504,8 @@
 
   async function handleHostSessionError(
     connectionHostId: string,
+    workspaceId: string,
+    toolTabId: string,
     error: unknown,
     trust: {
       acceptNewHostKey?: boolean;
@@ -3553,37 +3515,6 @@
     } = {},
   ) {
     const message = error instanceof Error ? error.message : String(error);
-    if (isUnknownHostKeyMessage(message) && !trust.acceptNewHostKey) {
-      const allow = await ask(`${message}\n\nTrust this host key and continue?`, {
-        title: "SSH Host Key",
-        kind: "warning",
-        okLabel: "Trust Host Key",
-        cancelLabel: "Cancel",
-      });
-      if (allow) return createHostSession(connectionHostId, { trust: { acceptNewHostKey: true } });
-    }
-    if (isChangedHostKeyMessage(message) && !trust.updateChangedHostKey) {
-      const allow = await ask(`${message}\n\nOnly continue if you expected this host key to change.`, {
-        title: "SSH Host Key Changed",
-        kind: "warning",
-        okLabel: "Update Trust Record",
-        cancelLabel: "Cancel",
-      });
-      if (allow) return createHostSession(connectionHostId, { trust: { updateChangedHostKey: true } });
-    }
-    const credentialKind = sshCredentialKindFromError(message);
-    if (credentialKind) {
-      pendingSshCredential = {
-        paneId: null,
-        connectionHostId,
-        kind: credentialKind,
-        acceptNewHostKey: trust.acceptNewHostKey === true,
-        updateChangedHostKey: trust.updateChangedHostKey === true,
-        value: "",
-        save: false,
-      };
-      return;
-    }
     settingsError = message;
   }
 
@@ -3599,116 +3530,85 @@
     terminalTabs.markConnectionCancelled(paneId, message);
   }
 
-  function isChangedHostKeyMessage(message: string) {
-    return message.includes("host key changed");
-  }
-
-  function isUnknownHostKeyMessage(message: string) {
-    return message.includes("not trusted") && !isChangedHostKeyMessage(message);
-  }
-
   async function handleTerminalExit(event: TerminalExitEvent) {
     if (!hasLocalTerminalPane(event.session_id)) return;
-    const retry = hostSessionRetryByPaneId[event.session_id];
-    if (retry && event.signal) {
-      if (handleSshCredentialExit(event.session_id, retry, event.signal)) return;
-      if (await handleSshTrustExit(event.session_id, retry, event.signal)) return;
-    }
     clearHostSessionRetry(event.session_id);
     terminalTabs.markExited(event);
   }
 
-  async function handleSshTrustExit(paneId: string, retry: HostSessionRetry, message: string) {
-    if (isUnknownHostKeyMessage(message) && !retry.acceptNewHostKey) {
-      const allow = await ask(`${message}\n\nTrust this host key and reconnect?`, {
-        title: "SSH Host Key",
-        kind: "warning",
-        okLabel: "Trust Host Key",
-        cancelLabel: "Cancel",
-      });
-      clearHostSessionRetry(paneId);
-      if (allow) {
-        try {
-          await reconnectHostSessionInPane(paneId, retry.connectionHostId, { acceptNewHostKey: true });
-        } catch (error) {
-          terminalTabs.markConnectionError(paneId, error instanceof Error ? error.message : String(error));
-        }
-      } else {
-        markConnectionCancelled(paneId, "SSH host key was not trusted. Connection canceled.");
-      }
-      return true;
+  async function handleWorkspaceSshVerificationRequired(event: WorkspaceSshVerificationRequiredEvent) {
+    const { challenge, verification_id: verificationId, workspace_id: workspaceId } = event;
+    if (challenge.kind === "credential") {
+      pendingSshCredential = {
+        verificationId,
+        workspaceId,
+        toolTabId: challenge.challenge.source_tool_tab_id,
+        authTargetLabel: challenge.challenge.auth_target.label,
+        kind: challenge.challenge.credential_kind,
+        value: "",
+        save: false,
+      };
+      const paneId = terminalPaneIdForToolTab(challenge.challenge.source_tool_tab_id);
+      if (paneId) terminalTabs.markConnectionPrompt(paneId, "Waiting for SSH credential");
+      return;
     }
-    if (isChangedHostKeyMessage(message) && !retry.updateChangedHostKey) {
-      const allow = await ask(`${message}\n\nOnly continue if you expected this host key to change.`, {
-        title: "SSH Host Key Changed",
+
+    const hostKey = challenge.challenge;
+    const changed = hostKey.challenge_kind === "changed";
+    const allow = await ask(
+      changed
+        ? `SSH host key changed for ${hostKey.auth_target.label} (${hostKey.target}).\n\nOnly continue if you expected this host key to change.\n\n${hostKey.algorithm} ${hostKey.fingerprint}`
+        : `Trust SSH host key for ${hostKey.auth_target.label} (${hostKey.target})?\n\n${hostKey.algorithm} ${hostKey.fingerprint}`,
+      {
+        title: changed ? "SSH Host Key Changed" : "SSH Host Key",
         kind: "warning",
-        okLabel: "Update Trust Record",
+        okLabel: changed ? "Update Trust Record" : "Trust Host Key",
         cancelLabel: "Cancel",
-      });
-      clearHostSessionRetry(paneId);
-      if (allow) {
-        try {
-          await reconnectHostSessionInPane(paneId, retry.connectionHostId, { updateChangedHostKey: true });
-        } catch (error) {
-          terminalTabs.markConnectionError(paneId, error instanceof Error ? error.message : String(error));
-        }
-      } else {
-        markConnectionCancelled(paneId, "SSH host key changed. Connection canceled.");
-      }
-      return true;
-    }
-    return false;
+      },
+    );
+    await unwrapCommand(commands.submitWorkspaceSshVerification({
+      workspace_id: workspaceId,
+      verification_id: verificationId,
+      response: allow
+        ? {
+            kind: "host_key",
+            accept_new_host_key: !changed,
+            update_changed_host_key: changed,
+          }
+        : { kind: "cancel" },
+    }));
   }
 
-  function handleSshCredentialExit(paneId: string, retry: HostSessionRetry, message: string) {
-    const credentialKind = sshCredentialKindFromError(message);
-    if (!credentialKind) return false;
-    clearHostSessionRetry(paneId);
-    terminalTabs.markConnectionPrompt(paneId, "Waiting for SSH credential");
-    pendingSshCredential = {
-      paneId,
-      connectionHostId: retry.connectionHostId,
-      kind: credentialKind,
-      acceptNewHostKey: retry.acceptNewHostKey === true,
-      updateChangedHostKey: retry.updateChangedHostKey === true,
-      value: "",
-      save: false,
-    };
-    return true;
-  }
-
-  function sshCredentialKindFromError(message: string): SshCredentialKind | null {
-    if (message.includes("ssh credential required: key_passphrase")) return "key_passphrase";
-    if (message.includes("ssh credential required: password")) return "password";
-    return null;
+  function terminalPaneIdForToolTab(toolTabId: string | null) {
+    if (!toolTabId) return null;
+    const runtime = terminalRuntimeForToolTab(toolTabId);
+    return runtime?.tab.activePaneId ?? null;
   }
 
   async function submitSshCredential() {
     if (!pendingSshCredential) return;
     const pending = pendingSshCredential;
     pendingSshCredential = null;
-    const trust = {
-      acceptNewHostKey: pending.acceptNewHostKey,
-      updateChangedHostKey: pending.updateChangedHostKey,
-      credential: { kind: pending.kind, value: pending.value },
-      saveCredential: pending.save,
-    };
-    if (pending.paneId) {
-      try {
-        await reconnectHostSessionInPane(pending.paneId, pending.connectionHostId, trust);
-      } catch (error) {
-        terminalTabs.markConnectionError(pending.paneId, error instanceof Error ? error.message : String(error));
-      }
-    } else {
-      await createHostSession(pending.connectionHostId, { trust });
-    }
+    await unwrapCommand(commands.submitWorkspaceSshVerification({
+      workspace_id: pending.workspaceId,
+      verification_id: pending.verificationId,
+      response: {
+        kind: "credential",
+        credential: { kind: pending.kind, value: pending.value },
+        save_credential: pending.save,
+      },
+    }));
   }
 
   function cancelSshCredential() {
-    if (pendingSshCredential?.paneId) {
-      markConnectionCancelled(pendingSshCredential.paneId, "SSH credential prompt canceled.");
-    }
+    const pending = pendingSshCredential;
     pendingSshCredential = null;
+    if (!pending) return;
+    void unwrapCommand(commands.submitWorkspaceSshVerification({
+      workspace_id: pending.workspaceId,
+      verification_id: pending.verificationId,
+      response: { kind: "cancel" },
+    }));
   }
 
   $effect(() => {
@@ -3911,7 +3811,7 @@
     floatingWindowId = currentFloatingWindowId();
     void (async () => {
       if (hasTauriRuntime()) {
-        const [outputDispose, exitDispose, transportStateDispose, configDispose, paneMenuDispose, terminalMenuDispose] = await Promise.all([
+        const [outputDispose, exitDispose, transportStateDispose, configDispose, verificationDispose, paneMenuDispose, terminalMenuDispose] = await Promise.all([
           listen<TerminalOutputEvent>("terminal://output", (event) => enqueueTerminalOutput(event.payload)),
           listen<TerminalExitEvent>("terminal://exit", (event) => {
             void handleTerminalExit(event.payload).catch((error) => {
@@ -3923,6 +3823,11 @@
           }),
           listen("config://changed", () => {
             void loadSettings().catch((error) => {
+              settingsError = error instanceof Error ? error.message : String(error);
+            });
+          }),
+          listen<WorkspaceSshVerificationRequiredEvent>("workspace://ssh-verification-required", (event) => {
+            void handleWorkspaceSshVerificationRequired(event.payload).catch((error) => {
               settingsError = error instanceof Error ? error.message : String(error);
             });
           }),
@@ -3938,6 +3843,7 @@
           exitDispose();
           transportStateDispose();
           configDispose();
+          verificationDispose();
           paneMenuDispose();
           terminalMenuDispose();
           return;
@@ -3946,6 +3852,7 @@
         exitUnlisten = exitDispose;
         transportStateUnlisten = transportStateDispose;
         configUnlisten = configDispose;
+        workspaceSshVerificationUnlisten = verificationDispose;
         paneMenuUnlisten = paneMenuDispose;
         terminalMenuUnlisten = terminalMenuDispose;
       }
@@ -3999,6 +3906,7 @@
       exitUnlisten?.();
       transportStateUnlisten?.();
       configUnlisten?.();
+      workspaceSshVerificationUnlisten?.();
       paneMenuUnlisten?.();
       terminalMenuUnlisten?.();
       workspaceStore.dispose();
@@ -4232,12 +4140,13 @@
         <h2>{pendingSshCredential.kind === "password" ? "SSH Password" : "SSH Key Passphrase"}</h2>
         <button type="button" aria-label="Cancel" title="Cancel" onclick={cancelSshCredential}>×</button>
       </header>
+      <p>{pendingSshCredential.authTargetLabel}</p>
       <input
         type="password"
         autocomplete="off"
         bind:this={sshCredentialInput}
         bind:value={pendingSshCredential.value}
-        aria-label={pendingSshCredential.kind === "password" ? "SSH password" : "SSH key passphrase"}
+        aria-label={pendingSshCredential.kind === "password" ? `SSH password for ${pendingSshCredential.authTargetLabel}` : `SSH key passphrase for ${pendingSshCredential.authTargetLabel}`}
       />
       <label>
         <input type="checkbox" bind:checked={pendingSshCredential.save} />

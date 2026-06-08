@@ -15,8 +15,9 @@
  * Dock operations preserve ownership boundaries, floating a ToolTab creates a
  * mirror display while leaving the owner slot visible, duplicate mirrors focus
  * the existing slot, owner close replaces mirrors with closed-source
- * placeholders, closing a floating window removes only its mirror display, and
- * invalid ratios fail fast.
+ * placeholders, closing a floating window removes only its mirror display,
+ * explicit Dock group roles remain spatial instead of ToolTab-derived, and
+ * invalid layout contracts fail fast.
  */
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
@@ -33,6 +34,7 @@ import {
   floatOwnedSlot,
   closeFloatingWindow,
   splitSlot,
+  removeSlot,
   closeOwnerToolTab,
   type DockIdFactory,
 } from "./operations";
@@ -44,15 +46,15 @@ describe("dock workspace operations", () => {
     validateWorkspaceSnapshot(snapshot);
 
     assert.deepEqual(snapshot.workspaces.map((workspace) => workspace.layout), [
-      createDockGroup("group-a", [createOwnedSlot("slot-files-a", "files-a")], "slot-files-a"),
-      createDockGroup("group-b", [createOwnedSlot("slot-files-b", "files-b")], "slot-files-b"),
+      createDockGroup("group-a", "content", [createOwnedSlot("slot-files-a", "files-a")], "slot-files-a"),
+      createDockGroup("group-b", "content", [createOwnedSlot("slot-files-b", "files-b")], "slot-files-b"),
     ]);
   });
 
   it("splits a slot into a new dock group", () => {
     const ids = sequenceIds();
     const layout = splitSlot(
-      createDockGroup("group-a", [createOwnedSlot("slot-files-a", "files-a")], "slot-files-a"),
+      createDockGroup("group-a", "content", [createOwnedSlot("slot-files-a", "files-a")], "slot-files-a"),
       "slot-files-a",
       createOwnedSlot("slot-terminal-a", "terminal-a"),
       "right",
@@ -64,6 +66,20 @@ describe("dock workspace operations", () => {
     assert.equal(layout.direction, "row");
     assert.deepEqual(layout.ratios, [0.5, 0.5]);
     assert.deepEqual(listDockSlots(layout).map((slot) => slot.id), ["slot-files-a", "slot-terminal-a"]);
+    assert.deepEqual(
+      layout.children.map((child) => (child.kind === "group" ? child.role : "")),
+      ["content", "content"],
+    );
+  });
+
+  it("preserves an empty content group when its final slot is removed", () => {
+    const result = removeSlot(
+      createDockGroup("group-content", "content", [createOwnedSlot("slot-terminal", "terminal-a")], "slot-terminal"),
+      "slot-terminal",
+    );
+
+    assert.equal(result.removed.id, "slot-terminal");
+    assert.deepEqual(result.layout, createDockGroup("group-content", "content", [], ""));
   });
 
   it("creates one mirror per target workspace and focuses duplicates", () => {
@@ -117,6 +133,28 @@ describe("dock workspace operations", () => {
   it("rejects invalid ratios", () => {
     assert.throws(() => normalizeDockRatios([1, Number.NaN]), /positive finite/);
   });
+
+  it("rejects a workspace without a content dock group", () => {
+    const snapshot = createSnapshot();
+    snapshot.workspaces[1] = {
+      ...snapshot.workspaces[1],
+      layout: createDockGroup("group-b", "sidebar", [createOwnedSlot("slot-files-b", "files-b")], "slot-files-b"),
+    };
+
+    assert.throws(() => validateWorkspaceSnapshot(snapshot), /workspace workspace-b must contain at least one content dock group/);
+  });
+
+  it("rejects floating window groups that are not content", () => {
+    const snapshot = createSnapshot();
+    snapshot.floatingWindows.push({
+      id: "float-sidebar",
+      layout: createDockGroup("group-float-sidebar", "sidebar", [
+        { kind: "mirror", id: "slot-float-sidebar", toolTabId: "files-a", ownerWorkspaceId: "workspace-a" },
+      ], "slot-float-sidebar"),
+    });
+
+    assert.throws(() => validateWorkspaceSnapshot(snapshot), /floating window float-sidebar group group-float-sidebar must use content role/);
+  });
 });
 
 function createSnapshot(): WorkspaceLayoutSnapshot {
@@ -129,14 +167,14 @@ function createSnapshot(): WorkspaceLayoutSnapshot {
         hostId: "host-a",
         title: "Production",
         ownedToolTabIds: ["files-a", "terminal-a"],
-        layout: createDockGroup("group-a", [createOwnedSlot("slot-files-a", "files-a")], "slot-files-a"),
+        layout: createDockGroup("group-a", "content", [createOwnedSlot("slot-files-a", "files-a")], "slot-files-a"),
       },
       {
         id: "workspace-b",
         hostId: "host-b",
         title: "Staging",
         ownedToolTabIds: ["files-b"],
-        layout: createDockGroup("group-b", [createOwnedSlot("slot-files-b", "files-b")], "slot-files-b"),
+        layout: createDockGroup("group-b", "content", [createOwnedSlot("slot-files-b", "files-b")], "slot-files-b"),
       },
     ],
     toolTabs: [

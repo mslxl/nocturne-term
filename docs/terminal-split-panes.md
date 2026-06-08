@@ -177,11 +177,16 @@ Pointer rules:
 
 Creating a Terminal ToolTab:
 
-1. create one backend terminal session
-2. create one frontend terminal tool object for that session
+1. create one Workspace-owned Terminal ToolTab
+2. asynchronously create one backend terminal session for that ToolTab
 3. insert one ToolSlot into the Dock layout
 4. mount xterm after the Dock group is visible
 5. fit and resize after the DOM has settled
+
+The create-terminal backend command takes `workspace_id` and `tool_tab_id`.
+Rust validates that the ToolTab is an owned Terminal ToolTab in that Workspace
+and derives the Host from authoritative Workspace state. Frontend code must not
+pass a connection host id to create a terminal session.
 
 Moving a Terminal ToolTab between Dock groups:
 
