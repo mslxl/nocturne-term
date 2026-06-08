@@ -163,11 +163,11 @@ jobs:
         include:
           - label: macOS Apple Silicon
             platform: macos-15
-            args: --target aarch64-apple-darwin --bundles dmg
+            args: --target aarch64-apple-darwin --bundles dmg --ci
             rust-target: aarch64-apple-darwin
           - label: macOS Intel
             platform: macos-15-intel
-            args: --target x86_64-apple-darwin --bundles dmg
+            args: --target x86_64-apple-darwin --bundles dmg --ci
             rust-target: x86_64-apple-darwin
           - label: Windows x64
             platform: windows-latest
@@ -291,6 +291,7 @@ jobs:
       - name: Build and upload release assets
         uses: tauri-apps/tauri-action@v0
         env:
+          CI: true
           GITHUB_TOKEN: ${{ github.token }}
         with:
           tagName: ${{ needs.prepare.outputs.tag }}
@@ -301,6 +302,30 @@ jobs:
           assetNamePattern: "[name]-[version]-[platform]-[arch][setup].[ext]"
           tauriScript: pnpm tauri
           args: ${{ matrix.args }}
+
+      - name: Print macOS DMG diagnostics
+        if: failure() && runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          dmg_dir="src-tauri/target/${{ matrix.rust-target }}/release/bundle/dmg"
+          echo "DMG bundle directory: ${dmg_dir}"
+
+          if [[ -d "$dmg_dir" ]]; then
+            find "$dmg_dir" -maxdepth 2 -print
+          else
+            echo "DMG bundle directory does not exist."
+          fi
+
+          script="${dmg_dir}/bundle_dmg.sh"
+          if [[ -f "$script" ]]; then
+            echo "::group::bundle_dmg.sh"
+            sed -n '1,240p' "$script"
+            echo "::endgroup::"
+          else
+            echo "bundle_dmg.sh was not generated."
+          fi
 
   publish:
     name: Publish release
