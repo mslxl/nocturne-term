@@ -38,6 +38,8 @@ Tauri's bundle target is set to `all` in `src-tauri/tauri.conf.json`, while the 
 
 Each generated installer file is uploaded as its own GitHub Release asset. Asset names include the app name, version, platform, architecture, and setup marker when applicable.
 
+macOS DMG builds pass Tauri's `--ci` flag and set `CI=true` explicitly. The DMG bundler generates and runs `bundle_dmg.sh`; CI mode keeps that script non-interactive and avoids CI-unsafe Finder scripting during DMG layout. If a macOS DMG job fails, the workflow prints the generated DMG directory and `bundle_dmg.sh` contents so the failing `hdiutil` or packaging command is visible in the GitHub Actions log instead of only reporting `failed to run bundle_dmg.sh`.
+
 MSI packages require a numeric-only WiX `ProductVersion`. For prerelease semver tags, CI keeps the app version as the tag version but maps the MSI-only version to `major.minor.patch.build`, with prerelease channels using reserved build ranges:
 
 - `alpha.N` -> `10000 + N`
