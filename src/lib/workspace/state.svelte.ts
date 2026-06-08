@@ -108,6 +108,7 @@ function demoWorkspaceSnapshot(): WorkspaceLayoutSnapshot {
             {
               kind: "group",
               id: "group-files-demo",
+              role: "sidebar",
               active_slot_id: "slot-files-demo",
               slots: [{ kind: "owned", id: "slot-files-demo", tool_tab_id: "files-demo" }],
             },
@@ -119,12 +120,14 @@ function demoWorkspaceSnapshot(): WorkspaceLayoutSnapshot {
                 {
                   kind: "group",
                   id: "group-terminal-demo",
+                  role: "content",
                   active_slot_id: "slot-terminal-demo",
                   slots: [{ kind: "owned", id: "slot-terminal-demo", tool_tab_id: "terminal-demo" }],
                 },
                 {
                   kind: "group",
                   id: "group-transfers-demo",
+                  role: "panel",
                   active_slot_id: "slot-transfers-demo",
                   slots: [{ kind: "owned", id: "slot-transfers-demo", tool_tab_id: "transfers-demo" }],
                 },
@@ -146,6 +149,7 @@ function demoWorkspaceSnapshot(): WorkspaceLayoutSnapshot {
             {
               kind: "group",
               id: "group-files-remote-demo",
+              role: "sidebar",
               active_slot_id: "slot-files-remote-demo",
               slots: [{ kind: "owned", id: "slot-files-remote-demo", tool_tab_id: "files-remote-demo" }],
             },
@@ -157,12 +161,14 @@ function demoWorkspaceSnapshot(): WorkspaceLayoutSnapshot {
                 {
                   kind: "group",
                   id: "group-terminal-remote-demo",
+                  role: "content",
                   active_slot_id: "slot-terminal-remote-demo",
                   slots: [{ kind: "owned", id: "slot-terminal-remote-demo", tool_tab_id: "terminal-remote-demo" }],
                 },
                 {
                   kind: "group",
                   id: "group-transfers-remote-demo",
+                  role: "panel",
                   active_slot_id: "slot-transfers-remote-demo",
                   slots: [{ kind: "owned", id: "slot-transfers-remote-demo", tool_tab_id: "transfers-remote-demo" }],
                 },
@@ -255,6 +261,7 @@ function applyDemoWorkspaceIntent(
           {
             kind: "group",
             id: `group-files-demo-${next.version + 1}`,
+            role: "sidebar",
             active_slot_id: filesSlotId,
             slots: [{ kind: "owned", id: filesSlotId, tool_tab_id: filesToolId }],
           },
@@ -266,12 +273,14 @@ function applyDemoWorkspaceIntent(
               {
                 kind: "group",
                 id: `group-terminal-demo-${next.version + 1}`,
+                role: "content",
                 active_slot_id: terminalSlotId,
                 slots: [{ kind: "owned", id: terminalSlotId, tool_tab_id: terminalToolId }],
               },
               {
                 kind: "group",
                 id: `group-transfers-demo-${next.version + 1}`,
+                role: "panel",
                 active_slot_id: transfersSlotId,
                 slots: [{ kind: "owned", id: transfersSlotId, tool_tab_id: transfersToolId }],
               },
@@ -365,6 +374,7 @@ function applyDemoWorkspaceIntent(
       layout: {
         kind: "group",
         id: `group-${floatingWindowId}`,
+        role: "content",
         active_slot_id: `slot-${floatingWindowId}`,
         slots: [
           {
@@ -517,7 +527,7 @@ function addDemoSlotToFirstGroup(layout: DemoLayout, slot: DemoSlot): DemoLayout
 
 function firstDemoTerminalGroupId(layout: DemoLayout): string | null {
   if (layout.kind === "group") {
-    return layout.slots.some((slot) => slot.kind === "owned" && slot.tool_tab_id.includes("terminal")) ? layout.id : null;
+    return layout.role === "content" ? layout.id : null;
   }
   return layout.children.map(firstDemoTerminalGroupId).find((id): id is string => id !== null) ?? null;
 }
@@ -525,7 +535,7 @@ function firstDemoTerminalGroupId(layout: DemoLayout): string | null {
 function splitDemoSlot(layout: DemoLayout, targetSlotId: string, slot: DemoSlot, side: "left" | "right" | "up" | "down"): DemoLayout {
   if (layout.kind === "group") {
     if (!layout.slots.some((item) => item.id === targetSlotId)) return layout;
-    const inserted: DemoLayout = { kind: "group", id: `group-${slot.id}`, slots: [slot], active_slot_id: slot.id };
+    const inserted: DemoLayout = { kind: "group", id: `group-${slot.id}`, role: layout.role, slots: [slot], active_slot_id: slot.id };
     const direction = side === "left" || side === "right" ? "row" : "column";
     const before = side === "left" || side === "up";
     return { kind: "split", direction, ratios: [0.5, 0.5], children: before ? [inserted, layout] : [layout, inserted] };
@@ -534,7 +544,7 @@ function splitDemoSlot(layout: DemoLayout, targetSlotId: string, slot: DemoSlot,
 }
 
 function splitDemoWorkspaceEdge(layout: DemoLayout, slot: DemoSlot, side: "left" | "right" | "up" | "down"): DemoLayout {
-  const inserted: DemoLayout = { kind: "group", id: `group-${slot.id}`, slots: [slot], active_slot_id: slot.id };
+  const inserted: DemoLayout = { kind: "group", id: `group-${slot.id}`, role: "sidebar", slots: [slot], active_slot_id: slot.id };
   const direction = side === "left" || side === "right" ? "row" : "column";
   const before = side === "left" || side === "up";
   return {

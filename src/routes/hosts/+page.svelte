@@ -13,6 +13,7 @@
   import { buildHostFolderTree, compactOptional, cloneHostDocument, emptySshHostDocument, hostAddress, hostFolderPaths, hostHasBlockingDiagnostics, hostSourceLabel, hostSubtitle, setHostProtocol, type HostFolderTreeNode } from "$lib/hosts/model";
   import { hasTauriRuntime } from "$lib/tauri/runtime";
   import { unwrapCommand } from "$lib/terminal/commands";
+  import CircleHelp from "~icons/lucide/circle-help";
 
   const queryClient = useQueryClient();
   const snapshotQuery = createQuery(() => ({
@@ -511,7 +512,18 @@
               <input value={draft.ssh.proxy_jump ?? ""} disabled={selectedHost?.read_only} oninput={(event) => (draft!.ssh!.proxy_jump = event.currentTarget.value)} />
             </label>
             <label class="check">
-              <span>Forward Agent</span>
+              <span class="label-with-help">
+                Forward Agent
+                <span
+                  class="help-tip"
+                  role="img"
+                  aria-label="Forward Agent lets this SSH connection use your local SSH agent to authenticate onward SSH connections from the remote host. Enable it only for trusted hosts."
+                  title="Lets this SSH connection use your local SSH agent for onward SSH connections from the remote host. Enable only for trusted hosts."
+                >
+                  <CircleHelp aria-hidden="true" />
+                  <span class="help-bubble" role="tooltip">Lets this SSH connection use your local SSH agent for onward SSH connections from the remote host. Enable only for trusted hosts.</span>
+                </span>
+              </span>
               <input type="checkbox" bind:checked={draft.ssh.forward_agent} disabled={selectedHost?.read_only} />
             </label>
           {/if}
@@ -912,6 +924,59 @@
     min-width: 0;
     color: var(--hosts-muted);
     font-size: 13px;
+  }
+
+  .label-with-help {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+  }
+
+  .help-tip {
+    position: relative;
+    display: inline-flex;
+    width: 16px;
+    height: 16px;
+    align-items: center;
+    justify-content: center;
+    border-radius: 50%;
+    color: color-mix(in srgb, var(--hosts-muted) 86%, transparent);
+    outline: none;
+  }
+
+  .help-tip :global(svg) {
+    width: 14px;
+    height: 14px;
+  }
+
+  .help-tip:hover {
+    color: var(--hosts-fg);
+  }
+
+  .help-bubble {
+    position: absolute;
+    left: 50%;
+    bottom: calc(100% + 8px);
+    z-index: 20;
+    width: min(280px, calc(100vw - 32px));
+    padding: 8px 10px;
+    border: 1px solid var(--hosts-border);
+    border-radius: 7px;
+    background: color-mix(in srgb, var(--hosts-control) 96%, var(--hosts-bg));
+    box-shadow: 0 10px 28px color-mix(in srgb, #000 20%, transparent);
+    color: var(--hosts-fg);
+    font-size: 12px;
+    font-weight: 400;
+    line-height: 1.35;
+    opacity: 0;
+    pointer-events: none;
+    transform: translate(-50%, 4px);
+    transition: opacity 120ms ease, transform 120ms ease;
+  }
+
+  .help-tip:hover .help-bubble {
+    opacity: 1;
+    transform: translate(-50%, 0);
   }
 
   label small {

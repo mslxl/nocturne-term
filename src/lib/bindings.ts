@@ -43,6 +43,7 @@ export const commands = {
 	retryTransferTask: (input: TransferTaskInput) => typedError<TransferQueueSnapshot, ConfigError>(__TAURI_INVOKE("retry_transfer_task", { input })),
 	getWorkspaceLayoutSnapshot: () => typedError<WorkspaceLayoutSnapshot, ConfigError>(__TAURI_INVOKE("get_workspace_layout_snapshot")),
 	workspaceDispatch: (input: WorkspaceDispatchInput) => typedError<WorkspaceLayoutSnapshot, ConfigError>(__TAURI_INVOKE("workspace_dispatch", { input })),
+	submitWorkspaceSshVerification: (input: WorkspaceSshVerificationSubmitInput) => typedError<null, ConfigError>(__TAURI_INVOKE("submit_workspace_ssh_verification", { input })),
 	listProfiles: () => typedError<ProfileEntry[], ConfigError>(__TAURI_INVOKE("list_profiles")),
 	readProfile: (name: string) => typedError<ProfileConfigDocument, ConfigError>(__TAURI_INVOKE("read_profile", { name })),
 	createProfile: (input: ProfileDocumentInput) => typedError<ProfileEntry, ConfigError>(__TAURI_INVOKE("create_profile", { input })),
@@ -95,6 +96,9 @@ export type ConfigError = { kind: "Io"; message: {
 } } | { kind: "Invalid"; message: {
 	message: string,
 } } | { kind: "Terminal"; message: {
+	message: string,
+} } | { kind: "SshWorkspaceChallenge"; message: {
+	challenge: SshWorkspaceChallenge,
 	message: string,
 } };
 
@@ -171,7 +175,8 @@ export type CreateHostTerminalSessionInput = {
 	pixel_height: number,
 	resolved_theme: TerminalColorSchemeVariant | null,
 	cwd: string | null,
-	connection_host_id: string,
+	workspace_id: string,
+	tool_tab_id: string,
 	window_label: string,
 	accept_new_host_key: boolean,
 	update_changed_host_key: boolean,
@@ -188,7 +193,8 @@ export type ExistingTerminalSessionInput = {
 };
 
 export type FileChmodInput = {
-	host_id: string,
+	workspace_id: string,
+	tool_tab_id: string,
 	path: string,
 	mode: string,
 	accept_new_host_key: boolean,
@@ -198,7 +204,8 @@ export type FileChmodInput = {
 };
 
 export type FileCreateDirectoryInput = {
-	host_id: string,
+	workspace_id: string,
+	tool_tab_id: string,
 	parent_path: string,
 	name: string,
 	accept_new_host_key: boolean,
@@ -222,7 +229,8 @@ export type FileEntry = {
 export type FileEntryKind = "file" | "directory" | "symlink" | "other";
 
 export type FileListInput = {
-	host_id: string,
+	workspace_id: string,
+	tool_tab_id: string,
 	path: string | null,
 	accept_new_host_key: boolean,
 	update_changed_host_key: boolean,
@@ -236,7 +244,8 @@ export type FileListResult = {
 };
 
 export type FilePathInput = {
-	host_id: string,
+	workspace_id: string,
+	tool_tab_id: string,
 	path: string,
 	accept_new_host_key: boolean,
 	update_changed_host_key: boolean,
@@ -247,7 +256,8 @@ export type FilePathInput = {
 export type FilePreviewContent = { kind: "text"; text: string } | { kind: "image"; mime: string; data_base64: string } | { kind: "unsupported"; reason: string } | { kind: "too_large"; limit_bytes: number };
 
 export type FilePreviewInput = {
-	host_id: string,
+	workspace_id: string,
+	tool_tab_id: string,
 	path: string,
 	text_limit_bytes: number,
 	image_limit_bytes: number,
@@ -295,7 +305,8 @@ export type FileProviderInfo = {
 export type FileProviderKind = "local" | "sftp";
 
 export type FileRenameInput = {
-	host_id: string,
+	workspace_id: string,
+	tool_tab_id: string,
 	source_path: string,
 	destination_path: string,
 	accept_new_host_key: boolean,
@@ -305,7 +316,8 @@ export type FileRenameInput = {
 };
 
 export type FileSearchInput = {
-	host_id: string,
+	workspace_id: string,
+	tool_tab_id: string,
 	root_path: string,
 	query: string,
 	include_hidden: boolean,
@@ -341,7 +353,8 @@ export type FileTrashInfo = {
 };
 
 export type FileTrashInfoInput = {
-	host_id: string,
+	workspace_id: string,
+	tool_tab_id: string,
 	accept_new_host_key: boolean,
 	update_changed_host_key: boolean,
 	credential: SshCredentialInput | null,
@@ -405,12 +418,24 @@ export type RemoteSearchHelperInfo = {
 };
 
 export type RemoteSearchHelperInput = {
-	host_id: string,
+	workspace_id: string,
+	tool_tab_id: string,
 	accept_new_host_key: boolean,
 	update_changed_host_key: boolean,
 	credential: SshCredentialInput | null,
 	save_credential: boolean,
 };
+
+export type SshAuthTarget = {
+	id: string,
+	kind: SshAuthTargetKind,
+	label: string,
+	username: string,
+	hostname: string,
+	port: number,
+};
+
+export type SshAuthTargetKind = "connection_host" | "proxy_jump";
 
 export type SshConnectionConfig = {
 	hostname: string,
@@ -422,12 +447,34 @@ export type SshConnectionConfig = {
 	server_alive_interval: number | null,
 };
 
+export type SshCredentialChallenge = {
+	workspace_id: string,
+	source_tool_tab_id: string | null,
+	auth_target: SshAuthTarget,
+	credential_kind: SshCredentialKind,
+	identity_file: string | null,
+};
+
 export type SshCredentialInput = {
 	kind: SshCredentialKind,
 	value: string,
 };
 
 export type SshCredentialKind = "password" | "key_passphrase";
+
+export type SshHostKeyChallenge = {
+	workspace_id: string,
+	source_tool_tab_id: string | null,
+	auth_target: SshAuthTarget,
+	challenge_kind: SshHostKeyChallengeKind,
+	target: string,
+	algorithm: string,
+	fingerprint: string,
+};
+
+export type SshHostKeyChallengeKind = "unknown" | "changed";
+
+export type SshWorkspaceChallenge = { kind: "credential"; challenge: SshCredentialChallenge } | { kind: "host_key"; challenge: SshHostKeyChallenge };
 
 export type TabBarContextMenuInput = {
 	x: number | null,
@@ -611,7 +658,7 @@ export type TerminalTheme = {
 
 export type TerminalTransportKind = "local" | "ssh" | "telnet";
 
-export type TerminalTransportState = "resolving" | "connecting" | "verifying_host_key" | "authenticating" | "connected" | "disconnected" | "failed";
+export type TerminalTransportState = "resolving" | "connecting" | "verifying_host_key" | "authenticating" | "waiting_for_workspace_verification" | "connected" | "disconnected" | "failed";
 
 export type TransferCreateInput = {
 	source: TransferEndpoint,
@@ -667,7 +714,9 @@ export type WorkspaceDispatchInput = {
 
 export type WorkspaceDockDirection = "row" | "column";
 
-export type WorkspaceDockLayout = { kind: "split"; direction: WorkspaceDockDirection; children: WorkspaceDockLayout[]; ratios: (number | null)[] } | { kind: "group"; id: string; slots: WorkspaceToolSlot[]; active_slot_id: string };
+export type WorkspaceDockGroupRole = "content" | "sidebar" | "panel";
+
+export type WorkspaceDockLayout = { kind: "split"; direction: WorkspaceDockDirection; children: WorkspaceDockLayout[]; ratios: (number | null)[] } | { kind: "group"; id: string; role: WorkspaceDockGroupRole; slots: WorkspaceToolSlot[]; active_slot_id: string };
 
 export type WorkspaceDockSide = "left" | "right" | "up" | "down";
 
@@ -684,6 +733,20 @@ export type WorkspaceLayoutSnapshot = {
 	workspaces: WorkspaceTabState[],
 	tool_tabs: WorkspaceToolTab[],
 	floating_windows: WorkspaceFloatingWindowState[],
+};
+
+export type WorkspaceSshVerificationRequiredEvent = {
+	workspace_id: string,
+	verification_id: string,
+	challenge: SshWorkspaceChallenge,
+};
+
+export type WorkspaceSshVerificationResponse = { kind: "credential"; credential: SshCredentialInput; save_credential: boolean } | { kind: "host_key"; accept_new_host_key: boolean; update_changed_host_key: boolean } | { kind: "cancel" };
+
+export type WorkspaceSshVerificationSubmitInput = {
+	workspace_id: string,
+	verification_id: string,
+	response: WorkspaceSshVerificationResponse,
 };
 
 export type WorkspaceTabState = {

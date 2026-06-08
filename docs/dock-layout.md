@@ -58,7 +58,7 @@ The dock layout is a tree:
 ```ts
 type DockLayout =
   | { kind: "split"; direction: "row" | "column"; children: DockLayout[]; ratios: number[] }
-  | { kind: "group"; id: string; slots: ToolSlot[]; activeSlotId: string };
+  | { kind: "group"; id: string; role: "content" | "sidebar" | "panel"; slots: ToolSlot[]; activeSlotId: string };
 
 type ToolSlot =
   | { kind: "owned"; id: string; toolTabId: string }
@@ -68,6 +68,14 @@ type ToolSlot =
 ```
 
 Ratios are positive finite values normalized per split node. Persist ratios, not pixels. Every group and split child must have a minimum size.
+
+Every dock group has an explicit role. The role is spatial layout state, not a value inferred from the ToolTabs inside the group:
+
+- `content`: primary editor/terminal/content area. A workspace must always keep at least one content group. A content group may be empty and show an empty content surface.
+- `sidebar`: edge/sidebar area created by workspace-edge docking.
+- `panel`: bottom or auxiliary panel area such as Transfers.
+
+Do not infer group role from a terminal, files, transfers, mirror, or closed-source slot. A Files ToolTab inside a content group remains content; a Terminal ToolTab inside a sidebar remains sidebar. Rust must create and return layouts with explicit roles, and frontend/tests should fail on role-less layouts instead of migrating them.
 
 ## Split Resizing
 
@@ -81,8 +89,8 @@ Supported drop targets:
 
 - group tab bar: add to that group
 - group center: add to or activate within that group
-- group left/right/top/bottom: split around the target group
-- workspace edge left/right/top/bottom: create an edge dock area
+- group left/right/top/bottom: split around the target group and inherit the target group's role
+- workspace edge left/right/top/bottom: create an edge dock area with `sidebar` role
 - another workspace: create a mirror slot
 - floating window: add to that floating window's dock layout
 - outside any window: create a floating window
@@ -93,7 +101,7 @@ Dragging an owned tool tab to another workspace is not a move. It creates a mirr
 
 ## Floating Windows
 
-A floating window owns a dock layout of display slots, not tool tab ownership. Floating windows contain mirror ToolTabs only.
+A floating window owns a dock layout of display slots, not tool tab ownership. Floating windows contain mirror ToolTabs only. All floating-window dock groups use `content` role.
 
 When a floating window closes:
 

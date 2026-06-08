@@ -9,6 +9,7 @@ mod terminal_schemes;
 mod transfers;
 mod types;
 mod workspace;
+mod workspace_ssh;
 
 #[cfg(debug_assertions)]
 use specta_typescript::Typescript;
@@ -56,6 +57,7 @@ pub fn run() {
             transfers::retry_transfer_task,
             workspace::get_workspace_layout_snapshot,
             workspace::workspace_dispatch,
+            workspace_ssh::submit_workspace_ssh_verification,
             config::list_profiles,
             config::read_profile,
             config::create_profile,
@@ -88,7 +90,10 @@ pub fn run() {
         ])
         .typ::<types::TerminalMenuEvent>()
         .typ::<types::PaneMenuEvent>()
-        .typ::<types::WorkspaceChangedEvent>();
+        .typ::<types::WorkspaceChangedEvent>()
+        .typ::<types::WorkspaceSshVerificationRequiredEvent>()
+        .typ::<types::WorkspaceDockGroupRole>()
+        .typ::<types::WorkspaceDockLayout>();
 
     #[cfg(debug_assertions)]
     builder

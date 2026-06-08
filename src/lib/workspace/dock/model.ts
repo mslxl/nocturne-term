@@ -6,6 +6,7 @@ export type FloatingWindowId = string;
 
 export type DockDirection = "row" | "column";
 export type DockSide = "left" | "right" | "up" | "down";
+export type DockGroupRole = "content" | "sidebar" | "panel";
 
 export type ToolTabKind = "files" | "terminal" | "transfers";
 
@@ -49,6 +50,7 @@ export type ToolSlot = OwnedDisplaySlot | MirrorDisplaySlot | FloatingPlaceholde
 export type DockGroup = {
   kind: "group";
   id: DockGroupId;
+  role: DockGroupRole;
   slots: ToolSlot[];
   activeSlotId: DisplaySlotId;
 };
@@ -83,14 +85,21 @@ export type WorkspaceLayoutSnapshot = {
   floatingWindows: FloatingWindowLayout[];
 };
 
-export function createDockGroup(id: DockGroupId, slots: ToolSlot[], activeSlotId: DisplaySlotId): DockGroup {
+export function createDockGroup(
+  id: DockGroupId,
+  role: DockGroupRole,
+  slots: ToolSlot[],
+  activeSlotId: DisplaySlotId,
+): DockGroup {
   if (!id.trim()) throw new Error("dock group id cannot be empty");
-  if (slots.length === 0) throw new Error(`dock group ${id} must contain at least one slot`);
+  if (!["content", "sidebar", "panel"].includes(role)) throw new Error(`dock group ${id} has invalid role ${role}`);
+  if (slots.length === 0 && role !== "content") throw new Error(`dock group ${id} must contain at least one slot`);
   assertUnique(slots.map((slot) => slot.id), "display slot");
-  if (!slots.some((slot) => slot.id === activeSlotId)) {
+  if (slots.length > 0 && !slots.some((slot) => slot.id === activeSlotId)) {
     throw new Error(`active slot ${activeSlotId} not found in dock group ${id}`);
   }
-  return { kind: "group", id, slots, activeSlotId };
+  if (slots.length === 0 && activeSlotId) throw new Error(`empty dock group ${id} cannot have an active slot`);
+  return { kind: "group", id, role, slots, activeSlotId };
 }
 
 export function createOwnedSlot(id: DisplaySlotId, toolTabId: ToolTabId): OwnedDisplaySlot {
@@ -160,6 +169,7 @@ export function cloneDockLayout(layout: DockLayout): DockLayout {
     return {
       kind: "group",
       id: layout.id,
+      role: layout.role,
       activeSlotId: layout.activeSlotId,
       slots: layout.slots.map((slot) => ({ ...slot })),
     };
@@ -194,6 +204,10 @@ export function validateWorkspaceSnapshot(snapshot: WorkspaceLayoutSnapshot) {
   }
   for (const window of snapshot.floatingWindows) {
     validateDockLayout(window.layout, toolTabsById);
+    const nonContentGroup = listDockGroups(window.layout).find((group) => group.role !== "content");
+    if (nonContentGroup) {
+      throw new Error(`floating window ${window.id} group ${nonContentGroup.id} must use content role`);
+    }
   }
 }
 
@@ -210,11 +224,14 @@ function validateWorkspace(workspace: WorkspaceTab, toolTabsById: Map<ToolTabId,
     }
   }
   validateDockLayout(workspace.layout, toolTabsById);
+  if (!listDockGroups(workspace.layout).some((group) => group.role === "content")) {
+    throw new Error(`workspace ${workspace.id} must contain at least one content dock group`);
+  }
 }
 
 function validateDockLayout(layout: DockLayout, toolTabsById: Map<ToolTabId, ToolTab>) {
   if (layout.kind === "group") {
-    createDockGroup(layout.id, layout.slots, layout.activeSlotId);
+    createDockGroup(layout.id, layout.role, layout.slots, layout.activeSlotId);
     for (const slot of layout.slots) {
       if (slot.kind === "closed-source") continue;
       const toolTab = toolTabsById.get(slot.toolTabId);
