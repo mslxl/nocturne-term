@@ -373,6 +373,23 @@ pub struct WorkspaceDispatchInput {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum AppMenuRoot {
+    File,
+    Edit,
+    View,
+    Window,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct AppMenuPopupInput {
+    pub root: AppMenuRoot,
+    pub window_label: String,
+    pub x: f64,
+    pub y: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum WorkspaceIntent {
     CreateWorkspace { host_id: String },

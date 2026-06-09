@@ -20,7 +20,7 @@
   import SwitchControl from "$lib/settings/components/SwitchControl.svelte";
   import TerminalColorSchemeManager from "$lib/settings/components/TerminalColorSchemeManager.svelte";
   import { saveConfigValue } from "$lib/settings/save";
-  import { settingCategories, settingsSchema, type SettingCategoryId, type SettingDefinition } from "$lib/settings/schema";
+  import { settingCategories, settingsSchema, settingVisibleOnCurrentPlatform, type SettingCategoryId, type SettingDefinition } from "$lib/settings/schema";
   import { hasTauriRuntime } from "$lib/tauri/runtime";
   import { unwrapCommand } from "$lib/terminal/commands";
 
@@ -48,7 +48,7 @@
   const visibleCategories = $derived(
     mode === "main" ? settingCategories : settingCategories.filter((category) => category.id !== "profiles"),
   );
-  const activeSettings = $derived(settingsSchema.filter((setting) => setting.category === activeCategory));
+  const activeSettings = $derived(settingsSchema.filter((setting) => setting.category === activeCategory && settingVisibleOnCurrentPlatform(setting)));
   const pageTitle = $derived(mode === "main" ? t("mainSettings") : `${t("profileSettings")}: ${activeProfile}`);
 
   function parseModeFromLocation() {

@@ -34,6 +34,7 @@
   import { hasTauriRuntime } from "$lib/tauri/runtime";
   import { dockSplitGridTemplate, resizeWorkspaceDockSplit } from "$lib/workspace/dock/resize";
   import WorkspaceTabBar from "$lib/workspace/components/WorkspaceTabBar.svelte";
+  import { mountDecorumTitlebarHost } from "$lib/window/decorum-titlebar";
   import { createWorkspaceStore } from "$lib/workspace/state.svelte";
   import { unwrapCommand } from "$lib/terminal/commands";
   import FilesToolTab from "$lib/files/FilesToolTab.svelte";
@@ -273,6 +274,7 @@
     side: "" | "left" | "right" | "up" | "down";
     style: string;
   };
+  type AppMenuRootId = "file" | "edit" | "view" | "window";
 
   let settings = $state<TerminalSettings | null>(null);
   let lastConfigSnapshot = $state<AppConfigSnapshot | null>(null);
@@ -311,7 +313,8 @@
   let hostPickerPosition = $state({ left: 10, top: 44 });
   let hostPickerSubmenus = $state<HostPickerMenu[]>([]);
   let toolTabContextMenu = $state<ToolTabContextMenu | null>(null);
-  let macosIntegratedTitlebar = $state(false);
+  let integratedTitlebarSetting = $state(false);
+  let integratedTitlebarSingleRowSetting = $state(false);
   let showHostIconsInTabs = $state(false);
   let defaultFilesViewMode = $state<"tree" | "columns">("tree");
   let showHiddenFiles = $state(true);
@@ -391,7 +394,20 @@
   );
   let isVertical = $derived(tabBarOrientation !== "horizontal");
   let tabsOnLeft = $derived(tabBarOrientation === "vertical_left");
-  let integratedTitlebar = $derived(isMacPlatform() && macosIntegratedTitlebar && !isVertical);
+  let integratedTitlebar = $derived(isDesktopPlatform() && integratedTitlebarSetting && !isVertical);
+  let integratedTitlebarChrome = $derived.by<"macos" | "decorum" | null>(() =>
+    integratedTitlebar ? (isMacPlatform() ? "macos" : "decorum") : null,
+  );
+  let integratedTitlebarSingleRow = $derived(integratedTitlebarChrome === "decorum" && integratedTitlebarSingleRowSetting);
+  let integratedTitlebarLayout = $derived.by<"single-row" | "two-row">(() =>
+    integratedTitlebarSingleRow ? "single-row" : "two-row",
+  );
+  let appMenuRoots = $derived([
+    { id: "file" as const, label: language() === "zh" ? "文件" : "File" },
+    { id: "edit" as const, label: t("edit") },
+    { id: "view" as const, label: language() === "zh" ? "视图" : "View" },
+    { id: "window" as const, label: language() === "zh" ? "窗口" : "Window" },
+  ]);
   let hostIconById = $derived(hostIconMap(lastConfigSnapshot));
   let paletteResults = $derived(
     searchPaletteItems(buildPaletteItems(), commandPaletteQuery, {
@@ -446,7 +462,8 @@
       setLanguage(appLanguageFromConfig(readValue(snapshot.effective_config.root, ["ui", "language"])));
       appTheme = resolveTheme(appThemeFromConfig(readValue(snapshot.effective_config.root, ["ui", "theme"])));
       keybindings = readKeybindingMap(snapshot.effective_config.root, navigator.platform.toLowerCase().includes("mac"));
-      macosIntegratedTitlebar = true;
+      integratedTitlebarSetting = true;
+      integratedTitlebarSingleRowSetting = false;
       showHostIconsInTabs = false;
       defaultFilesViewMode = "tree";
       showHiddenFiles = true;
@@ -465,7 +482,10 @@
     setLanguage(appLanguageFromConfig(readValue(snapshot.effective_config.root, ["ui", "language"])));
     appTheme = resolveTheme(appThemeFromConfig(readValue(snapshot.effective_config.root, ["ui", "theme"])));
     keybindings = readKeybindingMap(snapshot.effective_config.root, navigator.platform.toLowerCase().includes("mac"));
-    macosIntegratedTitlebar = booleanValue(readValue(snapshot.effective_config.root, ["ui", "macos_integrated_titlebar"])) ?? true;
+    integratedTitlebarSetting = booleanValue(readValue(snapshot.effective_config.root, ["ui", "integrated_titlebar"])) ?? true;
+    integratedTitlebarSingleRowSetting = isMacPlatform()
+      ? false
+      : (booleanValue(readValue(snapshot.effective_config.root, ["ui", "integrated_titlebar_single_row"])) ?? false);
     showHostIconsInTabs = booleanValue(readValue(snapshot.effective_config.root, ["workspace", "show_host_icons_in_tabs"])) ?? false;
     defaultFilesViewMode = filesViewModeFromConfig(readValue(snapshot.effective_config.root, ["files", "default_view_mode"]));
     showHiddenFiles = booleanValue(readValue(snapshot.effective_config.root, ["files", "show_hidden"])) ?? true;
@@ -965,6 +985,10 @@
 
   function isMacPlatform() {
     return navigator.platform.toLowerCase().includes("mac");
+  }
+
+  function isDesktopPlatform() {
+    return !/android|iphone|ipad|ipod/i.test(navigator.userAgent);
   }
 
   function hostIconMap(snapshot: AppConfigSnapshot | null): Map<string, ConnectionHostIcon> {
@@ -2627,6 +2651,24 @@
     });
   }
 
+  async function openAppMenu(root: AppMenuRootId, event: MouseEvent) {
+    event.preventDefault();
+    event.stopPropagation();
+    if (!hasTauriRuntime()) return;
+    const rect = event.currentTarget instanceof HTMLElement ? event.currentTarget.getBoundingClientRect() : null;
+    if (!rect) throw new Error("app menu root did not provide a DOM target");
+    await unwrapCommand(
+      commands.showAppMenu({
+        root,
+        window_label: currentWindowLabel(),
+        x: rect.left,
+        y: rect.bottom,
+      }),
+    ).catch((error) => {
+      settingsError = error instanceof Error ? error.message : String(error);
+    });
+  }
+
   async function openPaneContextMenu(event: MouseEvent, paneId: string) {
     event.preventDefault();
     await activatePane(paneId);
@@ -3974,6 +4016,10 @@
 <main
   class:floating-workspace={floatingWindowId !== null}
   class:integrated-titlebar={integratedTitlebar}
+  class:integrated-titlebar-macos={integratedTitlebarChrome === "macos"}
+  class:integrated-titlebar-decorum={integratedTitlebarChrome === "decorum"}
+  class:titlebar-single-row={integratedTitlebarLayout === "single-row"}
+  class:titlebar-two-row={integratedTitlebarLayout === "two-row"}
   class:left-tabs={tabsOnLeft}
   class:vertical={isVertical}
   class="workspace"
@@ -3987,6 +4033,10 @@
       workspaces={workspaceSnapshot.workspaces}
       activeWorkspaceId={workspaceSnapshot.active_workspace_id}
       {integratedTitlebar}
+      {integratedTitlebarChrome}
+      titlebarLayout={integratedTitlebarLayout}
+      integratedTitlebarSingleRow={integratedTitlebarSingleRow}
+      {appMenuRoots}
       showHostIcons={showHostIconsInTabs}
       {hostIconById}
       dropPreviewWorkspaceId={toolTabDropTarget?.kind === "workspace" ? toolTabDropTarget.workspaceId : null}
@@ -3995,12 +4045,43 @@
       {closeOtherWorkspaces}
       {closeWorkspacesToRight}
       {newWorkspace}
+      {openAppMenu}
       {openHostPicker}
       {handleNewWorkspaceSecondaryClick}
     />
   {:else}
-    <div class="workspace-tabbar-loading" data-tauri-drag-region={integratedTitlebar ? "deep" : undefined}>
-      <span>{workspaceStore.loading ? "Loading workspace..." : "Workspace"}</span>
+    <div
+      class:integrated-titlebar={integratedTitlebar}
+      class:integrated-titlebar-macos={integratedTitlebarChrome === "macos"}
+      class:integrated-titlebar-decorum={integratedTitlebarChrome === "decorum"}
+      class:titlebar-single-row={integratedTitlebarLayout === "single-row"}
+      class:titlebar-two-row={integratedTitlebarLayout === "two-row"}
+      class="workspace-tabbar-loading"
+    >
+      {#if integratedTitlebarLayout === "two-row"}
+        <div class="workspace-tabbar-loading-menu-row">
+          <span>{workspaceStore.loading ? "Loading workspace..." : "Workspace"}</span>
+          <div
+            class="workspace-tabbar-loading-drag-zone"
+            aria-hidden="true"
+            data-tauri-drag-region={integratedTitlebar ? true : undefined}
+          ></div>
+          {#if integratedTitlebarChrome === "decorum"}
+            <div class="workspace-decorum-slot" aria-hidden="true" use:mountDecorumTitlebarHost></div>
+          {/if}
+        </div>
+        <div class="workspace-tabbar-loading-tab-row" aria-hidden="true"></div>
+      {:else}
+        <span>{workspaceStore.loading ? "Loading workspace..." : "Workspace"}</span>
+        <div
+          class="workspace-tabbar-loading-drag-zone"
+          aria-hidden="true"
+          data-tauri-drag-region={integratedTitlebar ? true : undefined}
+        ></div>
+        {#if integratedTitlebarChrome === "decorum"}
+          <div class="workspace-decorum-slot" aria-hidden="true" use:mountDecorumTitlebarHost></div>
+        {/if}
+      {/if}
     </div>
   {/if}
 
@@ -4525,11 +4606,20 @@
   }
 
   .workspace {
+    --workspace-titlebar-height: 40px;
     width: 100vw;
     height: 100vh;
     display: grid;
-    grid-template-rows: 40px minmax(0, 1fr);
+    grid-template-rows: var(--workspace-titlebar-height) minmax(0, 1fr);
     background: color-mix(in srgb, var(--app-bg) 94%, var(--app-fg));
+  }
+
+  .workspace.integrated-titlebar-decorum.titlebar-two-row {
+    --workspace-titlebar-height: 72px;
+  }
+
+  .workspace.integrated-titlebar-decorum.titlebar-single-row {
+    --workspace-titlebar-height: 40px;
   }
 
   .terminal-measure-host {
@@ -4540,6 +4630,140 @@
     overflow: hidden;
     visibility: hidden;
     pointer-events: none;
+  }
+
+  .workspace-tabbar-loading {
+    min-width: 0;
+    position: relative;
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    gap: 12px;
+    border-bottom: 1px solid var(--app-border);
+    padding: 0 12px;
+    background: color-mix(in srgb, var(--app-bg) 90%, var(--app-control));
+    color: color-mix(in srgb, var(--app-fg) 66%, transparent);
+    font-size: 12px;
+    user-select: none;
+    -webkit-user-select: none;
+  }
+
+  .workspace-tabbar-loading.integrated-titlebar {
+    padding: 0;
+  }
+
+  .workspace-tabbar-loading.integrated-titlebar-macos {
+    padding-left: 84px;
+  }
+
+  .workspace-tabbar-loading.integrated-titlebar-decorum {
+    padding-right: 0;
+  }
+
+  .workspace-tabbar-loading.titlebar-two-row {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0;
+  }
+
+  .workspace-tabbar-loading.titlebar-single-row {
+    padding-block: 5px;
+    padding-left: 8px;
+  }
+
+  .workspace-tabbar-loading-menu-row,
+  .workspace-tabbar-loading-tab-row {
+    min-width: 0;
+    display: flex;
+    align-items: center;
+  }
+
+  .workspace-tabbar-loading-menu-row {
+    min-height: 32px;
+    padding-left: 8px;
+    border-bottom: 1px solid color-mix(in srgb, var(--app-border) 70%, transparent);
+  }
+
+  .workspace-tabbar-loading-tab-row {
+    min-height: 40px;
+  }
+
+  .workspace.integrated-titlebar-decorum :global(.workspace-decorum-slot) {
+    flex: none;
+    width: 138px;
+    height: 100%;
+    display: grid;
+    align-items: stretch;
+    justify-content: end;
+  }
+
+  .workspace.integrated-titlebar-decorum :global(.workspace-decorum-controls) {
+    width: 138px;
+    height: 100%;
+    display: grid;
+    grid-template-columns: repeat(3, 46px);
+    align-items: stretch;
+    justify-content: end;
+    background: transparent;
+  }
+
+  .workspace.integrated-titlebar-decorum :global(.workspace-decorum-controls > [data-tauri-drag-region]) {
+    display: none !important;
+  }
+
+  .workspace.integrated-titlebar-decorum :global(button.decorum-tb-btn) {
+    position: static !important;
+    z-index: 3 !important;
+    width: 46px !important;
+    min-width: 46px !important;
+    height: 100% !important;
+    min-height: 30px !important;
+    display: inline-flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    transform: none !important;
+    border: 0 !important;
+    border-radius: 0 !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    background: transparent !important;
+    color: color-mix(in srgb, var(--app-fg) 72%, transparent) !important;
+    font-family: "Segoe Fluent Icons", "Segoe MDL2 Assets", system-ui, sans-serif !important;
+    font-size: 10px !important;
+    font-weight: 400 !important;
+    line-height: 1 !important;
+    text-shadow: none !important;
+    -webkit-text-stroke: 0 transparent !important;
+    -webkit-font-smoothing: antialiased !important;
+    cursor: default !important;
+  }
+
+  .workspace.integrated-titlebar-decorum :global(button.decorum-tb-btn:hover) {
+    background: color-mix(in srgb, var(--app-fg) 11%, transparent) !important;
+    color: var(--app-fg) !important;
+  }
+
+  .workspace.integrated-titlebar-decorum :global(button.decorum-tb-btn:active) {
+    background: color-mix(in srgb, var(--app-fg) 17%, transparent) !important;
+  }
+
+  .workspace.integrated-titlebar-decorum :global(#decorum-tb-close:hover) {
+    background: #c42b1c !important;
+    color: #ffffff !important;
+  }
+
+  .workspace-tabbar-loading span {
+    min-width: 0;
+    flex: none;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .workspace-tabbar-loading-drag-zone {
+    flex: 1 1 24px;
+    min-width: 24px;
+    height: 100%;
   }
 
   .workspace.vertical .terminal-measure-host {

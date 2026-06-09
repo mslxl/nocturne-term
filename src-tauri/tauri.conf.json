@@ -18,6 +18,7 @@
         "titleBarStyle": "Overlay"
       }
     ],
+    "withGlobalTauri": true,
     "security": {
       "csp": null
     }

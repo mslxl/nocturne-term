@@ -65,6 +65,7 @@ export const commands = {
 	removeConfigKey: (input: ConfigKeyPathInput) => typedError<null, ConfigError>(__TAURI_INVOKE("remove_config_key", { input })),
 	showTabBarContextMenu: (input: TabBarContextMenuInput) => typedError<null, ConfigError>(__TAURI_INVOKE("show_tab_bar_context_menu", { input })),
 	showPaneContextMenu: (input: PaneContextMenuInput) => typedError<null, ConfigError>(__TAURI_INVOKE("show_pane_context_menu", { input })),
+	showAppMenu: (input: AppMenuPopupInput) => typedError<null, ConfigError>(__TAURI_INVOKE("show_app_menu", { input })),
 	openSettingsWindow: (mode: string) => typedError<null, ConfigError>(__TAURI_INVOKE("open_settings_window", { mode })),
 	openHostManagerWindow: () => typedError<null, ConfigError>(__TAURI_INVOKE("open_host_manager_window")),
 	openProfileNewDialog: () => typedError<null, ConfigError>(__TAURI_INVOKE("open_profile_new_dialog")),
@@ -84,6 +85,15 @@ export type AppConfigSnapshot = {
 	profiles: ProfileEntry[],
 	hosts: ConnectionHostEntry[],
 };
+
+export type AppMenuPopupInput = {
+	root: AppMenuRoot,
+	window_label: string,
+	x: number | null,
+	y: number | null,
+};
+
+export type AppMenuRoot = "file" | "edit" | "view" | "window";
 
 export type ConfigDocumentTarget = "main" | "profile";
 

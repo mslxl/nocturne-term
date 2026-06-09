@@ -1905,8 +1905,7 @@ pub(crate) fn effective_application_config(app: &AppHandle<impl Runtime>) -> Res
     Ok(deep_merge(&main_value, &profile_value))
 }
 
-#[cfg(target_os = "macos")]
-pub(crate) fn effective_macos_integrated_titlebar(app: &AppHandle<impl Runtime>) -> Result<bool> {
+pub(crate) fn effective_integrated_titlebar(app: &AppHandle<impl Runtime>) -> Result<bool> {
     let config = effective_application_config(app)?;
     let Some(table) = config.as_table() else {
         return Err(invalid_error("effective config must be a TOML table"));
@@ -1917,16 +1916,13 @@ pub(crate) fn effective_macos_integrated_titlebar(app: &AppHandle<impl Runtime>)
     let Some(ui) = ui.as_table() else {
         return Err(invalid_error("ui must be a table"));
     };
-    match ui.get("macos_integrated_titlebar") {
+    match ui.get("integrated_titlebar") {
         Some(toml::Value::Boolean(value)) => Ok(*value),
-        Some(_) => Err(invalid_error(
-            "ui.macos_integrated_titlebar must be a boolean",
-        )),
+        Some(_) => Err(invalid_error("ui.integrated_titlebar must be a boolean")),
         None => Ok(true),
     }
 }
 
-#[cfg(target_os = "macos")]
 pub(crate) fn effective_horizontal_tab_bar(app: &AppHandle<impl Runtime>) -> Result<bool> {
     let config = effective_application_config(app)?;
     let Some(table) = config.as_table() else {
