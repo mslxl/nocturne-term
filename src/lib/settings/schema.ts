@@ -21,6 +21,7 @@ import { defaultKeybindingMap, terminalKeybindings, type KeybindingMap } from "$
 
 export type SettingCategoryId = "appearance" | "workspace" | "terminal" | "files" | "transfers" | "keybindings" | "profiles" | "hosts";
 export type SettingValueKind = "text" | "number" | "integer" | "boolean" | "select" | "textarea" | "path-list" | "color" | "keybindings";
+export type SettingsPlatform = "windows" | "linux" | "macos";
 
 export type SettingDefinition<T = unknown> = {
   key: string;
@@ -33,6 +34,7 @@ export type SettingDefinition<T = unknown> = {
   help?: MessageKey;
   min?: number;
   step?: number;
+  platforms?: SettingsPlatform[];
   get: (root: { values: Record<string, ConfigValue> }) => T;
   toConfigValue: (value: T) => ConfigValue | undefined;
 };
@@ -51,6 +53,22 @@ function tabBarOrientationValue(value: ConfigValue | undefined): TabBarOrientati
 
 function isMacPlatform() {
   return typeof navigator !== "undefined" && navigator.platform.toLowerCase().includes("mac");
+}
+
+export function currentSettingsPlatform(): SettingsPlatform | null {
+  if (typeof navigator === "undefined") return null;
+  const platform = navigator.platform.toLowerCase();
+  const userAgent = navigator.userAgent.toLowerCase();
+  if (platform.includes("mac")) return "macos";
+  if (platform.includes("win")) return "windows";
+  if (platform.includes("linux") || userAgent.includes("linux")) return "linux";
+  return null;
+}
+
+export function settingVisibleOnCurrentPlatform(setting: SettingDefinition) {
+  if (!setting.platforms) return true;
+  const platform = currentSettingsPlatform();
+  return platform !== null && setting.platforms.includes(platform);
 }
 
 export const settingCategories: { id: SettingCategoryId; label: MessageKey }[] = [
@@ -94,22 +112,29 @@ export const settingsSchema: SettingDefinition[] = [
     get: (root) => stringValue(valueAt(root, ["ui", "language"])) ?? defaultLanguage(),
     toConfigValue: (value) => (String(value) ? configString(String(value)) : undefined),
   },
-  ...(isMacPlatform()
-    ? [
-        {
-          key: "ui.macos_integrated_titlebar",
-          category: "appearance" as const,
-          label: "macosIntegratedTitlebar" as const,
-          path: ["ui", "macos_integrated_titlebar"],
-          kind: "boolean" as const,
-          defaultValue: true,
-          help: "macosIntegratedTitlebarHelp" as const,
-          get: (root: { values: Record<string, ConfigValue> }) =>
-            booleanValue(valueAt(root, ["ui", "macos_integrated_titlebar"])) ?? true,
-          toConfigValue: (value: unknown) => configBoolean(Boolean(value)),
-        },
-      ]
-    : []),
+  {
+    key: "ui.integrated_titlebar",
+    category: "appearance",
+    label: "integratedTitlebar",
+    path: ["ui", "integrated_titlebar"],
+    kind: "boolean",
+    defaultValue: true,
+    help: "integratedTitlebarHelp",
+    get: (root) => booleanValue(valueAt(root, ["ui", "integrated_titlebar"])) ?? true,
+    toConfigValue: (value) => configBoolean(Boolean(value)),
+  },
+  {
+    key: "ui.integrated_titlebar_single_row",
+    category: "appearance",
+    label: "integratedTitlebarSingleRow",
+    path: ["ui", "integrated_titlebar_single_row"],
+    kind: "boolean",
+    defaultValue: false,
+    help: "integratedTitlebarSingleRowHelp",
+    platforms: ["windows", "linux"],
+    get: (root) => booleanValue(valueAt(root, ["ui", "integrated_titlebar_single_row"])) ?? false,
+    toConfigValue: (value) => configBoolean(Boolean(value)),
+  },
   {
     key: "terminal.command",
     category: "terminal",

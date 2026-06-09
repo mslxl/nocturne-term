@@ -79,6 +79,7 @@ pub fn run() {
             config::remove_config_key,
             app_shell::show_tab_bar_context_menu,
             app_shell::show_pane_context_menu,
+            app_shell::show_app_menu,
             app_shell::open_settings_window,
             app_shell::open_host_manager_window,
             app_shell::open_profile_new_dialog,
@@ -112,6 +113,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_decorum::init())
         .invoke_handler(builder.invoke_handler())
         .setup(move |app| {
             match logging::clean_log_dir(app.handle(), &log_file_name) {
@@ -138,6 +140,7 @@ pub fn run() {
             });
             app_shell::refresh_menu(app.handle())?;
             app_shell::apply_initial_main_window_chrome(app.handle())?;
+            app_shell::apply_initial_workspace_decorum_chrome(app.handle())?;
             config::watch_config_command(app.handle().clone())?;
             log::info!("Nocturne setup completed");
             Ok(())

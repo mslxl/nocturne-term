@@ -2,6 +2,8 @@
 use tauri::menu::AboutMetadata;
 #[cfg(target_os = "macos")]
 use tauri::TitleBarStyle;
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+use tauri_plugin_decorum::WebviewWindowExt;
 use tauri::{
     menu::{CheckMenuItem, Menu, MenuItem, MenuItemKind, PredefinedMenuItem, Submenu},
     AppHandle, Emitter, EventTarget, LogicalPosition, Manager, PhysicalPosition, PhysicalSize,
@@ -18,6 +20,7 @@ use crate::{
     error::{invalid_error, Result},
     terminal,
     types::{
+        AppMenuPopupInput, AppMenuRoot,
         PaneContextMenuInput, PaneMenuAction, PaneMenuEvent, TabBarContextMenuInput,
         TabBarOrientation, TerminalMenuCommand, TerminalMenuEvent, TerminalMenuStateInput,
     },
@@ -112,6 +115,9 @@ const DEFAULT_WINDOW_HEIGHT: f64 = 640.0;
 const MIN_WINDOW_WIDTH: f64 = 540.0;
 const MIN_WINDOW_HEIGHT: f64 = 360.0;
 static LAST_FOCUSED_MAIN_WINDOW: OnceLock<Mutex<String>> = OnceLock::new();
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+static DECORUM_TITLEBAR_WINDOWS: OnceLock<Mutex<std::collections::HashSet<String>>> =
+    OnceLock::new();
 #[cfg(target_os = "macos")]
 const MACOS_TRAFFIC_LIGHT_X: f64 = 14.0;
 #[cfg(target_os = "macos")]
@@ -898,7 +904,7 @@ fn macos_application_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Subme
     )
 }
 
-pub(crate) fn handle_menu_event<R: Runtime>(app: &AppHandle<R>, id: &str) {
+pub(crate) fn handle_menu_event(app: &AppHandle, id: &str) {
     let result = if id == MENU_SETTINGS {
         spawn_app_shell_action(app, "open settings window from menu", |app| {
             open_settings(&app, "main")
@@ -970,7 +976,7 @@ pub(crate) fn handle_window_event<R: Runtime>(window: &Window<R>, event: &Window
             *label = window.label().to_string();
         }
         #[cfg(target_os = "macos")]
-        if let Ok(true) = macos_integrated_titlebar_active(&window.app_handle()) {
+        if let Ok(true) = integrated_titlebar_active(&window.app_handle()) {
             let _ = position_macos_window_traffic_lights(window);
         }
     } else if matches!(event, WindowEvent::Destroyed) && is_main_window_label(window.label()) {
@@ -989,37 +995,62 @@ pub(crate) fn handle_window_event<R: Runtime>(window: &Window<R>, event: &Window
     }
 }
 
-pub(crate) fn apply_main_window_chrome<R: Runtime>(_app: &AppHandle<R>) -> Result<()> {
+pub(crate) fn apply_main_window_chrome<R: Runtime>(app: &AppHandle<R>) -> Result<()> {
+    let integrated = integrated_titlebar_active(app)?;
+    for window in app.webview_windows().values() {
+        apply_integrated_titlebar_chrome(window, integrated);
+    }
+    Ok(())
+}
+
+fn apply_integrated_titlebar_chrome<R: Runtime>(
+    window: &WebviewWindow<R>,
+    _integrated: bool,
+) {
+    if !is_workspace_chrome_window_label(window.label()) {
+        return;
+    }
     #[cfg(target_os = "macos")]
     {
-        let integrated = macos_integrated_titlebar_active(_app)?;
-        let style = if integrated {
+        let style = if _integrated {
             TitleBarStyle::Overlay
         } else {
             TitleBarStyle::Visible
         };
-        let title = if integrated { "" } else { "Nocturne" };
-        for window in _app.webview_windows().values() {
-            if !is_main_window_label(window.label()) {
-                continue;
+        let title = if _integrated { "" } else { "Nocturne" };
+        if let Err(error) = window.set_title_bar_style(style) {
+            log::warn!(
+                "failed to apply macOS integrated titlebar style to {}: {error}",
+                window.label()
+            );
+            return;
+        }
+        if let Err(error) = window.set_title(title) {
+            log::warn!(
+                "failed to apply macOS integrated titlebar title to {}: {error}",
+                window.label()
+            );
+            return;
+        }
+        if _integrated {
+            if let Err(error) = position_macos_webview_traffic_lights(window) {
+                log::warn!(
+                    "failed to position macOS integrated titlebar traffic lights for {}: {error}",
+                    window.label()
+                );
+                return;
             }
-            window.set_title_bar_style(style).map_err(to_config_error)?;
-            window.set_title(title).map_err(to_config_error)?;
-            if integrated {
-                position_macos_webview_traffic_lights(window)?;
-                schedule_macos_webview_traffic_light_position(window);
-            }
+            schedule_macos_webview_traffic_light_position(window);
         }
     }
-    Ok(())
 }
 
 pub(crate) fn apply_initial_main_window_chrome<R: Runtime>(app: &AppHandle<R>) -> Result<()> {
     #[cfg(target_os = "macos")]
     {
-        if macos_integrated_titlebar_active(app)? {
+        if integrated_titlebar_active(app)? {
             for window in app.webview_windows().values() {
-                if is_main_window_label(window.label()) {
+                if is_workspace_chrome_window_label(window.label()) {
                     window.set_title("").map_err(to_config_error)?;
                     position_macos_webview_traffic_lights(window)?;
                     schedule_macos_webview_traffic_light_position(window);
@@ -1029,6 +1060,16 @@ pub(crate) fn apply_initial_main_window_chrome<R: Runtime>(app: &AppHandle<R>) -
         }
     }
     apply_main_window_chrome(app)
+}
+
+pub(crate) fn apply_initial_workspace_decorum_chrome(app: &AppHandle) -> Result<()> {
+    let integrated = integrated_titlebar_active(app)?;
+    for window in app.webview_windows().values() {
+        if is_workspace_chrome_window_label(window.label()) {
+            apply_workspace_decorum_chrome(window, integrated);
+        }
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]
@@ -1104,10 +1145,8 @@ fn position_macos_traffic_lights(ns_window: *mut NSWindow) -> Result<()> {
     Ok(())
 }
 
-#[cfg(target_os = "macos")]
-fn macos_integrated_titlebar_active<R: Runtime>(app: &AppHandle<R>) -> Result<bool> {
-    Ok(config::effective_macos_integrated_titlebar(app)?
-        && config::effective_horizontal_tab_bar(app)?)
+fn integrated_titlebar_active<R: Runtime>(app: &AppHandle<R>) -> Result<bool> {
+    Ok(config::effective_integrated_titlebar(app)? && config::effective_horizontal_tab_bar(app)?)
 }
 
 #[cfg(target_os = "macos")]
@@ -1127,6 +1166,68 @@ where
         builder.title_bar_style(TitleBarStyle::Visible)
     }
 }
+
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+fn apply_decorum_titlebar(window: &WebviewWindow, integrated: bool) {
+    if !integrated {
+        if let Err(error) = window.set_decorations(true) {
+            log::warn!(
+                "failed to restore standard titlebar decorations for {} after decorum was disabled: {error}",
+                window.label()
+            );
+        }
+        return;
+    }
+
+    let state = DECORUM_TITLEBAR_WINDOWS.get_or_init(|| Mutex::new(std::collections::HashSet::new()));
+    let mut labels = match state.lock() {
+        Ok(labels) => labels,
+        Err(error) => {
+            log::warn!(
+                "failed to lock decorum integrated titlebar state for {}: {error}",
+                window.label()
+            );
+            return;
+        }
+    };
+    if !labels.insert(window.label().to_string()) {
+        return;
+    }
+    if let Err(error) = window.create_overlay_titlebar() {
+        labels.remove(window.label());
+        log::warn!(
+            "failed to apply decorum integrated titlebar to {}: {error}; falling back to standard system titlebar",
+            window.label()
+        );
+        if let Err(restore_error) = window.set_decorations(true) {
+            log::warn!(
+                "failed to restore standard titlebar decorations for {} after decorum error: {restore_error}",
+                window.label()
+            );
+        }
+    } else {
+        if let Err(error) = window.emit("decorum-page-load", ()) {
+            log::warn!(
+                "failed to refresh decorum titlebar controls for {} after overlay setup: {error}",
+                window.label()
+            );
+        }
+        if let Err(error) = window.eval("document.dispatchEvent(new Event('DOMContentLoaded'));") {
+            log::warn!(
+                "failed to flush decorum titlebar DOMContentLoaded handlers for {}: {error}",
+                window.label()
+            );
+        }
+    }
+}
+
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+fn apply_workspace_decorum_chrome(window: &WebviewWindow, integrated: bool) {
+    apply_decorum_titlebar(window, integrated);
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
+fn apply_workspace_decorum_chrome(_window: &WebviewWindow, _integrated: bool) {}
 
 fn spawn_app_shell_action<R, F>(
     app: &AppHandle<R>,
@@ -1253,7 +1354,7 @@ fn tauri_accelerator(binding: &str) -> Option<String> {
     )
 }
 
-fn handle_terminal_menu<R: Runtime>(app: &AppHandle<R>, id: &str) -> Result<()> {
+fn handle_terminal_menu(app: &AppHandle, id: &str) -> Result<()> {
     match terminal_command_from_menu_id(id) {
         Some(TerminalMenuCommand::NewWindow) => open_main_window_route(app, None),
         Some(TerminalMenuCommand::CloseWindow) => focused_or_main_window(app)?
@@ -1326,9 +1427,9 @@ pub(crate) fn open_workspace_floating_window(
     .resizable(true)
     .center();
     #[cfg(target_os = "macos")]
-    let builder =
-        apply_main_window_builder_chrome(macos_integrated_titlebar_active(&app)?, builder);
+    let builder = apply_main_window_builder_chrome(integrated_titlebar_active(&app)?, builder);
     let window = builder.build().map_err(to_config_error)?;
+    apply_workspace_decorum_chrome(&window, integrated_titlebar_active(&app)?);
     focus_window(&window)
 }
 
@@ -1411,6 +1512,480 @@ pub(crate) fn show_pane_context_menu(app: AppHandle, input: PaneContextMenuInput
     window
         .popup_menu_at(&menu, LogicalPosition::new(input.x, input.y))
         .map_err(to_config_error)
+}
+
+#[tauri::command]
+#[specta::specta]
+pub(crate) fn show_app_menu(app: AppHandle, input: AppMenuPopupInput) -> Result<()> {
+    let menu = build_app_popup_menu(&app, input.root).map_err(to_config_error)?;
+    let window = app
+        .get_webview_window(&input.window_label)
+        .ok_or_else(|| invalid_error(format!("window {} not found", input.window_label)))?;
+    window
+        .popup_menu_at(&menu, LogicalPosition::new(input.x, input.y))
+        .map_err(to_config_error)
+}
+
+fn build_app_popup_menu<R: Runtime>(
+    app: &AppHandle<R>,
+    root: AppMenuRoot,
+) -> tauri::Result<Menu<R>> {
+    let labels = menu_text(resolve_ui_language(app));
+    let keybindings = terminal_menu_keybindings(app);
+    match root {
+        AppMenuRoot::File => build_file_popup_menu(app, labels, &keybindings),
+        AppMenuRoot::Edit => build_edit_popup_menu(app, labels, &keybindings),
+        AppMenuRoot::View => build_view_popup_menu(app, labels),
+        AppMenuRoot::Window => build_window_popup_menu(app, labels),
+    }
+}
+
+fn build_file_popup_menu<R: Runtime>(
+    app: &AppHandle<R>,
+    labels: MenuText,
+    keybindings: &TerminalMenuKeybindings,
+) -> tauri::Result<Menu<R>> {
+    let root = config::ensure_layout(app).map_err(config_to_io)?;
+    let profiles = config::list_profiles_impl_from_app(app).map_err(config_to_io)?;
+    let new_window =
+        terminal_menu_item(app, MENU_NEW_WINDOW, labels.new_window, Some("CmdOrCtrl+N"))?;
+    let new_tab = terminal_menu_item(app, MENU_NEW_TAB, labels.new_tab, Some("CmdOrCtrl+T"))?;
+    let split_right = terminal_menu_item(app, MENU_SPLIT_RIGHT, labels.split_right, None::<&str>)?;
+    let split_left = terminal_menu_item(app, MENU_SPLIT_LEFT, labels.split_left, None::<&str>)?;
+    let split_down = terminal_menu_item(app, MENU_SPLIT_DOWN, labels.split_down, None::<&str>)?;
+    let split_up = terminal_menu_item(app, MENU_SPLIT_UP, labels.split_up, None::<&str>)?;
+    let close = terminal_menu_item(app, MENU_CLOSE, labels.close, Some("CmdOrCtrl+W"))?;
+    let close_tab = terminal_menu_item(
+        app,
+        MENU_CLOSE_TAB,
+        labels.close_tab,
+        Some("CmdOrCtrl+Shift+W"),
+    )?;
+    let close_window = terminal_menu_item(
+        app,
+        MENU_CLOSE_WINDOW,
+        labels.close_window,
+        Some("CmdOrCtrl+Shift+Alt+W"),
+    )?;
+    let command_palette = terminal_menu_item(
+        app,
+        MENU_COMMAND_PALETTE,
+        labels.command_palette,
+        keybindings.open_command_palette.as_deref(),
+    )?;
+    let settings = MenuItem::with_id(
+        app,
+        MENU_SETTINGS,
+        labels.settings,
+        true,
+        Some("CmdOrCtrl+,"),
+    )?;
+    let profile_new = MenuItem::with_id(
+        app,
+        MENU_PROFILE_NEW,
+        labels.profile_new,
+        true,
+        None::<&str>,
+    )?;
+    let profile_edit = MenuItem::with_id(
+        app,
+        MENU_PROFILE_EDIT,
+        labels.profile_edit,
+        true,
+        None::<&str>,
+    )?;
+    let profile_delete = MenuItem::with_id(
+        app,
+        MENU_PROFILE_DELETE,
+        labels.profile_delete,
+        true,
+        None::<&str>,
+    )?;
+    let separator_profile = PredefinedMenuItem::separator(app)?;
+    let mut profile_items: Vec<CheckMenuItem<R>> = Vec::new();
+    for profile in profiles {
+        profile_items.push(CheckMenuItem::with_id(
+            app,
+            format!("{PROFILE_SWITCH_PREFIX}{}", profile.name),
+            &profile.name,
+            true,
+            profile.name == root.active_profile,
+            None::<&str>,
+        )?);
+    }
+    let mut profile_children: Vec<&dyn tauri::menu::IsMenuItem<R>> = vec![
+        &profile_new,
+        &profile_delete,
+        &profile_edit,
+        &separator_profile,
+    ];
+    for item in &profile_items {
+        profile_children.push(item);
+    }
+    let profile_menu = Submenu::with_items(app, labels.profile, true, &profile_children)?;
+    let sep1 = PredefinedMenuItem::separator(app)?;
+    let sep2 = PredefinedMenuItem::separator(app)?;
+    let sep3 = PredefinedMenuItem::separator(app)?;
+    Menu::with_items(
+        app,
+        &[
+            &new_window,
+            &new_tab,
+            &sep1,
+            &split_right,
+            &split_left,
+            &split_down,
+            &split_up,
+            &sep2,
+            &close,
+            &close_tab,
+            &close_window,
+            &sep3,
+            &command_palette,
+            &settings,
+            &profile_menu,
+        ],
+    )
+}
+
+fn build_edit_popup_menu<R: Runtime>(
+    app: &AppHandle<R>,
+    labels: MenuText,
+    keybindings: &TerminalMenuKeybindings,
+) -> tauri::Result<Menu<R>> {
+    let undo = terminal_menu_item(app, MENU_UNDO, labels.undo, Some("CmdOrCtrl+Z"))?;
+    let redo = terminal_menu_item(app, MENU_REDO, labels.redo, Some("CmdOrCtrl+Shift+Z"))?;
+    let copy = terminal_menu_item(app, MENU_COPY, labels.copy, Some("CmdOrCtrl+C"))?;
+    let paste = terminal_menu_item(app, MENU_PASTE, labels.paste, Some("CmdOrCtrl+V"))?;
+    let paste_selection = terminal_menu_item_enabled(
+        app,
+        MENU_PASTE_SELECTION,
+        labels.paste_selection,
+        false,
+        None::<&str>,
+    )?;
+    let select_all =
+        terminal_menu_item(app, MENU_SELECT_ALL, labels.select_all, Some("CmdOrCtrl+A"))?;
+    let find = terminal_menu_item(app, MENU_FIND, labels.find, keybindings.find.as_deref())?;
+    let find_next = terminal_menu_item(
+        app,
+        MENU_FIND_NEXT,
+        labels.find_next,
+        keybindings.find_next.as_deref(),
+    )?;
+    let find_previous = terminal_menu_item(
+        app,
+        MENU_FIND_PREVIOUS,
+        labels.find_previous,
+        keybindings.find_previous.as_deref(),
+    )?;
+    let hide_find_bar =
+        terminal_menu_item(app, MENU_HIDE_FIND_BAR, labels.hide_find_bar, None::<&str>)?;
+    let use_selection_for_find = terminal_menu_item(
+        app,
+        MENU_USE_SELECTION_FOR_FIND,
+        labels.use_selection_for_find,
+        Some("CmdOrCtrl+E"),
+    )?;
+    let jump_to_selection = terminal_menu_item(
+        app,
+        MENU_JUMP_TO_SELECTION,
+        labels.jump_to_selection,
+        Some("CmdOrCtrl+J"),
+    )?;
+    let find_menu = Submenu::with_items(
+        app,
+        labels.find_menu,
+        true,
+        &[
+            &find,
+            &find_next,
+            &find_previous,
+            &hide_find_bar,
+            &use_selection_for_find,
+            &jump_to_selection,
+        ],
+    )?;
+    let sep1 = PredefinedMenuItem::separator(app)?;
+    let sep2 = PredefinedMenuItem::separator(app)?;
+    let sep3 = PredefinedMenuItem::separator(app)?;
+    Menu::with_items(
+        app,
+        &[
+            &undo,
+            &redo,
+            &sep1,
+            &copy,
+            &paste,
+            &paste_selection,
+            &select_all,
+            &sep2,
+            &find_menu,
+            &sep3,
+        ],
+    )
+}
+
+fn build_view_popup_menu<R: Runtime>(
+    app: &AppHandle<R>,
+    labels: MenuText,
+) -> tauri::Result<Menu<R>> {
+    let reset_font_size = terminal_menu_item(
+        app,
+        MENU_RESET_FONT_SIZE,
+        labels.reset_font_size,
+        Some("CmdOrCtrl+0"),
+    )?;
+    let increase_font_size = terminal_menu_item(
+        app,
+        MENU_INCREASE_FONT_SIZE,
+        labels.increase_font_size,
+        Some("CmdOrCtrl+="),
+    )?;
+    let decrease_font_size = terminal_menu_item(
+        app,
+        MENU_DECREASE_FONT_SIZE,
+        labels.decrease_font_size,
+        Some("CmdOrCtrl+-"),
+    )?;
+    let change_tab_title = terminal_menu_item(
+        app,
+        MENU_CHANGE_TAB_TITLE,
+        labels.change_tab_title,
+        None::<&str>,
+    )?;
+    let toggle_read_only = terminal_menu_item(
+        app,
+        MENU_TOGGLE_READ_ONLY,
+        labels.toggle_read_only,
+        None::<&str>,
+    )?;
+    let sep = PredefinedMenuItem::separator(app)?;
+    Menu::with_items(
+        app,
+        &[
+            &reset_font_size,
+            &increase_font_size,
+            &decrease_font_size,
+            &sep,
+            &change_tab_title,
+            &toggle_read_only,
+        ],
+    )
+}
+
+fn build_window_popup_menu<R: Runtime>(
+    app: &AppHandle<R>,
+    labels: MenuText,
+) -> tauri::Result<Menu<R>> {
+    let minimize = terminal_menu_item(app, MENU_MINIMIZE, labels.minimize, Some("CmdOrCtrl+M"))?;
+    let zoom = terminal_menu_item(app, MENU_ZOOM, labels.zoom, None::<&str>)?;
+    let fill = terminal_menu_item(app, MENU_FILL, labels.fill, None::<&str>)?;
+    let center = terminal_menu_item(app, MENU_CENTER, labels.center, None::<&str>)?;
+    let move_resize_left = terminal_menu_item(
+        app,
+        MENU_MOVE_RESIZE_LEFT,
+        labels.move_resize_left,
+        None::<&str>,
+    )?;
+    let move_resize_right = terminal_menu_item(
+        app,
+        MENU_MOVE_RESIZE_RIGHT,
+        labels.move_resize_right,
+        None::<&str>,
+    )?;
+    let move_resize_top = terminal_menu_item(
+        app,
+        MENU_MOVE_RESIZE_TOP,
+        labels.move_resize_top,
+        None::<&str>,
+    )?;
+    let move_resize_bottom = terminal_menu_item(
+        app,
+        MENU_MOVE_RESIZE_BOTTOM,
+        labels.move_resize_bottom,
+        None::<&str>,
+    )?;
+    let move_resize_top_left = terminal_menu_item(
+        app,
+        MENU_MOVE_RESIZE_TOP_LEFT,
+        labels.move_resize_top_left,
+        None::<&str>,
+    )?;
+    let move_resize_top_right = terminal_menu_item(
+        app,
+        MENU_MOVE_RESIZE_TOP_RIGHT,
+        labels.move_resize_top_right,
+        None::<&str>,
+    )?;
+    let move_resize_bottom_left = terminal_menu_item(
+        app,
+        MENU_MOVE_RESIZE_BOTTOM_LEFT,
+        labels.move_resize_bottom_left,
+        None::<&str>,
+    )?;
+    let move_resize_bottom_right = terminal_menu_item(
+        app,
+        MENU_MOVE_RESIZE_BOTTOM_RIGHT,
+        labels.move_resize_bottom_right,
+        None::<&str>,
+    )?;
+    let move_resize_menu = Submenu::with_items(
+        app,
+        labels.move_resize,
+        true,
+        &[
+            &move_resize_left,
+            &move_resize_right,
+            &move_resize_top,
+            &move_resize_bottom,
+            &move_resize_top_left,
+            &move_resize_top_right,
+            &move_resize_bottom_left,
+            &move_resize_bottom_right,
+        ],
+    )?;
+    let toggle_full_screen = terminal_menu_item(
+        app,
+        MENU_TOGGLE_FULL_SCREEN,
+        labels.toggle_full_screen,
+        Some("CmdOrCtrl+Ctrl+F"),
+    )?;
+    let show_previous_tab = terminal_menu_item(
+        app,
+        MENU_SHOW_PREVIOUS_TAB,
+        labels.show_previous_tab,
+        Some("CmdOrCtrl+Shift+["),
+    )?;
+    let show_next_tab = terminal_menu_item(
+        app,
+        MENU_SHOW_NEXT_TAB,
+        labels.show_next_tab,
+        Some("CmdOrCtrl+Shift+]"),
+    )?;
+    let move_tab_to_new_window = terminal_menu_item(
+        app,
+        MENU_MOVE_TAB_TO_NEW_WINDOW,
+        labels.move_tab_to_new_window,
+        None::<&str>,
+    )?;
+    let zoom_split = terminal_menu_item(app, MENU_ZOOM_SPLIT, labels.zoom_split, None::<&str>)?;
+    let select_previous_split = terminal_menu_item(
+        app,
+        MENU_SELECT_PREVIOUS_SPLIT,
+        labels.select_previous_split,
+        None::<&str>,
+    )?;
+    let select_next_split = terminal_menu_item(
+        app,
+        MENU_SELECT_NEXT_SPLIT,
+        labels.select_next_split,
+        None::<&str>,
+    )?;
+    let select_split_left = terminal_menu_item(
+        app,
+        MENU_SELECT_SPLIT_LEFT,
+        labels.move_resize_left,
+        None::<&str>,
+    )?;
+    let select_split_right = terminal_menu_item(
+        app,
+        MENU_SELECT_SPLIT_RIGHT,
+        labels.move_resize_right,
+        None::<&str>,
+    )?;
+    let select_split_up = terminal_menu_item(
+        app,
+        MENU_SELECT_SPLIT_UP,
+        labels.move_resize_top,
+        None::<&str>,
+    )?;
+    let select_split_down = terminal_menu_item(
+        app,
+        MENU_SELECT_SPLIT_DOWN,
+        labels.move_resize_bottom,
+        None::<&str>,
+    )?;
+    let select_split_menu = Submenu::with_items(
+        app,
+        labels.select_split,
+        true,
+        &[
+            &select_split_left,
+            &select_split_right,
+            &select_split_up,
+            &select_split_down,
+        ],
+    )?;
+    let resize_split_left = terminal_menu_item(
+        app,
+        MENU_RESIZE_SPLIT_LEFT,
+        labels.move_resize_left,
+        None::<&str>,
+    )?;
+    let resize_split_right = terminal_menu_item(
+        app,
+        MENU_RESIZE_SPLIT_RIGHT,
+        labels.move_resize_right,
+        None::<&str>,
+    )?;
+    let resize_split_up = terminal_menu_item(
+        app,
+        MENU_RESIZE_SPLIT_UP,
+        labels.move_resize_top,
+        None::<&str>,
+    )?;
+    let resize_split_down = terminal_menu_item(
+        app,
+        MENU_RESIZE_SPLIT_DOWN,
+        labels.move_resize_bottom,
+        None::<&str>,
+    )?;
+    let resize_split_menu = Submenu::with_items(
+        app,
+        labels.resize_split,
+        true,
+        &[
+            &resize_split_left,
+            &resize_split_right,
+            &resize_split_up,
+            &resize_split_down,
+        ],
+    )?;
+    let bring_all_to_front = terminal_menu_item(
+        app,
+        MENU_BRING_ALL_TO_FRONT,
+        labels.bring_all_to_front,
+        None::<&str>,
+    )?;
+    let sep1 = PredefinedMenuItem::separator(app)?;
+    let sep2 = PredefinedMenuItem::separator(app)?;
+    let sep3 = PredefinedMenuItem::separator(app)?;
+    let sep4 = PredefinedMenuItem::separator(app)?;
+    Menu::with_items(
+        app,
+        &[
+            &minimize,
+            &zoom,
+            &fill,
+            &center,
+            &move_resize_menu,
+            &sep1,
+            &toggle_full_screen,
+            &sep2,
+            &show_previous_tab,
+            &show_next_tab,
+            &move_tab_to_new_window,
+            &sep3,
+            &zoom_split,
+            &select_previous_split,
+            &select_next_split,
+            &select_split_menu,
+            &resize_split_menu,
+            &sep4,
+            &bring_all_to_front,
+        ],
+    )
 }
 
 #[tauri::command]
@@ -1733,7 +2308,7 @@ fn open_host_manager<R: Runtime>(app: &AppHandle<R>) -> Result<()> {
     focus_window(&window)
 }
 
-fn open_main_window_route<R: Runtime>(app: &AppHandle<R>, route: Option<&str>) -> Result<()> {
+fn open_main_window_route(app: &AppHandle, route: Option<&str>) -> Result<()> {
     let label = next_main_window_label(app);
     let route = route.unwrap_or_default().trim_start_matches('/');
     let builder = WebviewWindowBuilder::new(app, label, WebviewUrl::App(route.into()))
@@ -1743,8 +2318,9 @@ fn open_main_window_route<R: Runtime>(app: &AppHandle<R>, route: Option<&str>) -
         .resizable(true)
         .center();
     #[cfg(target_os = "macos")]
-    let builder = apply_main_window_builder_chrome(macos_integrated_titlebar_active(app)?, builder);
+    let builder = apply_main_window_builder_chrome(integrated_titlebar_active(app)?, builder);
     let window = builder.build().map_err(to_config_error)?;
+    apply_workspace_decorum_chrome(&window, integrated_titlebar_active(app)?);
     focus_window(&window)
 }
 
@@ -1783,6 +2359,12 @@ fn is_main_window_label(label: &str) -> bool {
         || label
             .strip_prefix("main-")
             .is_some_and(|suffix| suffix.chars().all(|item| item.is_ascii_digit()))
+}
+
+fn is_workspace_chrome_window_label(label: &str) -> bool {
+    label == MAIN_WINDOW_LABEL
+        || label.starts_with("main-")
+        || label.starts_with("workspace-floating-")
 }
 
 fn fallback_main_window_label<R: Runtime>(app: &AppHandle<R>) -> Option<String> {

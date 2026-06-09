@@ -417,16 +417,47 @@ It does not store:
 - Tree expansion state
 - temporary drag state
 
-### macOS integrated title bar
+### Desktop integrated title bar
 
-The macOS main window can use an overlay title bar so the workspace tab bar can share the line with traffic-light controls:
+Desktop Workspace windows can use an integrated title bar so the horizontal
+Workspace tab bar shares the native title-bar line:
 
 ```toml
 [ui]
-macos_integrated_titlebar = true
+integrated_titlebar = true
+integrated_titlebar_single_row = false
 ```
 
-This defaults to `true` when absent. The setting is macOS-only and applies only when the workspace tab bar can safely share the title bar.
+This defaults to `true` when absent. The setting applies only on desktop
+platforms and only while the Workspace tab bar is horizontal. Vertical tab
+layouts keep the standard system title bar.
+
+macOS uses the existing native overlay title bar and positions the traffic-light
+controls around the Workspace tabs. Windows and Linux use
+`tauri-plugin-decorum` with platform-default window controls. If decorum cannot
+create its overlay title bar, Nocturne logs a warning and falls back to the
+standard system title bar without blocking startup.
+
+Windows and Linux integrated title bars keep app menu functionality by showing
+only the `File`, `Edit`, `View`, and `Window` root buttons in the WebView
+titlebar line. Clicking a root asks the Rust app shell to show the matching
+native Tauri popup menu with `popup_menu_at`, reusing the same menu item IDs as
+the app menu. This preserves the decorum visual chrome while keeping menu
+selection, focus, and platform popup behavior native.
+
+`ui.integrated_titlebar_single_row` is a Windows/Linux-only layout preference
+and defaults to `false`. With the default off state, the integrated titlebar
+uses a Zotero-style two-row layout: app menu roots sit on the first row beside
+the decorum window controls, and Workspace tabs sit on the second row. When set
+to `true`, Windows/Linux place app menu roots and Workspace tabs on the same
+row. macOS always treats this setting as off and does not show it in Settings,
+because macOS keeps the native menu bar and native overlay traffic-light
+behavior.
+
+Integrated chrome is limited to Workspace windows: the main window, additional
+Workspace windows, and floating Workspace/ToolTab mirror windows. Settings,
+Host Manager, profile dialogs, SSH prompts, and other utility dialogs keep
+standard title bars.
 
 ### Effective config
 
@@ -434,7 +465,8 @@ This defaults to `true` when absent. The setting is macOS-only and applies only 
 [ui]
 theme = "system"
 language = "en"
-macos_integrated_titlebar = true
+integrated_titlebar = true
+integrated_titlebar_single_row = false
 
 [editor]
 tab_width = 4

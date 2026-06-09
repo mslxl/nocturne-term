@@ -91,18 +91,60 @@ On first use, the frontend defaults to Chinese when `navigator.language` starts 
 
 User-facing frontend text should use the lightweight dictionary under `src/lib/i18n/`.
 
-## macOS Integrated Title Bar
+## Integrated Title Bar
 
-On macOS, the main window can place the horizontal workspace tab bar in the native title bar:
+Desktop Workspace windows can place the horizontal Workspace tab bar in the
+native title bar:
 
 ```toml
 [ui]
-macos_integrated_titlebar = true
+integrated_titlebar = true
+integrated_titlebar_single_row = false # Windows/Linux only
 ```
 
-The setting defaults to `true` on macOS and is ignored on other platforms. It is only applied when the workspace tab bar can safely share the title bar; layouts that would collide with traffic-light controls keep the standard native title bar.
+The setting defaults to `true` and is available on desktop platforms. It is only
+applied when the Workspace tab bar is horizontal; vertical tab layouts keep the
+standard system title bar.
 
-The integrated tab bar must leave a draggable margin around the controls. The workspace tab bar root owns `data-tauri-drag-region="deep"` only in this mode, while tab buttons remain normal interactive controls.
+macOS uses the native overlay title bar and traffic-light positioning already
+used by the app. Windows and Linux use `tauri-plugin-decorum` with
+platform-default controls so Snap Layout and native window interactions remain
+available. If decorum fails to create its overlay, the app logs a warning and
+keeps the standard system title bar.
+
+On Windows and Linux, decorum's overlay can replace the visual space where a
+traditional menu bar would normally sit. To keep the integrated visual effect
+without losing app-menu behavior, the integrated title bar renders only the
+root menu buttons (`File`, `Edit`, `View`, `Window`) in the WebView. Activating
+one of those roots calls the Rust app shell, which opens the corresponding
+native Tauri popup menu at the button location. Do not replace this with a
+WebView-drawn menu overlay; menu actions should continue through the same
+native menu IDs handled by the app shell.
+
+The Windows/Linux titlebar menu layout is controlled by:
+
+```toml
+[ui]
+integrated_titlebar_single_row = false
+```
+
+This setting defaults to `false`. When it is off, the Windows/Linux integrated
+titlebar follows a Zotero-style layout: `File`, `Edit`, `View`, and `Window`
+occupy the first titlebar row with the window controls, and Workspace tabs use
+the row below. When it is on, the app menu roots and Workspace tabs share one
+row, matching the earlier compact layout. This setting is shown only on Windows
+and Linux. On macOS it is always treated as off because macOS uses the native
+menu bar and native traffic-light overlay behavior.
+
+Integrated title bars apply only to Workspace windows: the main Workspace
+window, additional Workspace windows, and floating Workspace/ToolTab mirror
+windows. Settings, Host Manager, profile dialogs, SSH prompts, and utility
+dialogs keep standard native title bars.
+
+The integrated tab bar must leave safe empty drag zones around controls.
+Workspace tab buttons, close buttons, Host picker buttons, ToolTab chrome, Dock
+resize handles, Terminal content, Files selection surfaces, and context-menu
+targets must remain normal interactive controls.
 
 ## Immediate Refresh
 
@@ -154,7 +196,7 @@ Settings should expose:
 
 - workspace reconnect strategy: visible auto reconnect, manual reconnect, safe auto restore
 - dock and workspace keybindings
-- macOS integrated title bar behavior
+- desktop integrated title bar behavior
 
 Top-level Workspace tabs represent host-bound workspaces. Inner Tool tabs represent Files, Terminal, and Transfers surfaces. Do not add settings that describe top-level tabs as terminal sessions.
 
