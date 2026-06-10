@@ -25,6 +25,8 @@
     "test:tauri:tooltab-workspace-hover-preview": "node tests/tauri/tooltab-workspace-hover-preview.test.mjs",
     "test:tauri:floating-window-open-keeps-main-responsive": "node tests/tauri/floating-window-open-keeps-main-responsive.test.mjs",
     "test:tauri:files-toolbar-actions-do-not-overflow-narrow-tooltab": "node tests/tauri/files-toolbar-actions-do-not-overflow-narrow-tooltab.test.mjs",
+    "test:tauri:files-image-preview-renders": "node tests/tauri/files-image-preview-renders.test.mjs",
+    "test:tauri:files-refresh-preserves-tree-state": "node tests/tauri/files-refresh-preserves-tree-state.test.mjs",
     "test:tauri:files-columns-view-shows-content": "node tests/tauri/files-columns-view-shows-content.test.mjs",
     "test:tauri:files-columns-directory-double-click-keeps-window": "node tests/tauri/files-columns-directory-double-click-keeps-window.test.mjs",
     "test:tauri:files-columns-file-preview-third-column": "node tests/tauri/files-columns-file-preview-third-column.test.mjs",
