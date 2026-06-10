@@ -45,7 +45,7 @@ export function removeSlot(layout: DockLayout, slotId: DisplaySlotId): { layout:
   }
   const result = removeSlotRecursive(layout, slotId);
   if (!result.removed) throw new Error(`display slot ${slotId} was not removed`);
-  return { layout: collapseSingleChild(result.layout), removed: result.removed };
+  return { layout: cleanupDockLayout(result.layout), removed: result.removed };
 }
 
 export function replaceSlot(layout: DockLayout, slotId: DisplaySlotId, replacement: ToolSlot): DockLayout {
@@ -145,11 +145,13 @@ export function closeOwnerToolTab(snapshot: WorkspaceLayoutSnapshot, toolTabId: 
     workspaces: snapshot.workspaces.map((workspace) => ({
       ...workspace,
       ownedToolTabIds: workspace.ownedToolTabIds.filter((id) => id !== toolTabId),
-      layout: removeOrCloseToolSlots(workspace.layout, toolTabId, closedSource, workspace.id === toolTab.ownerWorkspaceId),
+      layout: requireCleanedDockLayout(
+        removeOrCloseToolSlots(workspace.layout, toolTabId, closedSource, workspace.id === toolTab.ownerWorkspaceId),
+      ),
     })),
     floatingWindows: snapshot.floatingWindows.map((window) => ({
       ...window,
-      layout: removeOrCloseToolSlots(window.layout, toolTabId, closedSource, true),
+      layout: requireCleanedDockLayout(removeOrCloseToolSlots(window.layout, toolTabId, closedSource, false)),
     })),
     toolTabs: snapshot.toolTabs.filter((item) => item.id !== toolTabId),
   };
@@ -296,6 +298,41 @@ function collapseSingleChild(layout: DockLayout | null): DockLayout | null {
     .filter((child): child is DockLayout => child !== null);
   if (children.length === 0) return null;
   if (children.length === 1) return collapseSingleChild(children[0] ?? null);
+  return {
+    ...layout,
+    children,
+    ratios: normalizeDockRatios(layout.ratios.slice(0, children.length)),
+  };
+}
+
+function cleanupDockLayout(layout: DockLayout | null): DockLayout | null {
+  return collapseSingleChild(removeRedundantEmptyContentGroups(layout));
+}
+
+function requireCleanedDockLayout(layout: DockLayout): DockLayout {
+  const cleaned = cleanupDockLayout(layout);
+  if (!cleaned) throw new Error("dock layout cleanup removed every group");
+  return cleaned;
+}
+
+function removeRedundantEmptyContentGroups(layout: DockLayout | null): DockLayout | null {
+  if (!layout || !hasNonEmptyContentGroup(layout)) return layout;
+  return removeEmptyContentGroups(layout);
+}
+
+function hasNonEmptyContentGroup(layout: DockLayout): boolean {
+  if (layout.kind === "group") return layout.role === "content" && layout.slots.length > 0;
+  return layout.children.some((child) => hasNonEmptyContentGroup(child));
+}
+
+function removeEmptyContentGroups(layout: DockLayout): DockLayout | null {
+  if (layout.kind === "group") {
+    return layout.role === "content" && layout.slots.length === 0 ? null : layout;
+  }
+  const children = layout.children
+    .map((child) => removeEmptyContentGroups(child))
+    .filter((child): child is DockLayout => child !== null);
+  if (children.length === 0) return null;
   return {
     ...layout,
     children,

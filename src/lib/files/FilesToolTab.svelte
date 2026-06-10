@@ -275,9 +275,12 @@
   });
 
   async function refresh() {
-    clearTreeDirectoryCache();
+    const expandedDirectories = Object.entries(expandedTreePaths)
+      .filter(([, expanded]) => expanded)
+      .map(([directoryPath]) => directoryPath);
     await queryClient.invalidateQueries({ queryKey: ["files", "list", toolTab.id] });
-    await loadFilesForPath(path, { hostId: toolTab.host_id, toolTabId: toolTab.id, force: true });
+    await loadFilesForPath(path ?? result?.provider.current_path ?? null, { hostId: toolTab.host_id, toolTabId: toolTab.id, force: true });
+    await Promise.all(expandedDirectories.map((directoryPath) => reloadDirectoryChildren(directoryPath)));
   }
 
   async function refreshAfterMutation() {
@@ -413,27 +416,32 @@
   async function loadDirectoryChildren(entry: FileEntry) {
     if (entry.kind !== "directory") return;
     if (treeChildrenByPath[entry.path] || treeLoadingByPath[entry.path]) return;
-    treeLoadingByPath = { ...treeLoadingByPath, [entry.path]: true };
-    const { [entry.path]: _previousError, ...remainingErrors } = treeErrorByPath;
+    await reloadDirectoryChildren(entry.path);
+  }
+
+  async function reloadDirectoryChildren(directoryPath: string) {
+    if (treeLoadingByPath[directoryPath]) return;
+    treeLoadingByPath = { ...treeLoadingByPath, [directoryPath]: true };
+    const { [directoryPath]: _previousError, ...remainingErrors } = treeErrorByPath;
     treeErrorByPath = remainingErrors;
     try {
       const childResult = await unwrapCommand(
         commands.listFiles({
-          path: entry.path,
+          path: directoryPath,
           ...providerCommandAuth(),
         }),
       );
       treeChildrenByPath = {
         ...treeChildrenByPath,
-        [entry.path]: childResult.entries,
+        [directoryPath]: childResult.entries,
       };
     } catch (error) {
       treeErrorByPath = {
         ...treeErrorByPath,
-        [entry.path]: error instanceof Error ? error.message : String(error),
+        [directoryPath]: error instanceof Error ? error.message : String(error),
       };
     } finally {
-      const { [entry.path]: _completed, ...remainingLoading } = treeLoadingByPath;
+      const { [directoryPath]: _completed, ...remainingLoading } = treeLoadingByPath;
       treeLoadingByPath = remainingLoading;
     }
   }
@@ -937,12 +945,6 @@
         children.filter((entry) => showHidden || !entry.name.startsWith(".")),
       ]),
     );
-  }
-
-  function clearTreeDirectoryCache() {
-    treeChildrenByPath = {};
-    treeLoadingByPath = {};
-    treeErrorByPath = {};
   }
 
   function findEntryByPath(value: string) {
@@ -1642,7 +1644,7 @@
     </form>
   {/if}
 
-  {#if filesLoading}
+  {#if filesLoading && !result}
     <div class="files-status">Loading...</div>
   {:else if filesError}
     <div class="files-status error">{filesError instanceof Error ? filesError.message : String(filesError)}</div>

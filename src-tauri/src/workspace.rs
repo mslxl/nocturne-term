@@ -1207,12 +1207,22 @@ fn close_owner_tool_tab(snapshot: &mut WorkspaceLayoutSnapshot, tool_tab_id_valu
     for workspace in &mut snapshot.workspaces {
         let remove_owned = workspace.id == tool_tab.owner_workspace_id;
         workspace.owned_tool_tab_ids.retain(|id| id != tool_tab_id_value);
-        workspace.layout =
-            remove_or_close_tool_slots(workspace.layout.clone(), tool_tab_id_value, &closed_source, remove_owned)?;
+        workspace.layout = cleanup_dock_layout(Some(remove_or_close_tool_slots(
+            workspace.layout.clone(),
+            tool_tab_id_value,
+            &closed_source,
+            remove_owned,
+        )?))?
+        .ok_or_else(|| invalid_error("dock layout cleanup removed every group"))?;
     }
     for window in &mut snapshot.floating_windows {
-        window.layout =
-            remove_or_close_tool_slots(window.layout.clone(), tool_tab_id_value, &closed_source, false)?;
+        window.layout = cleanup_dock_layout(Some(remove_or_close_tool_slots(
+            window.layout.clone(),
+            tool_tab_id_value,
+            &closed_source,
+            false,
+        )?))?
+        .ok_or_else(|| invalid_error("dock layout cleanup removed every group"))?;
     }
     snapshot.tool_tabs.retain(|item| item.id != tool_tab_id_value);
     Ok(())
@@ -1228,7 +1238,7 @@ fn remove_slot(
             "display slot {slot_id_value} not found"
         )));
     }
-    collapse_single_child(layout)
+    cleanup_dock_layout(layout)
 }
 
 fn remove_slot_for_move(
@@ -1236,7 +1246,7 @@ fn remove_slot_for_move(
     slot_id_value: &str,
 ) -> Result<(WorkspaceDockLayout, Option<WorkspaceToolSlot>)> {
     let (layout, removed) = remove_slot_recursive(layout, slot_id_value)?;
-    let layout = collapse_single_child(layout)?
+    let layout = cleanup_dock_layout(layout)?
         .ok_or_else(|| invalid_error("cannot move the last tool slot in a workspace"))?;
     Ok((layout, removed))
 }
@@ -1625,6 +1635,74 @@ fn collapse_single_child(layout: Option<WorkspaceDockLayout>) -> Result<Option<W
             }
         }
         other => Ok(other),
+    }
+}
+
+fn cleanup_dock_layout(layout: Option<WorkspaceDockLayout>) -> Result<Option<WorkspaceDockLayout>> {
+    collapse_single_child(remove_redundant_empty_content_groups(layout)?)
+}
+
+fn remove_redundant_empty_content_groups(
+    layout: Option<WorkspaceDockLayout>,
+) -> Result<Option<WorkspaceDockLayout>> {
+    let Some(layout) = layout else {
+        return Ok(None);
+    };
+    if !has_non_empty_content_group(&layout) {
+        return Ok(Some(layout));
+    }
+    remove_empty_content_groups(layout)
+}
+
+fn has_non_empty_content_group(layout: &WorkspaceDockLayout) -> bool {
+    match layout {
+        WorkspaceDockLayout::Group { role, slots, .. } => {
+            *role == WorkspaceDockGroupRole::Content && !slots.is_empty()
+        }
+        WorkspaceDockLayout::Split { children, .. } => children.iter().any(has_non_empty_content_group),
+    }
+}
+
+fn remove_empty_content_groups(layout: WorkspaceDockLayout) -> Result<Option<WorkspaceDockLayout>> {
+    match layout {
+        WorkspaceDockLayout::Group {
+            id,
+            role,
+            slots,
+            active_slot_id,
+        } => {
+            if role == WorkspaceDockGroupRole::Content && slots.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(WorkspaceDockLayout::Group {
+                    id,
+                    role,
+                    slots,
+                    active_slot_id,
+                }))
+            }
+        }
+        WorkspaceDockLayout::Split {
+            direction,
+            children,
+            ratios,
+        } => {
+            let mut next_children = Vec::new();
+            for child in children {
+                if let Some(child) = remove_empty_content_groups(child)? {
+                    next_children.push(child);
+                }
+            }
+            if next_children.is_empty() {
+                return Ok(None);
+            }
+            let next_len = next_children.len();
+            Ok(Some(WorkspaceDockLayout::Split {
+                direction,
+                children: next_children,
+                ratios: normalize_ratio_len(&ratios, next_len)?,
+            }))
+        }
     }
 }
 
@@ -2100,6 +2178,37 @@ mod tests {
     }
 
     #[test]
+    fn closing_split_content_group_collapses_empty_split_side() {
+        let mut snapshot = test_content_split_snapshot();
+
+        close_tool_slot(&mut snapshot, "workspace-a", "slot-terminal-right").unwrap();
+
+        let workspace = require_workspace(&snapshot, "workspace-a").unwrap();
+        assert!(!snapshot
+            .tool_tabs
+            .iter()
+            .any(|tool| tool.id == "terminal-right"));
+        assert_eq!(workspace.owned_tool_tab_ids, vec!["terminal-left"]);
+        let WorkspaceDockLayout::Group {
+            id,
+            role,
+            slots,
+            active_slot_id,
+        } = &workspace.layout
+        else {
+            panic!("expected remaining content group to replace the split");
+        };
+        assert_eq!(id, "group-left");
+        assert_eq!(*role, WorkspaceDockGroupRole::Content);
+        assert_eq!(active_slot_id, "slot-terminal-left");
+        assert_eq!(
+            slots.iter().map(workspace_slot_id).collect::<Vec<_>>(),
+            vec!["slot-terminal-left"]
+        );
+        validate_snapshot(&snapshot).unwrap();
+    }
+
+    #[test]
     fn closing_final_content_slot_preserves_empty_content_group() {
         let mut snapshot = test_split_snapshot();
 
@@ -2321,6 +2430,60 @@ mod tests {
                     slots: vec![WorkspaceToolSlot::Owned {
                         id: "slot-terminal-a".to_string(),
                         tool_tab_id: "terminal-a".to_string(),
+                    }],
+                },
+            ],
+        };
+        snapshot
+    }
+
+    fn test_content_split_snapshot() -> WorkspaceLayoutSnapshot {
+        let mut snapshot = test_snapshot();
+        snapshot.tool_tabs = vec![
+            WorkspaceToolTab {
+                id: "terminal-left".to_string(),
+                kind: WorkspaceToolKind::Terminal,
+                owner_workspace_id: "workspace-a".to_string(),
+                host_id: "host-a".to_string(),
+                title: "Left Shell".to_string(),
+            },
+            WorkspaceToolTab {
+                id: "terminal-right".to_string(),
+                kind: WorkspaceToolKind::Terminal,
+                owner_workspace_id: "workspace-a".to_string(),
+                host_id: "host-a".to_string(),
+                title: "Right Shell".to_string(),
+            },
+            WorkspaceToolTab {
+                id: "files-b".to_string(),
+                kind: WorkspaceToolKind::Files,
+                owner_workspace_id: "workspace-b".to_string(),
+                host_id: "host-b".to_string(),
+                title: "/home/b".to_string(),
+            },
+        ];
+        let workspace = require_workspace_mut(&mut snapshot, "workspace-a").unwrap();
+        workspace.owned_tool_tab_ids = vec!["terminal-left".to_string(), "terminal-right".to_string()];
+        workspace.layout = WorkspaceDockLayout::Split {
+            direction: WorkspaceDockDirection::Row,
+            ratios: vec![0.5, 0.5],
+            children: vec![
+                WorkspaceDockLayout::Group {
+                    id: "group-left".to_string(),
+                    role: WorkspaceDockGroupRole::Content,
+                    active_slot_id: "slot-terminal-left".to_string(),
+                    slots: vec![WorkspaceToolSlot::Owned {
+                        id: "slot-terminal-left".to_string(),
+                        tool_tab_id: "terminal-left".to_string(),
+                    }],
+                },
+                WorkspaceDockLayout::Group {
+                    id: "group-right".to_string(),
+                    role: WorkspaceDockGroupRole::Content,
+                    active_slot_id: "slot-terminal-right".to_string(),
+                    slots: vec![WorkspaceToolSlot::Owned {
+                        id: "slot-terminal-right".to_string(),
+                        tool_tab_id: "terminal-right".to_string(),
                     }],
                 },
             ],
