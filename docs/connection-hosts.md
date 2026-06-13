@@ -157,7 +157,13 @@ server_alive_interval = 30
 
 [files]
 default_path = "/var/www"
+
+[resources]
+target_os = "linux"       # optional: linux | macos | windows
+target_arch = "x86_64"    # optional: x86_64 | aarch64 | armv7 | i686
 ```
+
+`[resources].target_os` and `[resources].target_arch` are optional hints for Resource Monitor helper selection. Leave both unset to let Nocturne detect the remote target at runtime. If only one is set, Nocturne treats the resource target config as incomplete and asks the Workspace to choose rather than guessing.
 
 Example local host:
 
@@ -238,6 +244,8 @@ By default, creating a workspace for a host opens:
 
 - a Files tool tab
 - a Terminal tool tab
+- a Resource Monitor tool tab
+- a Transfers tool tab
 
 For SSH hosts, Files uses an SFTP provider. For local hosts, Files uses a local filesystem provider. The UI above the provider is shared and is defined in [Files ToolTab](files-tooltab.md).
 

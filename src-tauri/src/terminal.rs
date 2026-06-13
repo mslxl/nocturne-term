@@ -23,7 +23,10 @@ use crate::{
         connection_host_by_id, effective_application_config, resolve_openssh_proxy_jump_chain,
         ssh_known_hosts_path,
     },
-    error::{invalid_error, missing_error, ssh_workspace_challenge_error, terminal_error, ConfigError, Result},
+    error::{
+        invalid_error, missing_error, ssh_workspace_challenge_error, terminal_error, ConfigError,
+        Result,
+    },
     ssh_trust::{ssh_trust_target, SshTrustStore},
     terminal_schemes::{
         builtin_dark_scheme, builtin_light_scheme, scheme_to_terminal_theme,
@@ -34,12 +37,11 @@ use crate::{
         ConnectionProtocol, CreateHostTerminalSessionInput, ExistingTerminalSessionInput,
         LocalConnectionConfig, SshAuthTarget, SshConnectionConfig, SshCredentialChallenge,
         SshCredentialInput, SshCredentialKind, SshHostKeyChallenge, SshHostKeyChallengeKind,
-        SshWorkspaceChallenge,
-        TabBarOrientation, TerminalColorSchemeVariant, TerminalCursorStyle, TerminalExitEvent,
-        TerminalInput, TerminalOutputBacklogInput, TerminalOutputEvent, TerminalPadding,
-        TerminalRenderer, TerminalSessionInfo, TerminalSessionOwnershipInput, TerminalSettings,
-        TerminalSettingsInput, TerminalSizeInput, TerminalTheme, TerminalTransportKind,
-        TerminalTransportState, TerminalTransportStateEvent,
+        SshWorkspaceChallenge, TabBarOrientation, TerminalColorSchemeVariant, TerminalCursorStyle,
+        TerminalExitEvent, TerminalInput, TerminalOutputBacklogInput, TerminalOutputEvent,
+        TerminalPadding, TerminalRenderer, TerminalSessionInfo, TerminalSessionOwnershipInput,
+        TerminalSettings, TerminalSettingsInput, TerminalSizeInput, TerminalTheme,
+        TerminalTransportKind, TerminalTransportState, TerminalTransportStateEvent,
         WorkspaceSshVerificationResponse,
     },
     workspace,
@@ -1290,12 +1292,19 @@ pub(crate) fn authenticate_ssh_session(session: &Session, input: &SshWorkerInput
                 input.ssh.identity_file.clone(),
             )?;
             if session
-                .userauth_pubkey_file(username, None, path, Some(credential.credential.value.as_str()))
+                .userauth_pubkey_file(
+                    username,
+                    None,
+                    path,
+                    Some(credential.credential.value.as_str()),
+                )
                 .is_ok()
                 && session.authenticated()
             {
-                workspace_ssh_coordinator()
-                    .store_prompt_credential_after_success(passphrase_key, &credential.credential)?;
+                workspace_ssh_coordinator().store_prompt_credential_after_success(
+                    passphrase_key,
+                    &credential.credential,
+                )?;
                 if credential.save_credential {
                     write_ssh_secret_to_keyring(
                         &input.auth_target,
@@ -1327,8 +1336,10 @@ pub(crate) fn authenticate_ssh_session(session: &Session, input: &SshWorkerInput
                 .is_ok()
                 && session.authenticated()
             {
-                workspace_ssh_coordinator()
-                    .store_prompt_credential_after_success(passphrase_key, input.credential.as_ref().unwrap())?;
+                workspace_ssh_coordinator().store_prompt_credential_after_success(
+                    passphrase_key,
+                    input.credential.as_ref().unwrap(),
+                )?;
                 if input.save_credential {
                     write_ssh_secret_to_keyring(
                         &input.auth_target,
@@ -1371,10 +1382,15 @@ pub(crate) fn authenticate_ssh_session(session: &Session, input: &SshWorkerInput
     if let Some(password) =
         workspace_ssh_coordinator().read_workspace_encrypted_temporary_credential(&password_key)?
     {
-        if session.userauth_password(username, password.as_str()).is_ok() && session.authenticated() {
-        return Ok(());
+        if session
+            .userauth_password(username, password.as_str())
+            .is_ok()
+            && session.authenticated()
+        {
+            return Ok(());
         }
-        workspace_ssh_coordinator().remove_workspace_encrypted_temporary_credential(&password_key)?;
+        workspace_ssh_coordinator()
+            .remove_workspace_encrypted_temporary_credential(&password_key)?;
         let credential =
             request_credential_from_workspace(input, SshCredentialKind::Password, None)?;
         if session
@@ -1394,7 +1410,11 @@ pub(crate) fn authenticate_ssh_session(session: &Session, input: &SshWorkerInput
             }
             return Ok(());
         }
-        return Err(credential_challenge_error(input, SshCredentialKind::Password, None));
+        return Err(credential_challenge_error(
+            input,
+            SshCredentialKind::Password,
+            None,
+        ));
     }
     if matches!(
         input.credential.as_ref().map(|credential| &credential.kind),
@@ -1407,8 +1427,10 @@ pub(crate) fn authenticate_ssh_session(session: &Session, input: &SshWorkerInput
             .value
             .as_str();
         if session.userauth_password(username, password).is_ok() && session.authenticated() {
-            workspace_ssh_coordinator()
-                .store_prompt_credential_after_success(password_key, input.credential.as_ref().unwrap())?;
+            workspace_ssh_coordinator().store_prompt_credential_after_success(
+                password_key,
+                input.credential.as_ref().unwrap(),
+            )?;
             if input.save_credential {
                 write_ssh_secret_to_keyring(
                     &input.auth_target,
@@ -1450,7 +1472,12 @@ pub(crate) fn authenticate_ssh_session(session: &Session, input: &SshWorkerInput
         let expanded = expand_terminal_home(identity_file);
         let path = Path::new(&expanded);
         if session
-            .userauth_pubkey_file(username, None, path, Some(credential.credential.value.as_str()))
+            .userauth_pubkey_file(
+                username,
+                None,
+                path,
+                Some(credential.credential.value.as_str()),
+            )
             .is_ok()
             && session.authenticated()
         {
@@ -1504,7 +1531,11 @@ pub(crate) fn authenticate_ssh_session(session: &Session, input: &SshWorkerInput
             }
             return Ok(());
         }
-        return Err(credential_challenge_error(input, SshCredentialKind::Password, None));
+        return Err(credential_challenge_error(
+            input,
+            SshCredentialKind::Password,
+            None,
+        ));
     }
     Err(terminal_error(format!(
         "ssh authentication failed; supported methods: {methods}"
@@ -1544,13 +1575,15 @@ fn request_credential_from_workspace(
     else {
         return Err(terminal_error("failed to create SSH credential challenge"));
     };
-    update_ssh_input_transport_state(input, TerminalTransportState::WaitingForWorkspaceVerification);
-    let response = match workspace_ssh_coordinator()
-        .request_verification(input.app.as_ref(), challenge)
-    {
-        Ok(response) => response,
-        Err(error) => return Err(error),
-    };
+    update_ssh_input_transport_state(
+        input,
+        TerminalTransportState::WaitingForWorkspaceVerification,
+    );
+    let response =
+        match workspace_ssh_coordinator().request_verification(input.app.as_ref(), challenge) {
+            Ok(response) => response,
+            Err(error) => return Err(error),
+        };
     update_ssh_input_transport_state(input, TerminalTransportState::Authenticating);
     match response {
         WorkspaceSshVerificationResponse::Credential {
@@ -1560,12 +1593,12 @@ fn request_credential_from_workspace(
             credential,
             save_credential,
         }),
-        WorkspaceSshVerificationResponse::Cancel => Err(terminal_error("SSH verification canceled")),
-        WorkspaceSshVerificationResponse::HostKey { .. } => {
-            Err(terminal_error(format!(
-                "{message}: received a host-key response for a credential challenge"
-            )))
+        WorkspaceSshVerificationResponse::Cancel => {
+            Err(terminal_error("SSH verification canceled"))
         }
+        WorkspaceSshVerificationResponse::HostKey { .. } => Err(terminal_error(format!(
+            "{message}: received a host-key response for a credential challenge"
+        ))),
     }
 }
 
@@ -1607,7 +1640,9 @@ pub(crate) fn verify_ssh_host_key(session: &Session, input: &SshWorkerInput) -> 
         };
         let response = request_host_key_from_workspace(input, challenge)?;
         if !response.accept_new_host_key {
-            return Err(terminal_error("SSH host key was not trusted. Connection canceled."));
+            return Err(terminal_error(
+                "SSH host key was not trusted. Connection canceled.",
+            ));
         }
         store.upsert_key(target, key);
         return store.save(&input.trust_path);
@@ -1625,7 +1660,10 @@ fn request_host_key_from_workspace(
     input: &SshWorkerInput,
     challenge: SshHostKeyChallenge,
 ) -> Result<WorkspaceHostKeyResponse> {
-    update_ssh_input_transport_state(input, TerminalTransportState::WaitingForWorkspaceVerification);
+    update_ssh_input_transport_state(
+        input,
+        TerminalTransportState::WaitingForWorkspaceVerification,
+    );
     let response = workspace_ssh_coordinator().request_verification(
         input.app.as_ref(),
         SshWorkspaceChallenge::HostKey { challenge },
@@ -1639,10 +1677,12 @@ fn request_host_key_from_workspace(
             accept_new_host_key,
             update_changed_host_key,
         }),
-        WorkspaceSshVerificationResponse::Cancel => Err(terminal_error("SSH verification canceled")),
-        WorkspaceSshVerificationResponse::Credential { .. } => {
-            Err(terminal_error("SSH host-key verification received a credential response"))
+        WorkspaceSshVerificationResponse::Cancel => {
+            Err(terminal_error("SSH verification canceled"))
         }
+        WorkspaceSshVerificationResponse::Credential { .. } => Err(terminal_error(
+            "SSH host-key verification received a credential response",
+        )),
     }
 }
 

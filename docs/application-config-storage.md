@@ -354,6 +354,9 @@ text_preview_limit_bytes = 1048576
 image_preview_limit_bytes = 10485760
 toolbar_actions = ["up", "refresh", "new_folder", "paste", "upload_files", "upload_folder", "search", "view_mode", "path"]
 
+[resources]
+default_refresh_interval = "2s" # 1s | 2s | 5s | 10s
+
 [transfers]
 global_concurrency = 3
 per_host_concurrency = 2
@@ -406,12 +409,13 @@ The runtime state can store:
 - workspace host ids and user-renamed workspace titles
 - owned tool tabs
 - Dock layout tree and split ratios
-- floating windows that contain owned tool tabs
+- floating windows that contain mirror display slots for the current process
 - active dock groups and active tool tabs
 
 It does not store:
 
 - mirror slots
+- floating mirror slots
 - scroll positions
 - hover or focus state
 - Tree expansion state

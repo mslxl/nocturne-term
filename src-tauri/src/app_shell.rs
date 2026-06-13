@@ -2,13 +2,13 @@
 use tauri::menu::AboutMetadata;
 #[cfg(target_os = "macos")]
 use tauri::TitleBarStyle;
-#[cfg(any(target_os = "windows", target_os = "linux"))]
-use tauri_plugin_decorum::WebviewWindowExt;
 use tauri::{
     menu::{CheckMenuItem, Menu, MenuItem, MenuItemKind, PredefinedMenuItem, Submenu},
     AppHandle, Emitter, EventTarget, LogicalPosition, Manager, PhysicalPosition, PhysicalSize,
     Runtime, Size, WebviewUrl, WebviewWindow, WebviewWindowBuilder, Window, WindowEvent,
 };
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+use tauri_plugin_decorum::WebviewWindowExt;
 #[cfg(target_os = "macos")]
 use {
     objc2_app_kit::{NSView, NSWindow, NSWindowButton},
@@ -20,9 +20,9 @@ use crate::{
     error::{invalid_error, Result},
     terminal,
     types::{
-        AppMenuPopupInput, AppMenuRoot,
-        PaneContextMenuInput, PaneMenuAction, PaneMenuEvent, TabBarContextMenuInput,
-        TabBarOrientation, TerminalMenuCommand, TerminalMenuEvent, TerminalMenuStateInput,
+        AppMenuPopupInput, AppMenuRoot, PaneContextMenuInput, PaneMenuAction, PaneMenuEvent,
+        TabBarContextMenuInput, TabBarOrientation, TerminalMenuCommand, TerminalMenuEvent,
+        TerminalMenuStateInput,
     },
     workspace,
 };
@@ -1003,10 +1003,7 @@ pub(crate) fn apply_main_window_chrome<R: Runtime>(app: &AppHandle<R>) -> Result
     Ok(())
 }
 
-fn apply_integrated_titlebar_chrome<R: Runtime>(
-    window: &WebviewWindow<R>,
-    _integrated: bool,
-) {
+fn apply_integrated_titlebar_chrome<R: Runtime>(window: &WebviewWindow<R>, _integrated: bool) {
     if !is_workspace_chrome_window_label(window.label()) {
         return;
     }
@@ -1179,7 +1176,8 @@ fn apply_decorum_titlebar(window: &WebviewWindow, integrated: bool) {
         return;
     }
 
-    let state = DECORUM_TITLEBAR_WINDOWS.get_or_init(|| Mutex::new(std::collections::HashSet::new()));
+    let state =
+        DECORUM_TITLEBAR_WINDOWS.get_or_init(|| Mutex::new(std::collections::HashSet::new()));
     let mut labels = match state.lock() {
         Ok(labels) => labels,
         Err(error) => {
@@ -1421,11 +1419,11 @@ pub(crate) fn open_workspace_floating_window(
         return focus_window(&window);
     }
     let builder = WebviewWindowBuilder::new(&app, label, WebviewUrl::App("".into()))
-    .title("Nocturne")
-    .inner_size(760.0, 520.0)
-    .min_inner_size(420.0, 320.0)
-    .resizable(true)
-    .center();
+        .title("Nocturne")
+        .inner_size(760.0, 520.0)
+        .min_inner_size(420.0, 320.0)
+        .resizable(true)
+        .center();
     #[cfg(target_os = "macos")]
     let builder = apply_main_window_builder_chrome(integrated_titlebar_active(&app)?, builder);
     let window = builder.build().map_err(to_config_error)?;
@@ -1434,7 +1432,8 @@ pub(crate) fn open_workspace_floating_window(
 }
 
 fn floating_window_id_from_label(label: &str) -> Option<&str> {
-    label.strip_prefix("workspace-floating-")
+    label
+        .strip_prefix("workspace-floating-")
         .filter(|id| !id.trim().is_empty())
 }
 

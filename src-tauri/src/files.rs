@@ -1,17 +1,21 @@
 use std::{
-    collections::HashSet,
+    collections::{BTreeMap, HashSet},
     fs,
-    io::{Read, Write},
+    io::{Cursor, Read, Write},
     net::TcpStream,
     path::{Path, PathBuf},
+    process::Command,
+    sync::{Arc, Mutex, OnceLock},
     thread,
     time::{SystemTime, UNIX_EPOCH},
 };
 
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use portable_pty::PtySize;
+use sha2::{Digest, Sha256};
 use ssh2::{FileStat, OpenFlags, OpenType, Session, Sftp};
-use tauri::AppHandle;
+use tauri::{AppHandle, Manager};
+use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 
 use crate::{
     config::{
@@ -19,6 +23,11 @@ use crate::{
         ssh_known_hosts_path,
     },
     error::{invalid_error, io_error, terminal_error, Result},
+    resources::{
+        build_info, detect_remote_resource_target, RemoteResourceTargetDetection,
+        ResourceHelperBytesSource, ResourceHelperDownloadPlan, ResourceHelperManifest,
+        ResourceHelperUploadPlan,
+    },
     terminal::{
         authenticate_ssh_session, connect_proxy_jump_chain, default_ssh_username,
         ssh_network_hostname, verify_ssh_host_key, SshWorkerInput,
@@ -28,7 +37,8 @@ use crate::{
         FileCreateDirectoryInput, FileEntry, FileEntryKind, FileListInput, FileListResult,
         FilePathInput, FilePreviewContent, FilePreviewInput, FilePreviewResult,
         FileProviderCapabilities, FileProviderInfo, FileProviderKind, FileRenameInput,
-        FileSearchInput, FileSearchMatch, FileSearchResult, FileTrashInfo, FileTrashInfoInput,
+        FileSearchInput, FileSearchMatch, FileSearchMatchRange, FileSearchMode, FileSearchResult,
+        FileTrashInfo, FileTrashInfoInput, RemoteResourceTargetArch, RemoteResourceTargetOs,
         RemoteSearchHelperInfo, RemoteSearchHelperInput, SshConnectionConfig,
     },
     workspace,
@@ -37,6 +47,32 @@ use crate::{
 
 const DEFAULT_SEARCH_LIMIT: usize = 500;
 const MAX_PREVIEW_READ_BYTES: usize = 10 * 1024 * 1024;
+const RIPGREP_HELPER_VERSION: &str = "14.1.1";
+const RIPGREP_HELPER_HTTP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+static RIPGREP_HELPER_DEPLOYMENTS: OnceLock<Arc<Mutex<RipgrepHelperDeploymentMemory>>> =
+    OnceLock::new();
+
+#[derive(Debug, Clone, Default)]
+struct RipgrepHelperDeploymentMemory {
+    verified: BTreeMap<String, String>,
+}
+
+impl RipgrepHelperDeploymentMemory {
+    fn record_verified(&mut self, host_id: impl Into<String>, sha256: impl Into<String>) {
+        self.verified.insert(host_id.into(), sha256.into());
+    }
+
+    fn verified_hash(&self, host_id: &str) -> Option<&str> {
+        self.verified.get(host_id).map(String::as_str)
+    }
+}
+
+fn ripgrep_helper_deployment_memory() -> Arc<Mutex<RipgrepHelperDeploymentMemory>> {
+    RIPGREP_HELPER_DEPLOYMENTS
+        .get_or_init(|| Arc::new(Mutex::new(RipgrepHelperDeploymentMemory::default())))
+        .clone()
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RemoteHelperPolicy {
@@ -120,7 +156,10 @@ fn create_directory_blocking(app: AppHandle, input: FileCreateDirectoryInput) ->
             let connection = connect_sftp_for_host(
                 &app,
                 &host,
-                SftpAuthScope { workspace_id: &input.workspace_id, source_tool_tab_id: Some(&input.tool_tab_id) },
+                SftpAuthScope {
+                    workspace_id: &input.workspace_id,
+                    source_tool_tab_id: Some(&input.tool_tab_id),
+                },
                 input.accept_new_host_key,
                 input.update_changed_host_key,
                 input.credential,
@@ -159,7 +198,10 @@ fn rename_file_blocking(app: AppHandle, input: FileRenameInput) -> Result<()> {
             let connection = connect_sftp_for_host(
                 &app,
                 &host,
-                SftpAuthScope { workspace_id: &input.workspace_id, source_tool_tab_id: Some(&input.tool_tab_id) },
+                SftpAuthScope {
+                    workspace_id: &input.workspace_id,
+                    source_tool_tab_id: Some(&input.tool_tab_id),
+                },
                 input.accept_new_host_key,
                 input.update_changed_host_key,
                 input.credential,
@@ -199,7 +241,10 @@ fn chmod_file_blocking(app: AppHandle, input: FileChmodInput) -> Result<()> {
             let connection = connect_sftp_for_host(
                 &app,
                 &host,
-                SftpAuthScope { workspace_id: &input.workspace_id, source_tool_tab_id: Some(&input.tool_tab_id) },
+                SftpAuthScope {
+                    workspace_id: &input.workspace_id,
+                    source_tool_tab_id: Some(&input.tool_tab_id),
+                },
                 input.accept_new_host_key,
                 input.update_changed_host_key,
                 input.credential,
@@ -243,7 +288,10 @@ fn delete_file_blocking(app: AppHandle, input: FilePathInput) -> Result<()> {
             let connection = connect_sftp_for_host(
                 &app,
                 &host,
-                SftpAuthScope { workspace_id: &input.workspace_id, source_tool_tab_id: Some(&input.tool_tab_id) },
+                SftpAuthScope {
+                    workspace_id: &input.workspace_id,
+                    source_tool_tab_id: Some(&input.tool_tab_id),
+                },
                 input.accept_new_host_key,
                 input.update_changed_host_key,
                 input.credential,
@@ -277,7 +325,10 @@ fn remote_trash_info_blocking(app: AppHandle, input: FileTrashInfoInput) -> Resu
             let connection = connect_sftp_for_host(
                 &app,
                 &host,
-                SftpAuthScope { workspace_id: &input.workspace_id, source_tool_tab_id: Some(&input.tool_tab_id) },
+                SftpAuthScope {
+                    workspace_id: &input.workspace_id,
+                    source_tool_tab_id: Some(&input.tool_tab_id),
+                },
                 input.accept_new_host_key,
                 input.update_changed_host_key,
                 input.credential,
@@ -316,7 +367,10 @@ fn remote_search_helper_info_blocking(
             let connection = connect_sftp_for_host(
                 &app,
                 &host,
-                SftpAuthScope { workspace_id: &input.workspace_id, source_tool_tab_id: Some(&input.tool_tab_id) },
+                SftpAuthScope {
+                    workspace_id: &input.workspace_id,
+                    source_tool_tab_id: Some(&input.tool_tab_id),
+                },
                 input.accept_new_host_key,
                 input.update_changed_host_key,
                 input.credential,
@@ -362,7 +416,10 @@ fn trash_file_blocking(app: AppHandle, input: FilePathInput) -> Result<()> {
             let connection = connect_sftp_for_host(
                 &app,
                 &host,
-                SftpAuthScope { workspace_id: &input.workspace_id, source_tool_tab_id: Some(&input.tool_tab_id) },
+                SftpAuthScope {
+                    workspace_id: &input.workspace_id,
+                    source_tool_tab_id: Some(&input.tool_tab_id),
+                },
                 input.accept_new_host_key,
                 input.update_changed_host_key,
                 input.credential,
@@ -397,7 +454,10 @@ fn preview_file_blocking(app: AppHandle, input: FilePreviewInput) -> Result<File
             let connection = connect_sftp_for_host(
                 &app,
                 &host,
-                SftpAuthScope { workspace_id: &input.workspace_id, source_tool_tab_id: Some(&input.tool_tab_id) },
+                SftpAuthScope {
+                    workspace_id: &input.workspace_id,
+                    source_tool_tab_id: Some(&input.tool_tab_id),
+                },
                 input.accept_new_host_key,
                 input.update_changed_host_key,
                 input.credential.clone(),
@@ -463,7 +523,10 @@ fn list_sftp_files(
     let connection = connect_sftp_for_host(
         &app,
         &host,
-        SftpAuthScope { workspace_id: &input.workspace_id, source_tool_tab_id: Some(&input.tool_tab_id) },
+        SftpAuthScope {
+            workspace_id: &input.workspace_id,
+            source_tool_tab_id: Some(&input.tool_tab_id),
+        },
         input.accept_new_host_key,
         input.update_changed_host_key,
         input.credential,
@@ -507,21 +570,43 @@ fn search_local_files(
     } else {
         expand_local_home(input.root_path.clone())
     };
+    if let Some(result) = search_local_files_with_ripgrep(&root_path, &input)? {
+        return Ok(result);
+    }
     let mut matches = Vec::new();
-    let mut diagnostics = Vec::new();
+    let mut diagnostics = match input.mode {
+        FileSearchMode::Name => {
+            vec!["local ripgrep was not available; using local scan".to_string()]
+        }
+        FileSearchMode::Content => {
+            vec!["local ripgrep was not available; using local content scan".to_string()]
+        }
+    };
     let mut visited = HashSet::new();
     let limit = search_limit(input.max_results);
     let query = input.query.to_lowercase();
-    let truncated = scan_local_search_path(
-        Path::new(&root_path),
-        &query,
-        input.include_hidden,
-        input.follow_symlinks,
-        limit,
-        &mut matches,
-        &mut diagnostics,
-        &mut visited,
-    )?;
+    let truncated = match input.mode {
+        FileSearchMode::Name => scan_local_search_path(
+            Path::new(&root_path),
+            &query,
+            input.include_hidden,
+            input.follow_symlinks,
+            limit,
+            &mut matches,
+            &mut diagnostics,
+            &mut visited,
+        )?,
+        FileSearchMode::Content => scan_local_content_search_path(
+            Path::new(&root_path),
+            &query,
+            input.include_hidden,
+            input.follow_symlinks,
+            limit,
+            &mut matches,
+            &mut diagnostics,
+            &mut visited,
+        )?,
+    };
     Ok(FileSearchResult {
         provider_label: "local scan".to_string(),
         root_path,
@@ -530,6 +615,102 @@ fn search_local_files(
         diagnostics,
         truncated,
     })
+}
+
+fn search_local_files_with_ripgrep(
+    root_path: &str,
+    input: &FileSearchInput,
+) -> Result<Option<FileSearchResult>> {
+    let output = run_local_ripgrep(
+        input.mode.clone(),
+        root_path,
+        &input.query,
+        input.include_hidden,
+        input.ignore_ignore_files,
+        input.follow_symlinks,
+    )?;
+    let Some(output) = output else {
+        return Ok(None);
+    };
+    if output.status > 1 || (matches!(input.mode, FileSearchMode::Name) && output.status != 0) {
+        return Ok(None);
+    }
+    let limit = search_limit(input.max_results);
+    let mut diagnostics = if output.stderr.trim().is_empty() {
+        Vec::new()
+    } else {
+        output.stderr.lines().map(str::to_string).collect()
+    };
+    let (matches, truncated) = match input.mode {
+        FileSearchMode::Name => {
+            let mut matches = Vec::new();
+            let query = input.query.to_lowercase();
+            let truncated = collect_remote_rg_name_matches(
+                &output.stdout,
+                root_path,
+                &query,
+                limit,
+                &mut matches,
+            );
+            (matches, truncated)
+        }
+        FileSearchMode::Content => {
+            let (matches, truncated, parse_diagnostics) =
+                parse_remote_ripgrep_json_matches(&output.stdout, limit);
+            diagnostics.extend(parse_diagnostics);
+            (matches, truncated)
+        }
+    };
+    Ok(Some(FileSearchResult {
+        provider_label: "local ripgrep".to_string(),
+        root_path: root_path.to_string(),
+        query: input.query.clone(),
+        matches,
+        diagnostics,
+        truncated,
+    }))
+}
+
+fn run_local_ripgrep(
+    mode: FileSearchMode,
+    root_path: &str,
+    query: &str,
+    include_hidden: bool,
+    ignore_ignore_files: bool,
+    follow_symlinks: bool,
+) -> Result<Option<RemoteCommandOutput>> {
+    let mut command = Command::new("rg");
+    match mode {
+        FileSearchMode::Name => {
+            command.arg("--files");
+        }
+        FileSearchMode::Content => {
+            command.arg("--json");
+        }
+    }
+    if include_hidden {
+        command.arg("--hidden");
+    }
+    if ignore_ignore_files {
+        command.arg("--no-ignore");
+    }
+    if follow_symlinks {
+        command.arg("--follow");
+    }
+    command.arg("--");
+    if matches!(mode, FileSearchMode::Content) {
+        command.arg(query);
+    }
+    command.arg(root_path);
+    match command.output() {
+        Ok(output) => Ok(Some(RemoteCommandOutput {
+            status: output.status.code().unwrap_or(2),
+            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        })),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(io_error(error)),
+    }
 }
 
 fn search_sftp_files(
@@ -541,7 +722,10 @@ fn search_sftp_files(
     let connection = connect_sftp_for_host(
         app,
         host,
-        SftpAuthScope { workspace_id: &input.workspace_id, source_tool_tab_id: Some(&input.tool_tab_id) },
+        SftpAuthScope {
+            workspace_id: &input.workspace_id,
+            source_tool_tab_id: Some(&input.tool_tab_id),
+        },
         input.accept_new_host_key,
         input.update_changed_host_key,
         input.credential.clone(),
@@ -569,6 +753,38 @@ fn search_sftp_files(
                 log::debug!("remote rg search unavailable for host {}: {error}", host.id);
             }
         }
+        match search_sftp_files_with_managed_rg(
+            app,
+            host,
+            &connection,
+            &root_path,
+            &input,
+            helper_policy,
+        ) {
+            Ok(Some(result)) => return Ok(result),
+            Ok(None) => {}
+            Err(error) => {
+                log::debug!(
+                    "managed rg search unavailable for host {}: {error}",
+                    host.id
+                );
+            }
+        }
+    }
+    if matches!(input.mode, FileSearchMode::Content) {
+        let reason = if matches!(helper_policy, RemoteHelperPolicy::Never) {
+            "remote helper policy is Never; content search requires ripgrep"
+        } else {
+            "ripgrep on remote was not available; content search requires ripgrep"
+        };
+        return Ok(FileSearchResult {
+            provider_label: "SFTP scan".to_string(),
+            root_path,
+            query: input.query,
+            matches: Vec::new(),
+            diagnostics: vec![reason.to_string()],
+            truncated: false,
+        });
     }
     let mut matches = Vec::new();
     let mut diagnostics = if matches!(helper_policy, RemoteHelperPolicy::Never) {
@@ -606,34 +822,157 @@ fn search_sftp_files_with_remote_rg(
     if !remote_command_succeeds(session, "command -v rg >/dev/null 2>&1")? {
         return Ok(None);
     }
-    let mut command = String::from("rg --files");
-    if input.include_hidden {
-        command.push_str(" --hidden");
-    }
-    if input.follow_symlinks {
-        command.push_str(" --follow");
-    }
-    command.push_str(" -- ");
-    command.push_str(&shell_quote(root_path));
+    let command = build_remote_ripgrep_command(
+        input.mode.clone(),
+        root_path,
+        &input.query,
+        input.include_hidden,
+        input.ignore_ignore_files,
+        input.follow_symlinks,
+    );
     let output = run_remote_command(session, &command)?;
-    if output.status != 0 {
+    if output.status > 1 || (matches!(input.mode, FileSearchMode::Name) && output.status != 0) {
         return Ok(None);
     }
     let query = input.query.to_lowercase();
     let limit = search_limit(input.max_results);
-    let mut matches = Vec::new();
-    let truncated =
-        collect_remote_rg_matches(&output.stdout, root_path, &query, limit, &mut matches);
+    let mut diagnostics = if output.stderr.trim().is_empty() {
+        Vec::new()
+    } else {
+        output.stderr.lines().map(str::to_string).collect()
+    };
+    let (matches, truncated) = match input.mode {
+        FileSearchMode::Name => {
+            let mut matches = Vec::new();
+            let truncated = collect_remote_rg_name_matches(
+                &output.stdout,
+                root_path,
+                &query,
+                limit,
+                &mut matches,
+            );
+            (matches, truncated)
+        }
+        FileSearchMode::Content => {
+            let (matches, truncated, parse_diagnostics) =
+                parse_remote_ripgrep_json_matches(&output.stdout, limit);
+            diagnostics.extend(parse_diagnostics);
+            (matches, truncated)
+        }
+    };
     Ok(Some(FileSearchResult {
         provider_label: "ripgrep on remote".to_string(),
         root_path: root_path.to_string(),
         query: input.query.clone(),
         matches,
-        diagnostics: if output.stderr.trim().is_empty() {
-            Vec::new()
-        } else {
-            output.stderr.lines().map(str::to_string).collect()
-        },
+        diagnostics,
+        truncated,
+    }))
+}
+
+fn search_sftp_files_with_managed_rg(
+    app: &AppHandle,
+    host: &ConnectionHostEntry,
+    connection: &SftpConnection,
+    root_path: &str,
+    input: &FileSearchInput,
+    helper_policy: RemoteHelperPolicy,
+) -> Result<Option<FileSearchResult>> {
+    if matches!(helper_policy, RemoteHelperPolicy::Never) {
+        return Ok(None);
+    }
+    let detection = detect_remote_resource_target(connection, host.document.resources.clone())?;
+    let (target_os, target_arch) = match detection {
+        RemoteResourceTargetDetection::Detected { os, arch, .. } => (os, arch),
+        RemoteResourceTargetDetection::Unknown { reason, .. } => {
+            log::debug!(
+                "managed rg target detection unavailable for host {}: {reason}",
+                host.id
+            );
+            return Ok(None);
+        }
+    };
+    let helper_source = load_ripgrep_helper_bytes_from_app(app, target_os, target_arch)?;
+    let helper_bytes = match helper_source {
+        ResourceHelperBytesSource::Bundled(bytes) => bytes,
+        ResourceHelperBytesSource::DownloadRequired(plan) => {
+            match download_ripgrep_helper_after_confirmation(app, &plan) {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    log::debug!("managed rg helper download canceled or failed: {error}");
+                    return Ok(None);
+                }
+            }
+        }
+        ResourceHelperBytesSource::Unavailable { reason } => {
+            log::debug!(
+                "managed rg helper unavailable for host {}: {reason}",
+                host.id
+            );
+            return Ok(None);
+        }
+    };
+    let plan = plan_ripgrep_helper_upload(
+        &helper_bytes,
+        target_os,
+        target_arch,
+        env!("CARGO_PKG_VERSION"),
+        RIPGREP_HELPER_VERSION,
+    )?;
+    if matches!(helper_policy, RemoteHelperPolicy::Ask)
+        && !ripgrep_helper_verified(&host.id, &plan.manifest.sha256)?
+        && !confirm_ripgrep_helper_upload(app, host, &plan)
+    {
+        return Ok(None);
+    }
+    let helper_remote_path = deploy_ripgrep_helper_if_needed(connection, &host.id, &plan)?;
+    let ripgrep_args = build_ripgrep_args(
+        input.mode.clone(),
+        root_path,
+        &input.query,
+        input.include_hidden,
+        input.ignore_ignore_files,
+        input.follow_symlinks,
+    );
+    let output = run_remote_command(
+        &connection.session,
+        &ripgrep_managed_command(target_os, &helper_remote_path, &ripgrep_args),
+    )?;
+    if output.status > 1 || (matches!(input.mode, FileSearchMode::Name) && output.status != 0) {
+        return Ok(None);
+    }
+    let query = input.query.to_lowercase();
+    let limit = search_limit(input.max_results);
+    let mut diagnostics = if output.stderr.trim().is_empty() {
+        Vec::new()
+    } else {
+        output.stderr.lines().map(str::to_string).collect()
+    };
+    let (matches, truncated) = match input.mode {
+        FileSearchMode::Name => {
+            let mut matches = Vec::new();
+            let truncated = collect_remote_rg_name_matches(
+                &output.stdout,
+                root_path,
+                &query,
+                limit,
+                &mut matches,
+            );
+            (matches, truncated)
+        }
+        FileSearchMode::Content => {
+            let (matches, truncated, parse_diagnostics) =
+                parse_remote_ripgrep_json_matches(&output.stdout, limit);
+            diagnostics.extend(parse_diagnostics);
+            (matches, truncated)
+        }
+    };
+    Ok(Some(FileSearchResult {
+        provider_label: "Nocturne ripgrep helper".to_string(),
+        root_path: root_path.to_string(),
+        query: input.query.clone(),
+        matches,
+        diagnostics,
         truncated,
     }))
 }
@@ -773,17 +1112,17 @@ fn parse_host_port(value: &str, default_port: u16) -> Result<(String, u16)> {
     Ok((value.to_string(), default_port))
 }
 
-struct RemoteCommandOutput {
-    status: i32,
-    stdout: String,
-    stderr: String,
+pub(crate) struct RemoteCommandOutput {
+    pub(crate) status: i32,
+    pub(crate) stdout: String,
+    pub(crate) stderr: String,
 }
 
-fn remote_command_succeeds(session: &Session, command: &str) -> Result<bool> {
+pub(crate) fn remote_command_succeeds(session: &Session, command: &str) -> Result<bool> {
     Ok(run_remote_command(session, command)?.status == 0)
 }
 
-fn run_remote_command(session: &Session, command: &str) -> Result<RemoteCommandOutput> {
+pub(crate) fn run_remote_command(session: &Session, command: &str) -> Result<RemoteCommandOutput> {
     let mut channel = session.channel_session().map_err(terminal_error)?;
     channel.exec(command).map_err(terminal_error)?;
     let mut stdout = String::new();
@@ -803,7 +1142,58 @@ fn run_remote_command(session: &Session, command: &str) -> Result<RemoteCommandO
     })
 }
 
-fn collect_remote_rg_matches(
+fn build_remote_ripgrep_command(
+    mode: FileSearchMode,
+    root_path: &str,
+    query: &str,
+    include_hidden: bool,
+    ignore_ignore_files: bool,
+    follow_symlinks: bool,
+) -> String {
+    format!(
+        "rg {}",
+        build_ripgrep_args(
+            mode,
+            root_path,
+            query,
+            include_hidden,
+            ignore_ignore_files,
+            follow_symlinks,
+        )
+    )
+}
+
+fn build_ripgrep_args(
+    mode: FileSearchMode,
+    root_path: &str,
+    query: &str,
+    include_hidden: bool,
+    ignore_ignore_files: bool,
+    follow_symlinks: bool,
+) -> String {
+    let mut command = match mode {
+        FileSearchMode::Name => String::from("--files"),
+        FileSearchMode::Content => String::from("--json"),
+    };
+    if include_hidden {
+        command.push_str(" --hidden");
+    }
+    if ignore_ignore_files {
+        command.push_str(" --no-ignore");
+    }
+    if follow_symlinks {
+        command.push_str(" --follow");
+    }
+    command.push_str(" -- ");
+    if matches!(mode, FileSearchMode::Content) {
+        command.push_str(&shell_quote(query));
+        command.push(' ');
+    }
+    command.push_str(&shell_quote(root_path));
+    command
+}
+
+fn collect_remote_rg_name_matches(
     output: &str,
     root_path: &str,
     query: &str,
@@ -827,9 +1217,752 @@ fn collect_remote_rg_matches(
             path: line.to_string(),
             name: name.to_string(),
             kind: remote_rg_kind(root_path, line),
+            line_number: None,
+            line_text: None,
+            ranges: Vec::new(),
         });
     }
     truncated
+}
+
+fn parse_remote_ripgrep_json_matches(
+    output: &str,
+    limit: usize,
+) -> (Vec<FileSearchMatch>, bool, Vec<String>) {
+    let mut matches = Vec::new();
+    let mut diagnostics = Vec::new();
+    let mut truncated = false;
+    for line in output.lines().filter(|line| !line.trim().is_empty()) {
+        if matches.len() >= limit {
+            truncated = true;
+            break;
+        }
+        let value = match serde_json::from_str::<serde_json::Value>(line) {
+            Ok(value) => value,
+            Err(error) => {
+                diagnostics.push(format!("invalid rg json event: {error}"));
+                continue;
+            }
+        };
+        if value.get("type").and_then(serde_json::Value::as_str) != Some("match") {
+            continue;
+        }
+        let Some(data) = value.get("data") else {
+            diagnostics.push("rg match event missing data".to_string());
+            continue;
+        };
+        let Some(path) = data
+            .get("path")
+            .and_then(|path| path.get("text"))
+            .and_then(serde_json::Value::as_str)
+        else {
+            diagnostics.push("rg match event missing path text".to_string());
+            continue;
+        };
+        let Some(line_text) = data
+            .get("lines")
+            .and_then(|lines| lines.get("text"))
+            .and_then(serde_json::Value::as_str)
+        else {
+            diagnostics.push(format!("{path}: rg match event missing line text"));
+            continue;
+        };
+        let Some(line_number) = data
+            .get("line_number")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|value| u32::try_from(value).ok())
+        else {
+            diagnostics.push(format!("{path}: rg match event missing line number"));
+            continue;
+        };
+        let ranges = data
+            .get("submatches")
+            .and_then(serde_json::Value::as_array)
+            .map(|submatches| {
+                submatches
+                    .iter()
+                    .filter_map(|submatch| {
+                        let start = submatch
+                            .get("start")
+                            .and_then(serde_json::Value::as_u64)
+                            .and_then(|value| u32::try_from(value).ok())?;
+                        let end = submatch
+                            .get("end")
+                            .and_then(serde_json::Value::as_u64)
+                            .and_then(|value| u32::try_from(value).ok())?;
+                        Some(FileSearchMatchRange { start, end })
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        matches.push(FileSearchMatch {
+            path: path.to_string(),
+            name: provider_file_name(path),
+            kind: FileEntryKind::File,
+            line_number: Some(line_number),
+            line_text: Some(line_text.trim_end_matches(['\r', '\n']).to_string()),
+            ranges,
+        });
+    }
+    (matches, truncated, diagnostics)
+}
+
+fn provider_file_name(path: &str) -> String {
+    path.rsplit(['/', '\\'])
+        .next()
+        .filter(|name| !name.is_empty())
+        .unwrap_or(path)
+        .to_string()
+}
+
+fn ripgrep_helper_resource_path(
+    rg_version: &str,
+    target_os: RemoteResourceTargetOs,
+    target_arch: RemoteResourceTargetArch,
+) -> String {
+    format!(
+        "ripgrep/rg-{}-{}-{}{}",
+        rg_version,
+        remote_target_os_dir(target_os),
+        remote_target_arch_dir(target_arch),
+        if target_os == RemoteResourceTargetOs::Windows {
+            ".exe"
+        } else {
+            ""
+        }
+    )
+}
+
+fn load_ripgrep_helper_bytes_from_app(
+    app: &AppHandle,
+    target_os: RemoteResourceTargetOs,
+    target_arch: RemoteResourceTargetArch,
+) -> Result<ResourceHelperBytesSource> {
+    let resource_path =
+        ripgrep_helper_resource_path(RIPGREP_HELPER_VERSION, target_os, target_arch);
+    let resource_dir = app.path().resource_dir().map_err(crate::error::io_error)?;
+    load_ripgrep_helper_bytes_from_paths(
+        &ripgrep_helper_candidate_paths(&resource_dir, &resource_path),
+        "",
+        build_info().tag.as_deref(),
+        RIPGREP_HELPER_VERSION,
+        target_os,
+        target_arch,
+    )
+}
+
+pub fn load_ripgrep_helper_bytes_from_path(
+    path: &Path,
+    _github_repository: &str,
+    _build_tag: Option<&str>,
+    rg_version: &str,
+    target_os: RemoteResourceTargetOs,
+    target_arch: RemoteResourceTargetArch,
+) -> Result<ResourceHelperBytesSource> {
+    load_ripgrep_helper_bytes_from_paths(
+        &[path.to_path_buf()],
+        _github_repository,
+        _build_tag,
+        rg_version,
+        target_os,
+        target_arch,
+    )
+}
+
+fn load_ripgrep_helper_bytes_from_paths(
+    paths: &[PathBuf],
+    _github_repository: &str,
+    _build_tag: Option<&str>,
+    rg_version: &str,
+    target_os: RemoteResourceTargetOs,
+    target_arch: RemoteResourceTargetArch,
+) -> Result<ResourceHelperBytesSource> {
+    for path in paths {
+        match fs::read(path) {
+            Ok(bytes) if !bytes.is_empty() => return Ok(ResourceHelperBytesSource::Bundled(bytes)),
+            Ok(_) => {
+                return Err(invalid_error(format!(
+                    "bundled ripgrep helper is empty: {}",
+                    path.display()
+                )));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(crate::error::io_error(error)),
+        }
+    }
+
+    match ripgrep_helper_download_plan(rg_version, target_os, target_arch) {
+        Some(plan) => Ok(ResourceHelperBytesSource::DownloadRequired(plan)),
+        None => Ok(ResourceHelperBytesSource::Unavailable {
+            reason: format!(
+                "No official ripgrep helper archive is available for {} {}",
+                remote_target_os_dir(target_os),
+                remote_target_arch_dir(target_arch)
+            ),
+        }),
+    }
+}
+
+fn ripgrep_helper_candidate_paths(resource_dir: &Path, resource_path: &str) -> Vec<PathBuf> {
+    vec![
+        resource_dir.join(resource_path),
+        resource_dir.join("resources").join(resource_path),
+    ]
+}
+
+fn ripgrep_helper_download_plan(
+    rg_version: &str,
+    target_os: RemoteResourceTargetOs,
+    target_arch: RemoteResourceTargetArch,
+) -> Option<ResourceHelperDownloadPlan> {
+    let asset_name = ripgrep_helper_asset_name(rg_version, target_os, target_arch)?;
+    let url = format!(
+        "https://github.com/BurntSushi/ripgrep/releases/download/{}/{}",
+        rg_version, asset_name
+    );
+    Some(ResourceHelperDownloadPlan {
+        tag: rg_version.to_string(),
+        asset_name,
+        url: url.clone(),
+        prompt: format!(
+            "The bundled ripgrep helper is missing. Download rg {rg_version} for Files recursive search from the official ripgrep release?\n\n{url}"
+        ),
+    })
+}
+
+fn ripgrep_helper_asset_name(
+    rg_version: &str,
+    target_os: RemoteResourceTargetOs,
+    target_arch: RemoteResourceTargetArch,
+) -> Option<String> {
+    let triple = match (target_os, target_arch) {
+        (RemoteResourceTargetOs::Linux, RemoteResourceTargetArch::X86_64) => {
+            "x86_64-unknown-linux-musl"
+        }
+        (RemoteResourceTargetOs::Linux, RemoteResourceTargetArch::Aarch64) => {
+            "aarch64-unknown-linux-gnu"
+        }
+        (RemoteResourceTargetOs::Linux, RemoteResourceTargetArch::Armv7) => {
+            "armv7-unknown-linux-musleabihf"
+        }
+        (RemoteResourceTargetOs::Macos, RemoteResourceTargetArch::X86_64) => "x86_64-apple-darwin",
+        (RemoteResourceTargetOs::Macos, RemoteResourceTargetArch::Aarch64) => {
+            "aarch64-apple-darwin"
+        }
+        (RemoteResourceTargetOs::Windows, RemoteResourceTargetArch::X86_64) => {
+            "x86_64-pc-windows-msvc"
+        }
+        (RemoteResourceTargetOs::Windows, RemoteResourceTargetArch::I686) => "i686-pc-windows-msvc",
+        _ => return None,
+    };
+    let extension = if target_os == RemoteResourceTargetOs::Windows {
+        "zip"
+    } else {
+        "tar.gz"
+    };
+    Some(format!("ripgrep-{rg_version}-{triple}.{extension}"))
+}
+
+fn plan_ripgrep_helper_upload(
+    helper_bytes: &[u8],
+    target_os: RemoteResourceTargetOs,
+    target_arch: RemoteResourceTargetArch,
+    app_version: &str,
+    rg_version: &str,
+) -> Result<ResourceHelperUploadPlan> {
+    if helper_bytes.is_empty() {
+        return Err(invalid_error("ripgrep helper bytes cannot be empty"));
+    }
+    let helper_version = format!("{app_version}+rg.{rg_version}");
+    let remote_directory = format!("~/.cache/nocturne/helpers/{app_version}/rg-{rg_version}");
+    let helper_upload_path = format!(
+        "{}/{}",
+        remote_directory,
+        ripgrep_helper_executable_name(target_os)
+    );
+    let manifest_upload_path = format!("{remote_directory}/rg.manifest.json");
+    let helper_sha256 = hex::encode(Sha256::digest(helper_bytes));
+    let manifest = ResourceHelperManifest {
+        helper_name: "rg".to_string(),
+        purpose: "Files recursive search".to_string(),
+        version: helper_version,
+        target_os,
+        target_arch,
+        upload_path: helper_upload_path.clone(),
+        sha256: helper_sha256.clone(),
+        capabilities: vec![
+            "files.search.name".to_string(),
+            "files.search.content".to_string(),
+            "ripgrep.json".to_string(),
+        ],
+    };
+    let manifest_json = serde_json::to_string(&manifest)
+        .map_err(|error| invalid_error(format!("ripgrep helper manifest JSON failed: {error}")))?;
+    Ok(ResourceHelperUploadPlan {
+        resource_path: ripgrep_helper_resource_path(rg_version, target_os, target_arch),
+        manifest,
+        manifest_path: manifest_upload_path.clone(),
+        remote_directory,
+        helper_upload_path: helper_upload_path.clone(),
+        manifest_upload_path,
+        executable_mode: ripgrep_helper_executable_mode(target_os),
+        verify_sha256_command: ripgrep_helper_verify_sha256_command(
+            target_os,
+            &helper_upload_path,
+            &helper_sha256,
+        ),
+        launch_stream_command: ripgrep_managed_command(target_os, &helper_upload_path, "--version"),
+        helper_bytes: helper_bytes.to_vec(),
+        manifest_json,
+    })
+}
+
+fn remote_target_os_dir(target_os: RemoteResourceTargetOs) -> &'static str {
+    match target_os {
+        RemoteResourceTargetOs::Linux => "linux",
+        RemoteResourceTargetOs::Macos => "macos",
+        RemoteResourceTargetOs::Windows => "windows",
+    }
+}
+
+fn remote_target_arch_dir(target_arch: RemoteResourceTargetArch) -> &'static str {
+    match target_arch {
+        RemoteResourceTargetArch::X86_64 => "x86_64",
+        RemoteResourceTargetArch::Aarch64 => "aarch64",
+        RemoteResourceTargetArch::Armv7 => "armv7",
+        RemoteResourceTargetArch::I686 => "i686",
+    }
+}
+
+fn ripgrep_helper_executable_name(target_os: RemoteResourceTargetOs) -> &'static str {
+    match target_os {
+        RemoteResourceTargetOs::Windows => "rg.exe",
+        RemoteResourceTargetOs::Linux | RemoteResourceTargetOs::Macos => "rg",
+    }
+}
+
+fn ripgrep_helper_executable_mode(target_os: RemoteResourceTargetOs) -> Option<u32> {
+    match target_os {
+        RemoteResourceTargetOs::Windows => None,
+        RemoteResourceTargetOs::Linux | RemoteResourceTargetOs::Macos => Some(0o755),
+    }
+}
+
+fn ripgrep_helper_verify_sha256_command(
+    target_os: RemoteResourceTargetOs,
+    helper_path: &str,
+    expected_sha256: &str,
+) -> String {
+    match target_os {
+        RemoteResourceTargetOs::Linux => format!(
+            "printf '%s  %s\\n' '{expected_sha256}' '{helper_path}' | sha256sum -c -"
+        ),
+        RemoteResourceTargetOs::Macos => format!(
+            "test \"$(shasum -a 256 '{}' | awk '{{print $1}}')\" = '{}'",
+            helper_path, expected_sha256
+        ),
+        RemoteResourceTargetOs::Windows => format!(
+            "if ((Get-FileHash -Algorithm SHA256 '{}').Hash.ToLowerInvariant() -ne '{}') {{ exit 1 }}",
+            helper_path, expected_sha256
+        ),
+    }
+}
+
+fn ripgrep_managed_command(
+    target_os: RemoteResourceTargetOs,
+    helper_path: &str,
+    ripgrep_args: &str,
+) -> String {
+    match target_os {
+        RemoteResourceTargetOs::Windows => {
+            format!("& {} {}", shell_quote(helper_path), ripgrep_args)
+        }
+        RemoteResourceTargetOs::Linux | RemoteResourceTargetOs::Macos => {
+            format!("{} {}", shell_quote(helper_path), ripgrep_args)
+        }
+    }
+}
+
+fn confirm_ripgrep_helper_upload(
+    app: &AppHandle,
+    host: &ConnectionHostEntry,
+    plan: &ResourceHelperUploadPlan,
+) -> bool {
+    app.dialog()
+        .message(format!(
+            "Upload rg for Files recursive search?\n\nHost: {}\nTarget: {:?} {:?}\nPath: {}\nSHA-256: {}",
+            host.document.name,
+            plan.manifest.target_os,
+            plan.manifest.target_arch,
+            plan.helper_upload_path,
+            plan.manifest.sha256
+        ))
+        .title("Upload ripgrep helper")
+        .kind(MessageDialogKind::Warning)
+        .buttons(MessageDialogButtons::OkCancelCustom(
+            "Upload".to_string(),
+            "Cancel".to_string(),
+        ))
+        .blocking_show()
+}
+
+fn download_ripgrep_helper_after_confirmation(
+    app: &AppHandle,
+    plan: &ResourceHelperDownloadPlan,
+) -> Result<Vec<u8>> {
+    let allowed = app
+        .dialog()
+        .message(plan.prompt.clone())
+        .title("Download ripgrep helper")
+        .kind(MessageDialogKind::Warning)
+        .buttons(MessageDialogButtons::OkCancelCustom(
+            "Download".to_string(),
+            "Cancel".to_string(),
+        ))
+        .blocking_show();
+    if !allowed {
+        return Err(invalid_error(
+            "ripgrep helper download was canceled by the user",
+        ));
+    }
+    download_ripgrep_helper_from_plan(plan)
+}
+
+fn download_ripgrep_helper_from_plan(plan: &ResourceHelperDownloadPlan) -> Result<Vec<u8>> {
+    let archive_bytes = download_ripgrep_helper_archive_from_url(&plan.url)?;
+    extract_ripgrep_helper_from_archive(&archive_bytes, &plan.asset_name)
+}
+
+fn download_ripgrep_helper_archive_from_url(url: &str) -> Result<Vec<u8>> {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(RIPGREP_HELPER_HTTP_TIMEOUT)
+        .build()
+        .map_err(|error| invalid_error(format!("ripgrep helper HTTP client failed: {error}")))?;
+    let response = client
+        .get(url)
+        .header(reqwest::header::USER_AGENT, "Nocturne Files Search")
+        .send()
+        .map_err(|error| invalid_error(format!("ripgrep helper download failed: {error}")))?;
+    if !response.status().is_success() {
+        return Err(invalid_error(format!(
+            "ripgrep helper download returned HTTP {}",
+            response.status()
+        )));
+    }
+    let bytes = response
+        .bytes()
+        .map_err(|error| invalid_error(format!("ripgrep helper download read failed: {error}")))?;
+    if bytes.is_empty() {
+        return Err(invalid_error("downloaded ripgrep helper archive is empty"));
+    }
+    Ok(bytes.to_vec())
+}
+
+fn extract_ripgrep_helper_from_archive(archive_bytes: &[u8], asset_name: &str) -> Result<Vec<u8>> {
+    if asset_name.ends_with(".zip") {
+        return extract_ripgrep_helper_from_zip(archive_bytes);
+    }
+    if asset_name.ends_with(".tar.gz") {
+        return extract_ripgrep_helper_from_tar_gz(archive_bytes);
+    }
+    Err(invalid_error(format!(
+        "unsupported ripgrep helper archive format: {asset_name}"
+    )))
+}
+
+fn extract_ripgrep_helper_from_zip(archive_bytes: &[u8]) -> Result<Vec<u8>> {
+    let reader = Cursor::new(archive_bytes);
+    let mut archive = zip::ZipArchive::new(reader)
+        .map_err(|error| invalid_error(format!("ripgrep zip archive failed: {error}")))?;
+    for index in 0..archive.len() {
+        let mut entry = archive
+            .by_index(index)
+            .map_err(|error| invalid_error(format!("ripgrep zip entry failed: {error}")))?;
+        if !entry.is_file() || !archive_entry_matches(entry.name(), "rg.exe") {
+            continue;
+        }
+        let mut bytes = Vec::new();
+        entry
+            .read_to_end(&mut bytes)
+            .map_err(|error| invalid_error(format!("ripgrep zip read failed: {error}")))?;
+        if bytes.is_empty() {
+            return Err(invalid_error("downloaded ripgrep helper is empty"));
+        }
+        return Ok(bytes);
+    }
+    Err(invalid_error("rg.exe was not found in ripgrep zip archive"))
+}
+
+fn extract_ripgrep_helper_from_tar_gz(archive_bytes: &[u8]) -> Result<Vec<u8>> {
+    let decoder = flate2::read::GzDecoder::new(Cursor::new(archive_bytes));
+    let mut archive = tar::Archive::new(decoder);
+    let entries = archive
+        .entries()
+        .map_err(|error| invalid_error(format!("ripgrep tar archive failed: {error}")))?;
+    for entry in entries {
+        let mut entry =
+            entry.map_err(|error| invalid_error(format!("ripgrep tar entry failed: {error}")))?;
+        if !entry.header().entry_type().is_file() {
+            continue;
+        }
+        let path = entry
+            .path()
+            .map_err(|error| invalid_error(format!("ripgrep tar path failed: {error}")))?;
+        if !archive_entry_matches(path.to_string_lossy().as_ref(), "rg") {
+            continue;
+        }
+        let mut bytes = Vec::new();
+        entry
+            .read_to_end(&mut bytes)
+            .map_err(|error| invalid_error(format!("ripgrep tar read failed: {error}")))?;
+        if bytes.is_empty() {
+            return Err(invalid_error("downloaded ripgrep helper is empty"));
+        }
+        return Ok(bytes);
+    }
+    Err(invalid_error("rg was not found in ripgrep tar.gz archive"))
+}
+
+fn archive_entry_matches(path: &str, expected_name: &str) -> bool {
+    Path::new(path).file_name().and_then(|name| name.to_str()) == Some(expected_name)
+}
+
+fn ripgrep_helper_verified(host_id: &str, expected_sha256: &str) -> Result<bool> {
+    Ok(ripgrep_helper_deployment_memory()
+        .lock()
+        .map_err(|_| invalid_error("ripgrep helper deployment memory is poisoned"))?
+        .verified_hash(host_id)
+        == Some(expected_sha256))
+}
+
+fn deploy_ripgrep_helper_if_needed(
+    connection: &SftpConnection,
+    host_id: &str,
+    plan: &ResourceHelperUploadPlan,
+) -> Result<String> {
+    let home = remote_home_path_from_shell(&connection.session)?;
+    let helper_upload_path = expand_remote_home(&plan.helper_upload_path, &home);
+    if ripgrep_helper_verified(host_id, &plan.manifest.sha256)? {
+        return Ok(helper_upload_path);
+    }
+    deploy_ripgrep_helper(connection, plan, &home)?;
+    ripgrep_helper_deployment_memory()
+        .lock()
+        .map_err(|_| invalid_error("ripgrep helper deployment memory is poisoned"))?
+        .record_verified(host_id, plan.manifest.sha256.clone());
+    Ok(helper_upload_path)
+}
+
+fn deploy_ripgrep_helper(
+    connection: &SftpConnection,
+    plan: &ResourceHelperUploadPlan,
+    home: &str,
+) -> Result<()> {
+    let sftp = connection.session.sftp().map_err(terminal_error)?;
+    let remote_directory = expand_remote_home(&plan.remote_directory, home);
+    let helper_upload_path = expand_remote_home(&plan.helper_upload_path, home);
+    let manifest_upload_path = expand_remote_home(&plan.manifest_upload_path, home);
+
+    ensure_sftp_directory(&sftp, Path::new(&remote_directory))?;
+    write_sftp_file(
+        &sftp,
+        Path::new(&helper_upload_path),
+        &plan.helper_bytes,
+        0o755,
+    )?;
+    write_sftp_file(
+        &sftp,
+        Path::new(&manifest_upload_path),
+        plan.manifest_json.as_bytes(),
+        0o644,
+    )?;
+    if let Some(mode) = plan.executable_mode {
+        sftp.setstat(
+            Path::new(&helper_upload_path),
+            FileStat {
+                size: None,
+                uid: None,
+                gid: None,
+                perm: Some(mode),
+                atime: None,
+                mtime: None,
+            },
+        )
+        .map_err(terminal_error)?;
+    }
+
+    let verify_command = plan
+        .verify_sha256_command
+        .replace(&plan.helper_upload_path, &helper_upload_path);
+    let output = run_remote_command(&connection.session, &verify_command)?;
+    if output.status != 0 {
+        return Err(invalid_error(format!(
+            "uploaded ripgrep helper hash verification failed: {}",
+            output.stderr.trim()
+        )));
+    }
+    Ok(())
+}
+
+fn remote_home_path_from_shell(session: &Session) -> Result<String> {
+    let output = run_remote_command(session, "printf %s \"$HOME\"")?;
+    let home = output.stdout.trim();
+    if home.is_empty() {
+        return Err(invalid_error("remote HOME is unavailable"));
+    }
+    Ok(home.to_string())
+}
+
+fn expand_remote_home(path: &str, home: &str) -> String {
+    if path == "~" {
+        return home.to_string();
+    }
+    if let Some(rest) = path.strip_prefix("~/") {
+        return format!("{}/{}", home.trim_end_matches('/'), rest);
+    }
+    path.to_string()
+}
+
+fn ensure_sftp_directory(sftp: &Sftp, path: &Path) -> Result<()> {
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        current.push(component.as_os_str());
+        if current.as_os_str().is_empty() {
+            continue;
+        }
+        if sftp.stat(&current).is_ok() {
+            continue;
+        }
+        sftp.mkdir(&current, 0o755).map_err(terminal_error)?;
+    }
+    Ok(())
+}
+
+fn write_sftp_file(sftp: &Sftp, path: &Path, bytes: &[u8], mode: i32) -> Result<()> {
+    let mut file = sftp
+        .open_mode(
+            path,
+            OpenFlags::WRITE | OpenFlags::CREATE | OpenFlags::TRUNCATE,
+            mode,
+            OpenType::File,
+        )
+        .map_err(terminal_error)?;
+    file.write_all(bytes).map_err(terminal_error)
+}
+
+pub fn build_remote_ripgrep_command_for_test(
+    mode: FileSearchMode,
+    root_path: &str,
+    query: &str,
+    include_hidden: bool,
+    ignore_ignore_files: bool,
+    follow_symlinks: bool,
+) -> String {
+    build_remote_ripgrep_command(
+        mode,
+        root_path,
+        query,
+        include_hidden,
+        ignore_ignore_files,
+        follow_symlinks,
+    )
+}
+
+pub fn parse_remote_ripgrep_json_matches_for_test(
+    output: &str,
+    limit: usize,
+) -> (Vec<FileSearchMatch>, bool, Vec<String>) {
+    parse_remote_ripgrep_json_matches(output, limit)
+}
+
+pub fn ripgrep_helper_resource_path_for_test(
+    rg_version: &str,
+    target_os: RemoteResourceTargetOs,
+    target_arch: RemoteResourceTargetArch,
+) -> String {
+    ripgrep_helper_resource_path(rg_version, target_os, target_arch)
+}
+
+pub fn ripgrep_helper_asset_name_for_test(
+    rg_version: &str,
+    target_os: RemoteResourceTargetOs,
+    target_arch: RemoteResourceTargetArch,
+) -> Option<String> {
+    ripgrep_helper_asset_name(rg_version, target_os, target_arch)
+}
+
+pub fn extract_ripgrep_helper_from_archive_for_test(
+    archive_bytes: &[u8],
+    asset_name: &str,
+) -> Result<Vec<u8>> {
+    extract_ripgrep_helper_from_archive(archive_bytes, asset_name)
+}
+
+pub fn load_ripgrep_helper_bytes_from_path_for_test(
+    path: &Path,
+    github_repository: &str,
+    build_tag: Option<&str>,
+    rg_version: &str,
+    target_os: RemoteResourceTargetOs,
+    target_arch: RemoteResourceTargetArch,
+) -> Result<ResourceHelperBytesSource> {
+    load_ripgrep_helper_bytes_from_path(
+        path,
+        github_repository,
+        build_tag,
+        rg_version,
+        target_os,
+        target_arch,
+    )
+}
+
+pub fn load_ripgrep_helper_bytes_from_paths_for_test(
+    paths: &[PathBuf],
+    github_repository: &str,
+    build_tag: Option<&str>,
+    rg_version: &str,
+    target_os: RemoteResourceTargetOs,
+    target_arch: RemoteResourceTargetArch,
+) -> Result<ResourceHelperBytesSource> {
+    load_ripgrep_helper_bytes_from_paths(
+        paths,
+        github_repository,
+        build_tag,
+        rg_version,
+        target_os,
+        target_arch,
+    )
+}
+
+pub fn ripgrep_helper_candidate_paths_for_test(
+    resource_dir: &Path,
+    resource_path: &str,
+) -> Vec<PathBuf> {
+    ripgrep_helper_candidate_paths(resource_dir, resource_path)
+}
+
+pub fn plan_ripgrep_helper_upload_for_test(
+    helper_bytes: &[u8],
+    target_os: RemoteResourceTargetOs,
+    target_arch: RemoteResourceTargetArch,
+    app_version: &str,
+    rg_version: &str,
+) -> Result<ResourceHelperUploadPlan> {
+    plan_ripgrep_helper_upload(
+        helper_bytes,
+        target_os,
+        target_arch,
+        app_version,
+        rg_version,
+    )
+}
+
+pub fn ripgrep_managed_command_for_test(
+    target_os: RemoteResourceTargetOs,
+    helper_path: &str,
+    ripgrep_args: &str,
+) -> String {
+    ripgrep_managed_command(target_os, helper_path, ripgrep_args)
 }
 
 fn remote_rg_kind(root_path: &str, path: &str) -> FileEntryKind {
@@ -840,7 +1973,7 @@ fn remote_rg_kind(root_path: &str, path: &str) -> FileEntryKind {
     }
 }
 
-fn shell_quote(value: &str) -> String {
+pub(crate) fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
@@ -1366,6 +2499,9 @@ fn scan_local_search_path(
                 path: entry_path.to_string_lossy().into_owned(),
                 name: name.clone(),
                 kind: kind.clone(),
+                line_number: None,
+                line_text: None,
+                ranges: Vec::new(),
             });
         }
         if matches.len() >= limit {
@@ -1384,6 +2520,118 @@ fn scan_local_search_path(
             )?
         {
             return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn scan_local_content_search_path(
+    path: &Path,
+    query: &str,
+    include_hidden: bool,
+    follow_symlinks: bool,
+    limit: usize,
+    matches: &mut Vec<FileSearchMatch>,
+    diagnostics: &mut Vec<String>,
+    visited: &mut HashSet<PathBuf>,
+) -> Result<bool> {
+    if matches.len() >= limit {
+        return Ok(true);
+    }
+    let canonical = if follow_symlinks {
+        match fs::canonicalize(path) {
+            Ok(value) => Some(value),
+            Err(error) => {
+                diagnostics.push(format!("{}: {error}", path.display()));
+                None
+            }
+        }
+    } else {
+        None
+    };
+    if let Some(canonical) = canonical {
+        if !visited.insert(canonical) {
+            return Ok(false);
+        }
+    }
+    let children = match fs::read_dir(path) {
+        Ok(value) => value,
+        Err(error) => {
+            diagnostics.push(format!("{}: {error}", path.display()));
+            return Ok(false);
+        }
+    };
+    for entry in children {
+        if matches.len() >= limit {
+            return Ok(true);
+        }
+        let entry = match entry {
+            Ok(value) => value,
+            Err(error) => {
+                diagnostics.push(format!("{}: {error}", path.display()));
+                continue;
+            }
+        };
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !include_hidden && name.starts_with('.') {
+            continue;
+        }
+        let entry_path = entry.path();
+        let metadata = if follow_symlinks {
+            fs::metadata(&entry_path)
+        } else {
+            fs::symlink_metadata(&entry_path)
+        };
+        let metadata = match metadata {
+            Ok(value) => value,
+            Err(error) => {
+                diagnostics.push(format!("{}: {error}", entry_path.display()));
+                continue;
+            }
+        };
+        let kind = local_entry_kind(&metadata.file_type());
+        match kind {
+            FileEntryKind::Directory => {
+                if scan_local_content_search_path(
+                    &entry_path,
+                    query,
+                    include_hidden,
+                    follow_symlinks,
+                    limit,
+                    matches,
+                    diagnostics,
+                    visited,
+                )? {
+                    return Ok(true);
+                }
+            }
+            FileEntryKind::File | FileEntryKind::Symlink => {
+                let Ok(content) = fs::read_to_string(&entry_path) else {
+                    continue;
+                };
+                for (index, line) in content.lines().enumerate() {
+                    if matches.len() >= limit {
+                        return Ok(true);
+                    }
+                    let lowercase = line.to_lowercase();
+                    let Some(byte_start) = lowercase.find(query) else {
+                        continue;
+                    };
+                    let byte_end = byte_start + query.len();
+                    matches.push(FileSearchMatch {
+                        path: entry_path.to_string_lossy().into_owned(),
+                        name: name.clone(),
+                        kind: kind.clone(),
+                        line_number: u32::try_from(index + 1).ok(),
+                        line_text: Some(line.to_string()),
+                        ranges: vec![FileSearchMatchRange {
+                            start: u32::try_from(byte_start).unwrap_or(u32::MAX),
+                            end: u32::try_from(byte_end).unwrap_or(u32::MAX),
+                        }],
+                    });
+                }
+            }
+            FileEntryKind::Other => {}
         }
     }
     Ok(false)
@@ -1432,6 +2680,9 @@ fn scan_sftp_search_path(
                 path: child_path.to_string_lossy().into_owned(),
                 name: name.clone(),
                 kind: kind.clone(),
+                line_number: None,
+                line_text: None,
+                ranges: Vec::new(),
             });
         }
         if matches.len() >= limit {
@@ -1581,7 +2832,11 @@ fn sftp_current_path(requested: Option<String>, default_path: &str) -> String {
 
 fn looks_like_local_desktop_path(value: &str) -> bool {
     let bytes = value.as_bytes();
-    if bytes.len() >= 3 && bytes[1] == b':' && (bytes[2] == b'\\' || bytes[2] == b'/') && bytes[0].is_ascii_alphabetic() {
+    if bytes.len() >= 3
+        && bytes[1] == b':'
+        && (bytes[2] == b'\\' || bytes[2] == b'/')
+        && bytes[0].is_ascii_alphabetic()
+    {
         return true;
     }
     value.contains('\\')
@@ -1787,7 +3042,7 @@ mod tests {
     #[test]
     fn remote_rg_matches_filter_by_basename_and_report_truncation() {
         let mut matches = Vec::new();
-        let truncated = collect_remote_rg_matches(
+        let truncated = collect_remote_rg_name_matches(
             "/home/me/src/main.rs\n/home/me/src/other.rs\n/home/me/src/readme.md\n",
             "/home/me",
             "rs",

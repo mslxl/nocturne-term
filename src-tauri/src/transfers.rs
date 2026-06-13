@@ -55,7 +55,11 @@ impl<'a> TransferAuthScope<'a> {
             .initiator_workspace_id
             .as_deref()
             .filter(|value| !value.trim().is_empty())
-            .ok_or_else(|| invalid_error("transfer task requires an initiator Workspace for SFTP authentication"))?;
+            .ok_or_else(|| {
+                invalid_error(
+                    "transfer task requires an initiator Workspace for SFTP authentication",
+                )
+            })?;
         Ok(Self { workspace_id })
     }
 }
@@ -103,7 +107,9 @@ enum TransferSourceKind {
 }
 
 enum TransferPlanEntry {
-    Directory { destination: TransferEndpoint },
+    Directory {
+        destination: TransferEndpoint,
+    },
     File {
         source: TransferEndpoint,
         destination: TransferEndpoint,
@@ -188,13 +194,20 @@ pub(crate) fn retry_transfer_task(
         let store = transfer_store();
         let mut guard = lock_store(&store)?;
         if guard.running.contains_key(&input.task_id) {
-            return Err(invalid_error(format!("transfer task {} is already running", input.task_id)));
+            return Err(invalid_error(format!(
+                "transfer task {} is already running",
+                input.task_id
+            )));
         }
         let task = task_mut(&mut guard, &input.task_id)?;
         match task.status {
             TransferTaskStatus::Failed | TransferTaskStatus::Canceled => {}
-            TransferTaskStatus::Queued | TransferTaskStatus::Running | TransferTaskStatus::Completed => {
-                return Err(invalid_error("only failed or canceled transfers can be retried"));
+            TransferTaskStatus::Queued
+            | TransferTaskStatus::Running
+            | TransferTaskStatus::Completed => {
+                return Err(invalid_error(
+                    "only failed or canceled transfers can be retried",
+                ));
             }
         }
         task.status = TransferTaskStatus::Queued;
@@ -239,9 +252,9 @@ fn schedule_transfers(app: AppHandle) -> Result<()> {
             let host_counts = running_host_counts(&guard.tasks, &guard.running);
             let Some(index) = guard.tasks.iter().position(|task| {
                 task.status == TransferTaskStatus::Queued
-                    && task_hosts(task)
-                        .iter()
-                        .all(|host_id| host_counts.get(host_id).copied().unwrap_or(0) < settings.per_host)
+                    && task_hosts(task).iter().all(|host_id| {
+                        host_counts.get(host_id).copied().unwrap_or(0) < settings.per_host
+                    })
             }) else {
                 break;
             };
@@ -252,9 +265,7 @@ fn schedule_transfers(app: AppHandle) -> Result<()> {
             task.updated_at_unix_ms = now_unix_ms();
             let task_id = task.id.clone();
             runnable.push((task.clone(), Arc::clone(&canceled)));
-            guard
-                .running
-                .insert(task_id, RunningTransfer { canceled });
+            guard.running.insert(task_id, RunningTransfer { canceled });
             bump_version(&mut guard)?;
         }
     }
@@ -278,7 +289,9 @@ fn spawn_transfer_worker(app: AppHandle, task: TransferTask, canceled: Arc<Atomi
                 }
             }
             Err(error) => {
-                if let Err(update_error) = mark_transfer_failed(&task_id, error.to_string(), &canceled) {
+                if let Err(update_error) =
+                    mark_transfer_failed(&task_id, error.to_string(), &canceled)
+                {
                     log::warn!("failed to mark transfer {task_id} failed: {update_error}");
                 }
                 if let Err(error) = schedule_transfers(app.clone()) {
@@ -299,7 +312,15 @@ fn execute_transfer(app: &AppHandle, task: &TransferTask, canceled: &AtomicBool)
             if let Some(size) = metadata.size {
                 set_transfer_total(&task.id, size)?;
             }
-            copy_file(app, &task.source, &task.destination, &task.id, auth_scope, canceled, &mut done)
+            copy_file(
+                app,
+                &task.source,
+                &task.destination,
+                &task.id,
+                auth_scope,
+                canceled,
+                &mut done,
+            )
         }
         TransferSourceKind::Directory => copy_directory(app, task, auth_scope, canceled),
     }
@@ -312,7 +333,14 @@ fn copy_directory(
     canceled: &AtomicBool,
 ) -> Result<()> {
     let mut plan = Vec::new();
-    collect_directory_plan(app, &task.source, &task.destination, auth_scope, canceled, &mut plan)?;
+    collect_directory_plan(
+        app,
+        &task.source,
+        &task.destination,
+        auth_scope,
+        canceled,
+        &mut plan,
+    )?;
     let total = plan
         .iter()
         .filter_map(|entry| match entry {
@@ -336,7 +364,15 @@ fn copy_directory(
                 source,
                 destination,
                 ..
-            } => copy_file(app, &source, &destination, &task.id, auth_scope, canceled, &mut done)?,
+            } => copy_file(
+                app,
+                &source,
+                &destination,
+                &task.id,
+                auth_scope,
+                canceled,
+                &mut done,
+            )?,
         }
     }
     Ok(())
@@ -357,10 +393,18 @@ fn collect_directory_plan(
     for child in directory_children(app, source, auth_scope)? {
         ensure_not_canceled(canceled)?;
         let child_source = child_endpoint(source, &child.path);
-        let child_destination = child_endpoint(destination, &join_endpoint_path(destination, &child.name));
+        let child_destination =
+            child_endpoint(destination, &join_endpoint_path(destination, &child.name));
         match child.kind {
             TransferSourceKind::Directory => {
-                collect_directory_plan(app, &child_source, &child_destination, auth_scope, canceled, plan)?;
+                collect_directory_plan(
+                    app,
+                    &child_source,
+                    &child_destination,
+                    auth_scope,
+                    canceled,
+                    plan,
+                )?;
             }
             TransferSourceKind::File => plan.push(TransferPlanEntry::File {
                 source: child_source,
@@ -429,7 +473,16 @@ fn source_metadata(
             })
         }
         TransferProvider::Sftp { host, path } => {
-            let connection = connect_sftp_for_host(app, &host, transfer_sftp_auth_scope(auth_scope), false, false, None, false, "transfer-source-stat")?;
+            let connection = connect_sftp_for_host(
+                app,
+                &host,
+                transfer_sftp_auth_scope(auth_scope),
+                false,
+                false,
+                None,
+                false,
+                "transfer-source-stat",
+            )?;
             let sftp = connection.session.sftp().map_err(terminal_error)?;
             let stat = sftp.lstat(Path::new(&path)).map_err(terminal_error)?;
             let name = Path::new(&path)
@@ -444,7 +497,11 @@ fn source_metadata(
                 } else {
                     TransferSourceKind::File
                 },
-                size: if sftp_stat_is_dir(&stat) { None } else { stat.size },
+                size: if sftp_stat_is_dir(&stat) {
+                    None
+                } else {
+                    stat.size
+                },
             })
         }
     }
@@ -476,11 +533,21 @@ fn directory_children(
                     })
                 })
                 .collect::<Result<Vec<_>>>()?;
-            children.sort_by(|left, right| left.name.to_lowercase().cmp(&right.name.to_lowercase()));
+            children
+                .sort_by(|left, right| left.name.to_lowercase().cmp(&right.name.to_lowercase()));
             Ok(children)
         }
         TransferProvider::Sftp { host, path } => {
-            let connection = connect_sftp_for_host(app, &host, transfer_sftp_auth_scope(auth_scope), false, false, None, false, "transfer-list")?;
+            let connection = connect_sftp_for_host(
+                app,
+                &host,
+                transfer_sftp_auth_scope(auth_scope),
+                false,
+                false,
+                None,
+                false,
+                "transfer-list",
+            )?;
             let sftp = connection.session.sftp().map_err(terminal_error)?;
             let mut children = sftp
                 .readdir(Path::new(&path))
@@ -504,7 +571,8 @@ fn directory_children(
                     })
                 })
                 .collect::<Vec<_>>();
-            children.sort_by(|left, right| left.name.to_lowercase().cmp(&right.name.to_lowercase()));
+            children
+                .sort_by(|left, right| left.name.to_lowercase().cmp(&right.name.to_lowercase()));
             Ok(children)
         }
     }
@@ -516,15 +584,24 @@ fn ensure_destination_directory(
     auth_scope: TransferAuthScope<'_>,
 ) -> Result<()> {
     match endpoint_provider(app, endpoint)? {
-        TransferProvider::Local(path) => {
-            ensure_local_destination_directory(&path)
-        }
+        TransferProvider::Local(path) => ensure_local_destination_directory(&path),
         TransferProvider::Sftp { host, path } => {
-            let connection = connect_sftp_for_host(app, &host, transfer_sftp_auth_scope(auth_scope), false, false, None, false, "transfer-mkdir")?;
+            let connection = connect_sftp_for_host(
+                app,
+                &host,
+                transfer_sftp_auth_scope(auth_scope),
+                false,
+                false,
+                None,
+                false,
+                "transfer-mkdir",
+            )?;
             let sftp = connection.session.sftp().map_err(terminal_error)?;
             match sftp.lstat(Path::new(&path)) {
                 Ok(stat) if sftp_stat_is_dir(&stat) => Ok(()),
-                Ok(_) => Err(invalid_error(format!("destination exists and is not a directory: {path}"))),
+                Ok(_) => Err(invalid_error(format!(
+                    "destination exists and is not a directory: {path}"
+                ))),
                 Err(_) => sftp.mkdir(Path::new(&path), 0o755).map_err(terminal_error),
             }
         }
@@ -668,12 +745,24 @@ fn ensure_destination_absent(
     match endpoint_provider(app, endpoint)? {
         TransferProvider::Local(path) => {
             if path.exists() {
-                return Err(invalid_error(format!("destination already exists: {}", path.display())));
+                return Err(invalid_error(format!(
+                    "destination already exists: {}",
+                    path.display()
+                )));
             }
             Ok(())
         }
         TransferProvider::Sftp { host, path } => {
-            let connection = connect_sftp_for_host(app, &host, transfer_sftp_auth_scope(auth_scope), false, false, None, false, "transfer-stat")?;
+            let connection = connect_sftp_for_host(
+                app,
+                &host,
+                transfer_sftp_auth_scope(auth_scope),
+                false,
+                false,
+                None,
+                false,
+                "transfer-stat",
+            )?;
             let sftp = connection.session.sftp().map_err(terminal_error)?;
             match sftp.lstat(Path::new(&path)) {
                 Ok(_) => Err(invalid_error(format!("destination already exists: {path}"))),
@@ -696,34 +785,42 @@ fn ensure_remote_parent(sftp: &Sftp, path: &Path) -> Result<()> {
 
 enum TransferProvider {
     Local(PathBuf),
-    Sftp { host: ConnectionHostEntry, path: String },
+    Sftp {
+        host: ConnectionHostEntry,
+        path: String,
+    },
 }
 
 fn endpoint_provider(app: &AppHandle, endpoint: &TransferEndpoint) -> Result<TransferProvider> {
     match endpoint.kind {
-        TransferEndpointKind::Local => Ok(TransferProvider::Local(PathBuf::from(expand_local_home(
-            endpoint.path.clone(),
-        )))),
+        TransferEndpointKind::Local => Ok(TransferProvider::Local(PathBuf::from(
+            expand_local_home(endpoint.path.clone()),
+        ))),
         TransferEndpointKind::Provider => {
-            let provider_kind = endpoint
-                .provider_kind
-                .clone()
-                .ok_or_else(|| invalid_error("provider transfer endpoint requires provider_kind"))?;
+            let provider_kind = endpoint.provider_kind.clone().ok_or_else(|| {
+                invalid_error("provider transfer endpoint requires provider_kind")
+            })?;
             let host_id = endpoint
                 .host_id
                 .as_deref()
                 .ok_or_else(|| invalid_error("provider transfer endpoint requires host_id"))?;
             let host = connection_host_by_id(app, host_id)?;
             match (provider_kind, host.document.protocol.clone()) {
-                (FileProviderKind::Local, ConnectionProtocol::Local) => Ok(TransferProvider::Local(PathBuf::from(
-                    expand_local_home(endpoint.path.clone()),
-                ))),
+                (FileProviderKind::Local, ConnectionProtocol::Local) => {
+                    Ok(TransferProvider::Local(PathBuf::from(expand_local_home(
+                        endpoint.path.clone(),
+                    ))))
+                }
                 (FileProviderKind::Sftp, ConnectionProtocol::Ssh) => Ok(TransferProvider::Sftp {
                     host,
                     path: endpoint.path.clone(),
                 }),
-                (FileProviderKind::Local, _) => Err(invalid_error("local provider endpoint must use a local host")),
-                (FileProviderKind::Sftp, _) => Err(invalid_error("sftp provider endpoint must use an ssh host")),
+                (FileProviderKind::Local, _) => Err(invalid_error(
+                    "local provider endpoint must use a local host",
+                )),
+                (FileProviderKind::Sftp, _) => {
+                    Err(invalid_error("sftp provider endpoint must use an ssh host"))
+                }
             }
         }
     }
@@ -806,8 +903,12 @@ fn update_task(task_id: &str, update: impl FnOnce(&mut TransferTask) -> Result<(
     Ok(())
 }
 
-fn lock_store(store: &Arc<Mutex<TransferStore>>) -> Result<std::sync::MutexGuard<'_, TransferStore>> {
-    store.lock().map_err(|_| invalid_error("transfer store lock poisoned"))
+fn lock_store(
+    store: &Arc<Mutex<TransferStore>>,
+) -> Result<std::sync::MutexGuard<'_, TransferStore>> {
+    store
+        .lock()
+        .map_err(|_| invalid_error("transfer store lock poisoned"))
 }
 
 fn task_mut<'a>(store: &'a mut TransferStore, task_id: &str) -> Result<&'a mut TransferTask> {
@@ -934,7 +1035,10 @@ mod tests {
             path: "/var/www".to_string(),
         };
 
-        assert_eq!(join_endpoint_path(&local, "child.txt"), "/tmp/root/child.txt");
+        assert_eq!(
+            join_endpoint_path(&local, "child.txt"),
+            "/tmp/root/child.txt"
+        );
         assert_eq!(join_endpoint_path(&sftp, "child.txt"), "/var/www/child.txt");
     }
 
@@ -974,7 +1078,8 @@ mod tests {
             path: file_path.to_string_lossy().into_owned(),
         };
 
-        ensure_local_destination_directory(Path::new(&directory_endpoint.path)).expect("create directory");
+        ensure_local_destination_directory(Path::new(&directory_endpoint.path))
+            .expect("create directory");
 
         assert!(root.path().join("nested").is_dir());
         assert!(ensure_local_destination_directory(Path::new(&file_endpoint.path)).is_err());

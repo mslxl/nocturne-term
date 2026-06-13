@@ -16,7 +16,8 @@ use crate::{
     error::{terminal_error, Result},
     types::{
         SshAuthTarget, SshAuthTargetKind, SshCredentialInput, SshCredentialKind,
-        SshWorkspaceChallenge, WorkspaceSshVerificationRequiredEvent, WorkspaceSshVerificationResponse,
+        SshWorkspaceChallenge, WorkspaceSshVerificationRequiredEvent,
+        WorkspaceSshVerificationResponse,
     },
 };
 
@@ -76,9 +77,9 @@ impl WorkspaceEncryptedCredentialStore {
             .or_insert_with(WorkspaceSecretScope::new);
         let cipher = scope.cipher();
         let nonce = ChaCha20Poly1305::generate_nonce(&mut OsRng);
-        let ciphertext = cipher
-            .encrypt(&nonce, value.as_bytes())
-            .map_err(|_| terminal_error("failed to encrypt Workspace encrypted temporary credential"))?;
+        let ciphertext = cipher.encrypt(&nonce, value.as_bytes()).map_err(|_| {
+            terminal_error("failed to encrypt Workspace encrypted temporary credential")
+        })?;
         scope.credentials.insert(
             key,
             WorkspaceEncryptedCredential {
@@ -99,11 +100,15 @@ impl WorkspaceEncryptedCredentialStore {
         let cipher = scope.cipher();
         let plaintext = cipher
             .decrypt(Nonce::from_slice(&entry.nonce), entry.ciphertext.as_ref())
-            .map_err(|_| terminal_error("failed to decrypt Workspace encrypted temporary credential"))?;
+            .map_err(|_| {
+                terminal_error("failed to decrypt Workspace encrypted temporary credential")
+            })?;
         String::from_utf8(plaintext)
             .map(Zeroizing::new)
             .map(Some)
-            .map_err(|_| terminal_error("Workspace encrypted temporary credential is not valid UTF-8"))
+            .map_err(|_| {
+                terminal_error("Workspace encrypted temporary credential is not valid UTF-8")
+            })
     }
 
     pub(crate) fn remove(&mut self, key: &WorkspaceCredentialKey) {
@@ -216,7 +221,9 @@ impl WorkspaceSshCoordinator {
         credential: &SshCredentialInput,
     ) -> Result<()> {
         if credential.kind != key.kind {
-            return Err(terminal_error("SSH credential kind does not match auth target challenge"));
+            return Err(terminal_error(
+                "SSH credential kind does not match auth target challenge",
+            ));
         }
         self.credentials
             .lock()
@@ -488,7 +495,9 @@ impl WorkspaceVerificationRequest {
             .lock()
             .map_err(|_| terminal_error("Workspace SSH verification lock poisoned"))?;
         if state.response.is_some() {
-            return Err(terminal_error("Workspace SSH verification already completed"));
+            return Err(terminal_error(
+                "Workspace SSH verification already completed",
+            ));
         }
         state.response = Some(response);
         self.cv.notify_all();
@@ -574,11 +583,7 @@ pub(crate) fn connection_host_auth_target(
     }
 }
 
-pub(crate) fn proxy_jump_auth_target(
-    username: &str,
-    hostname: &str,
-    port: u16,
-) -> SshAuthTarget {
+pub(crate) fn proxy_jump_auth_target(username: &str, hostname: &str, port: u16) -> SshAuthTarget {
     SshAuthTarget {
         id: format!("proxy-jump:{}@{}:{}", username, hostname, port),
         kind: SshAuthTargetKind::ProxyJump,
@@ -670,7 +675,10 @@ mod tests {
             store.get(&key_a).unwrap().as_deref().map(String::as_str),
             Some("secret-password")
         );
-        assert_eq!(store.get(&key_b).unwrap().as_deref().map(String::as_str), None);
+        assert_eq!(
+            store.get(&key_b).unwrap().as_deref().map(String::as_str),
+            None
+        );
         assert_ne!(
             store.raw_ciphertext_for_test(&key_a).unwrap(),
             b"secret-password"
@@ -693,18 +701,16 @@ mod tests {
 
         store.remove_workspace("workspace-a");
 
-        assert_eq!(store.get(&key).unwrap().as_deref().map(String::as_str), None);
+        assert_eq!(
+            store.get(&key).unwrap().as_deref().map(String::as_str),
+            None
+        );
     }
 
     #[test]
     fn proxy_jump_and_connection_host_use_distinct_auth_target_keys() {
-        let host_target = connection_host_auth_target(
-            "host-a",
-            "Prod",
-            "deploy",
-            "prod.example.com",
-            22,
-        );
+        let host_target =
+            connection_host_auth_target("host-a", "Prod", "deploy", "prod.example.com", 22);
         let jump_target = proxy_jump_auth_target("deploy", "jump.example.com", 2222);
 
         assert_ne!(host_target.id, jump_target.id);
@@ -731,10 +737,16 @@ mod tests {
     fn coordinator_deduplicates_identical_workspace_challenges() {
         let coordinator = WorkspaceSshCoordinator::default();
         let first = coordinator
-            .start_verification_for_test(credential_challenge("workspace-a", "connection-host:host-a"))
+            .start_verification_for_test(credential_challenge(
+                "workspace-a",
+                "connection-host:host-a",
+            ))
             .unwrap();
         let duplicate = coordinator
-            .start_verification_for_test(credential_challenge("workspace-a", "connection-host:host-a"))
+            .start_verification_for_test(credential_challenge(
+                "workspace-a",
+                "connection-host:host-a",
+            ))
             .unwrap();
 
         assert!(Arc::ptr_eq(&first, &duplicate));
@@ -745,10 +757,16 @@ mod tests {
     fn coordinator_allows_only_one_active_verification_per_workspace() {
         let coordinator = WorkspaceSshCoordinator::default();
         let first = coordinator
-            .start_verification_for_test(credential_challenge("workspace-a", "connection-host:host-a"))
+            .start_verification_for_test(credential_challenge(
+                "workspace-a",
+                "connection-host:host-a",
+            ))
             .unwrap();
         let second = coordinator
-            .start_verification_for_test(credential_challenge("workspace-a", "connection-host:host-b"))
+            .start_verification_for_test(credential_challenge(
+                "workspace-a",
+                "connection-host:host-b",
+            ))
             .unwrap();
 
         assert_ne!(first.id, second.id);

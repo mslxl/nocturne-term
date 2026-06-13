@@ -24,7 +24,10 @@ describe("release workflow macOS DMG CI mode", () => {
   const workflow = readFileSync(".github/workflows/release.yml", "utf8");
 
   it("passes Tauri CI mode for each macOS DMG build", () => {
-    const macosDmgEntries = [...workflow.matchAll(/label:\s*(macOS[^\n]+)[\s\S]*?args:\s*([^\n]+)/g)]
+    const buildJob = workflow.match(/\n  build:\n[\s\S]*?(?=\n  [a-zA-Z0-9_-]+:|\n\S|$)/)?.[0];
+    assert.ok(buildJob, "release workflow must contain the app build job");
+
+    const macosDmgEntries = [...buildJob.matchAll(/label:\s*(macOS[^\n]+)[\s\S]*?args:\s*([^\n]+)/g)]
       .map((match) => ({ label: match[1].trim(), args: match[2].trim() }))
       .filter((entry) => entry.args.includes("--bundles dmg"));
 

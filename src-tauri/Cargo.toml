@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "A Tauri App"
 authors = ["mslxl"]
 edition = "2021"
+default-run = "nocturne"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -28,7 +29,11 @@ portable-pty = "0.9"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
+reqwest = { version = "0.13.3", features = ["blocking"] }
+sysinfo = "0.37"
 hex = "0.4"
+flate2 = "1"
+tar = "0.4"
 toml = "0.8"
 toml_edit = "0.19"
 specta = "=2.0.0-rc.25"
@@ -47,6 +52,7 @@ log = "0.4"
 urlencoding = "2.1"
 zeroize = "1.8"
 tauri-plugin-decorum = "1.1.1"
+zip = { version = "2.4", default-features = false, features = ["deflate"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6.4"
@@ -62,8 +68,34 @@ objc2-foundation = { version = "0.3.2", default-features = false, features = [
   "NSGeometry",
 ] }
 
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_Graphics_Dxgi",
+] }
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_System_Performance",
+] }
+
 [dev-dependencies]
 tempfile = "3.27.0"
+
+[[test]]
+name = "resource-monitor-local-provider"
+path = "../tests/resource-monitor-local-provider.rs"
+
+[[test]]
+name = "resource-monitor-build-metadata"
+path = "../tests/resource-monitor-build-metadata.rs"
+
+[[test]]
+name = "files-ripgrep-search"
+path = "../tests/files-ripgrep-search.rs"
+
+[[test]]
+name = "files-ripgrep-helper-deployment"
+path = "../tests/files-ripgrep-helper-deployment.rs"
 
 [profile.release]
 codegen-units = 1

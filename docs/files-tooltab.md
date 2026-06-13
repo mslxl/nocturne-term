@@ -274,7 +274,7 @@ Preview supports:
 
 ## Search
 
-Files supports remote recursive search in the first release. The initial implementation provides recursive name search through `local scan` and `SFTP scan`. Content search is layered onto the same UI and command contract through ripgrep providers.
+Files supports recursive name and content search in the first release. Name search can use provider scans or ripgrep. Content search uses ripgrep and shows line-level matches from `rg --json`; scan fallbacks only provide name/path matches unless the local provider can safely scan text files directly.
 
 Search UI lives inside the Files tool tab. Results are a temporary result view for that tool tab. Search business state syncs to mirrors; panel scroll and sizing are view-local.
 
@@ -290,15 +290,13 @@ Provider labels include:
 
 - `ripgrep on remote`
 - `Nocturne ripgrep helper`
-- `find on remote`
-- `grep on remote`
 - `SFTP scan`
 - `local scan`
 - `local ripgrep`
 
-When using `rg --json`, show matching lines and highlight ranges. Fallback providers should at least show matching lines when content search is supported. Scan providers return file/path matches only and must label themselves clearly.
+When using `rg --json`, show matching lines and highlight ranges. Local content scan may show matching lines when local `rg` is unavailable. SFTP scan returns file/path matches only; if the user asks for content search and no remote `rg` provider is available because policy blocks helper deployment, the result is empty with a diagnostic instead of pretending that a name scan searched file contents.
 
-The first release does not ship a full uploadable helper manager. `remote_helper_policy` only gates whether Nocturne may try a remote `rg` check before falling back to `SFTP scan`. If the remote host has `rg`, the provider label is `ripgrep on remote`; otherwise the UI falls back to `SFTP scan` after an explicit user confirmation when policy is `ask`.
+The first release ships uploadable ripgrep helper binaries. `remote_helper_policy` gates whether Nocturne may upload a managed `rg` helper after checking the target Host for an existing `rg`. If the remote Host already has `rg`, the provider label is `ripgrep on remote`. If not, Nocturne uses the bundled `rg` helper when policy permits. If the bundled helper is missing, Nocturne may ask the user to download the official ripgrep archive for the locked helper version, extract `rg` or `rg.exe`, and then upload the extracted helper. If policy is `ask`, the Workspace prompt must identify the helper name, purpose, Host, target OS, target architecture, upload path, and SHA-256 hash before upload. If policy is `never` or the user refuses, name search may fall back to `SFTP scan`; content search reports that ripgrep is required.
 
 Search defaults follow ripgrep:
 
@@ -311,9 +309,9 @@ Search UI includes toggles:
 - Ignore ignore files
 - Follow symlinks
 
-## Remote Helper
+## Ripgrep Helper Packaging And Deployment
 
-The helper manager is a provider-level abstraction. The first release only ships a ripgrep helper for remote search.
+The helper manager is a provider-level abstraction. Files search first probes for an existing remote `rg`; when it is unavailable, Files search must deploy a managed ripgrep helper if policy permits.
 
 Helper policy is configurable:
 
@@ -321,18 +319,42 @@ Helper policy is configurable:
 - Never
 - Allow
 
-If remote `rg` is unavailable and policy permits, Nocturne can upload a managed `rg` helper after clear user confirmation or automatically under Allow.
+The prompt must clearly display:
 
-First-release behavior is narrower than the long-term helper design: Nocturne probes for `rg` on the remote host first. It does not upload a helper binary yet.
+- helper name: `rg`
+- purpose: Files recursive search
+- target Host
+- target OS
+- target architecture
+- upload path
+- checksum/hash
+
+The application bundle must include `rg` helper binaries for supported target OS and architecture combinations. Packaging must not include only the app's current platform because SSH targets are runtime-dependent.
+
+Supported helper bundle targets:
+
+- Linux x86_64: `ripgrep/rg-<rg-version>-linux-x86_64`
+- Linux aarch64: `ripgrep/rg-<rg-version>-linux-aarch64`
+- Linux armv7: `ripgrep/rg-<rg-version>-linux-armv7`
+- macOS x86_64: `ripgrep/rg-<rg-version>-macos-x86_64`
+- macOS aarch64: `ripgrep/rg-<rg-version>-macos-aarch64`
+- Windows x86_64: `ripgrep/rg-<rg-version>-windows-x86_64.exe`
+- Windows i686: `ripgrep/rg-<rg-version>-windows-i686.exe`
+
+Release CI must fetch or build every supported `rg` target before building app bundles. Because managed `rg` helpers come from upstream prebuilt archives, CI prepares all supported targets in one job, uploads one workflow artifact containing every flat `rg-*` file, downloads that artifact into `src-tauri/resources/ripgrep`, and lets Tauri include that resource tree in every app bundle. CI does not upload `rg` binaries to Nocturne GitHub Releases.
+
+At runtime, Nocturne first looks for the bundled `rg` helper in app resources. If that file is missing, Nocturne may ask the user whether to download the official ripgrep archive for the locked helper version from `BurntSushi/ripgrep`. It extracts the `rg` or `rg.exe` binary from that archive before upload. It must not use `latest`, a Nocturne app tag, a different ripgrep version, or a guessed version.
+
+Deployment status and hash validation are remembered per Host, but authentication still uses only the current Workspace's encrypted temporary credentials. Closing a Workspace does not delete an uploaded `rg` helper. If a remote helper's manifest or hash does not match the bundled helper, Nocturne validates and uploads again according to helper policy.
 
 Remote helper paths:
 
 ```text
-$TMPDIR/nocturne/helpers/<version>/rg
-/tmp/nocturne-$USER/helpers/<version>/rg
-~/.cache/nocturne/helpers/<version>/rg
+~/.cache/nocturne/helpers/<app-version>/rg-<rg-version>/rg
+~/.cache/nocturne/helpers/<app-version>/rg-<rg-version>/rg.exe
+~/.cache/nocturne/helpers/<app-version>/rg-<rg-version>/rg.manifest.json
 ```
 
-Use a same-directory `manifest.json` recording helper name, version, target OS, target architecture, checksum, and upload time. Before execution, validate the manifest and helper. If validation fails, upload again.
+Use a same-directory `rg.manifest.json` recording helper name, purpose, app version plus rg version, target OS, target architecture, remote upload path, checksum, and capabilities. Before execution, validate the manifest and helper. If validation fails, upload again.
 
 Helpers may remain in the remote temp directory for reuse. Nocturne does not need to clean them after each search.

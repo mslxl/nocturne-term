@@ -11,3 +11,8 @@ node_modules
 !.env.example
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
+target/
+**/target/
+src-tauri/resources/nocturne-host-agent/**
+!src-tauri/resources/nocturne-host-agent/
+!src-tauri/resources/nocturne-host-agent/.gitkeep

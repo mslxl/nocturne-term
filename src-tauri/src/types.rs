@@ -38,6 +38,7 @@ pub struct ConnectionHostDocument {
     pub folder: Option<String>,
     pub icon: Option<ConnectionHostIcon>,
     pub files: Option<HostFilesConfig>,
+    pub resources: Option<HostResourceConfig>,
     pub protocol: ConnectionProtocol,
     pub local: Option<LocalConnectionConfig>,
     pub ssh: Option<SshConnectionConfig>,
@@ -53,6 +54,7 @@ impl Default for ConnectionHostDocument {
             folder: None,
             icon: None,
             files: None,
+            resources: None,
             protocol: ConnectionProtocol::Local,
             local: None,
             ssh: None,
@@ -129,6 +131,29 @@ pub struct LocalConnectionConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, Type, Default)]
 pub struct HostFilesConfig {
     pub default_path: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type, Default)]
+pub struct HostResourceConfig {
+    pub target_os: Option<RemoteResourceTargetOs>,
+    pub target_arch: Option<RemoteResourceTargetArch>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoteResourceTargetOs {
+    Linux,
+    Macos,
+    Windows,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoteResourceTargetArch {
+    X86_64,
+    Aarch64,
+    Armv7,
+    I686,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
@@ -267,6 +292,7 @@ pub enum WorkspaceToolKind {
     Files,
     Terminal,
     Transfers,
+    Resources,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
@@ -392,23 +418,53 @@ pub struct AppMenuPopupInput {
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum WorkspaceIntent {
-    CreateWorkspace { host_id: String },
-    ActivateWorkspace { workspace_id: String },
-    RenameWorkspace { workspace_id: String, title: String },
-    CloseWorkspace { workspace_id: String },
-    CloseOtherWorkspaces { workspace_id: String },
-    CloseWorkspacesToRight { workspace_id: String },
-    ActivateToolSlot { workspace_id: String, slot_id: String },
-    CloseToolSlot { workspace_id: String, slot_id: String },
-    CloseOtherToolSlots { workspace_id: String, slot_id: String },
-    CloseToolSlotsToRight { workspace_id: String, slot_id: String },
+    CreateWorkspace {
+        host_id: String,
+    },
+    ActivateWorkspace {
+        workspace_id: String,
+    },
+    RenameWorkspace {
+        workspace_id: String,
+        title: String,
+    },
+    CloseWorkspace {
+        workspace_id: String,
+    },
+    CloseOtherWorkspaces {
+        workspace_id: String,
+    },
+    CloseWorkspacesToRight {
+        workspace_id: String,
+    },
+    ActivateToolSlot {
+        workspace_id: String,
+        slot_id: String,
+    },
+    CloseToolSlot {
+        workspace_id: String,
+        slot_id: String,
+    },
+    CloseOtherToolSlots {
+        workspace_id: String,
+        slot_id: String,
+    },
+    CloseToolSlotsToRight {
+        workspace_id: String,
+        slot_id: String,
+    },
     MirrorToolTab {
         source_tool_tab_id: String,
         target_workspace_id: String,
         target_group_id: String,
     },
-    FloatToolSlot { workspace_id: String, slot_id: String },
-    CloseFloatingWindow { floating_window_id: String },
+    FloatToolSlot {
+        workspace_id: String,
+        slot_id: String,
+    },
+    CloseFloatingWindow {
+        floating_window_id: String,
+    },
     MoveToolSlotToGroup {
         workspace_id: String,
         slot_id: String,
@@ -435,6 +491,10 @@ pub enum WorkspaceIntent {
         workspace_id: String,
         target_group_id: Option<String>,
     },
+    OpenResourceMonitorToolTab {
+        workspace_id: String,
+        target_group_id: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
@@ -451,7 +511,7 @@ pub enum FileProviderKind {
     Sftp,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "snake_case")]
 pub enum FileEntryKind {
     File,
@@ -634,12 +694,21 @@ pub struct FilePreviewResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum FileSearchMode {
+    Name,
+    Content,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
 pub struct FileSearchInput {
     pub workspace_id: String,
     pub tool_tab_id: String,
     pub root_path: String,
     pub query: String,
+    pub mode: FileSearchMode,
     pub include_hidden: bool,
+    pub ignore_ignore_files: bool,
     pub follow_symlinks: bool,
     pub max_results: u32,
     pub accept_new_host_key: bool,
@@ -649,10 +718,19 @@ pub struct FileSearchInput {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct FileSearchMatchRange {
+    pub start: u32,
+    pub end: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
 pub struct FileSearchMatch {
     pub path: String,
     pub name: String,
     pub kind: FileEntryKind,
+    pub line_number: Option<u32>,
+    pub line_text: Option<String>,
+    pub ranges: Vec<FileSearchMatchRange>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
@@ -928,6 +1006,29 @@ pub struct TerminalSettings {
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
 pub struct TerminalSettingsInput {
     pub resolved_theme: Option<TerminalColorSchemeVariant>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum ResourceRefreshInterval {
+    OneSecond,
+    TwoSeconds,
+    FiveSeconds,
+    TenSeconds,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum ResourceRemoteProviderMode {
+    Auto,
+    Agent,
+    SystemCommands,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct ResourceSettings {
+    pub default_refresh_interval: ResourceRefreshInterval,
+    pub remote_provider: ResourceRemoteProviderMode,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]

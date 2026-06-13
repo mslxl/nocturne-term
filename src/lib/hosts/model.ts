@@ -17,6 +17,7 @@ export function emptySshHostDocument(id = ""): ConnectionHostDocument {
     folder: null,
     icon: catalogIcon("lucide:server"),
     files: null,
+    resources: null,
     protocol: "ssh",
     local: null,
     ssh: {
@@ -40,6 +41,7 @@ export function emptyLocalHostDocument(id = ""): ConnectionHostDocument {
     folder: null,
     icon: catalogIcon("lucide:terminal"),
     files: null,
+    resources: null,
     protocol: "local",
     local: {
       command: null,

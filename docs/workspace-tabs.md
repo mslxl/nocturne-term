@@ -4,7 +4,7 @@ This document defines Nocturne's host workspace model, nested tool tabs, mirror 
 
 ## Goals
 
-Nocturne's top-level tab is a host workspace, not a terminal session. A workspace binds to exactly one connection host and contains the tools used to work with that host: files, terminals, and transfers.
+Nocturne's top-level tab is a host workspace, not a terminal session. A workspace binds to exactly one connection host and contains the tools used to work with that host: files, terminals, transfers, and resource monitoring.
 
 The first implementation targets desktop. Android and iOS remain product targets, but the full IDE-style dock system, floating windows, and file drag-and-drop are desktop-first.
 
@@ -28,7 +28,7 @@ Rules:
 - Local hosts are valid workspace hosts.
 - The workspace title defaults to the host display name and can be renamed without changing the host.
 - Creating a workspace must never create a duplicate visible workspace title. If the default host display name is already used, the new workspace is created with the next numeric suffix, such as `Local Shell 2`.
-- A new workspace is created from the unified host picker. The default layout contains one Files tool tab, one Terminal tool tab, and one Transfers tool tab.
+- A new workspace is created from the unified host picker. The default layout contains one Files tool tab, one Terminal tool tab, one Resource Monitor tool tab, and one Transfers tool tab.
 - SSH workspaces use an SFTP-backed Files provider. Local workspaces use a local filesystem provider.
 
 Tool tabs are the tabs inside a workspace dock layout:
@@ -37,10 +37,11 @@ Tool tabs are the tabs inside a workspace dock layout:
 type ToolTab =
   | { kind: "files"; ownerWorkspaceId: string; hostId: string }
   | { kind: "terminal"; ownerWorkspaceId: string; hostId: string }
-  | { kind: "transfers"; ownerWorkspaceId: string; hostId: string };
+  | { kind: "transfers"; ownerWorkspaceId: string; hostId: string }
+  | { kind: "resources"; ownerWorkspaceId: string; hostId: string };
 ```
 
-The first release includes only `files`, `terminal`, and `transfers`.
+The first release includes `files`, `terminal`, `transfers`, and `resources`.
 
 ## Tool Tab Ownership
 
@@ -67,6 +68,8 @@ Shared business state includes Files current path, selection, sorting, provider 
 View-local state includes scroll position, focused control, hover state, Tree view expansion, Columns view column widths, preview panel width, find UI, selection UI, and local panel sizing inside a rendered control.
 
 Terminal mirrors have additional rules because one backend PTY can be displayed by multiple xterm views. The target Terminal mirror design is defined in [Terminal ToolTabs And Dock Splits](terminal-split-panes.md#terminal-mirror-target-design). If the current implementation has not yet shipped every Terminal mirror rule, treat that section as the acceptance criteria for future work.
+
+Resource Monitor mirrors share sampling business state and history buffers, but each mirror keeps its own display preferences. The target Resource Monitor design is defined in [Resource Monitor ToolTab](resource-monitor.md).
 
 Mirror UI must show a source badge such as `from Production` and use a distinct border style so the user can tell it does not belong to the current workspace host. When the mirror's owner host differs from the current workspace host, the badge or tooltip must expose the owner Workspace and Host identity clearly enough to prevent accidental commands against the wrong host.
 
@@ -177,12 +180,17 @@ Terminal tool tab titles:
 
 Transfers tool tab titles should be concise, normally `Transfers`.
 
+Resource Monitor tool tab titles should be concise, normally `Resources`.
+
 ## Default Workspace Template
 
 The default workspace template contains:
 
 - Files tool tab, docked on the left
 - Terminal tool tab, docked in the main content area
-- Transfers tool tab, docked below the Terminal tool tab
+- Resource Monitor tool tab, docked in a right-side dock group and active by default
+- Transfers tool tab, docked in the same right-side dock group
 
-Files, Terminal, and Transfers are ordinary dock group ToolTabs. The template chooses their initial placement; the model does not make the left or bottom areas special.
+Files, Terminal, Resources, and Transfers are ordinary dock group ToolTabs. The template chooses their initial placement; the model does not make the left or right areas special.
+
+Runtime layout memory should respect user changes for non-Terminal ToolTabs generally, not only for one specific feature. If the user closes, moves, or reorders Files, Resources, Transfers, or future non-Terminal tools, the current process's runtime snapshot preserves that choice. Startup still creates a fresh default Workspace instead of restoring old Workspaces.

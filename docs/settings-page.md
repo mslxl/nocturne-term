@@ -197,8 +197,9 @@ Settings should expose:
 - workspace reconnect strategy: visible auto reconnect, manual reconnect, safe auto restore
 - dock and workspace keybindings
 - desktop integrated title bar behavior
+- default Resource Monitor refresh interval
 
-Top-level Workspace tabs represent host-bound workspaces. Inner Tool tabs represent Files, Terminal, and Transfers surfaces. Do not add settings that describe top-level tabs as terminal sessions.
+Top-level Workspace tabs represent host-bound workspaces. Inner Tool tabs represent Files, Terminal, Resources, and Transfers surfaces. Do not add settings that describe top-level tabs as terminal sessions.
 
 ## Files And Transfers
 
@@ -211,7 +212,7 @@ Settings should expose:
 - delete behavior: direct delete or try remote Trash
 - copy/cut/paste mode: Windows-style or Finder-style
 - remote helper policy: Ask, Never, Allow
-- remote helper policy currently only controls whether Files may probe for `rg` on the remote host before falling back to `SFTP scan`; it does not upload a helper binary yet
+- remote helper policy controls managed helper upload decisions, including Resource Monitor's `nocturne-resource-monitor-agent` and Files search's managed `rg` helper after probing for an existing remote `rg`
 - text preview size threshold, default 1 MiB
 - image preview size threshold, default 10 MiB
 - toolbar action visibility and order as one action id per line: `up`, `refresh`, `new_folder`, `paste`, `upload_files`, `upload_folder`, `search`, `view_mode`, `path`; selection-scoped file actions such as rename, permissions, delete, copy, cut, and download belong to the Files context menu and are ignored in toolbar settings
@@ -219,6 +220,17 @@ Settings should expose:
 - per-host transfer concurrency, default 2
 
 Host-specific Files default paths belong in Host Manager as `[files].default_path`, not in global Files settings.
+
+## Resource Monitor
+
+Resource Monitor settings belong with Workspace/Tools or the peer tool settings category, not inside Files settings. See [Resource Monitor ToolTab](resource-monitor.md).
+
+Settings should expose:
+
+- `Default resource refresh interval`: 1s, 2s, 5s, or 10s; default 2s
+- `Remote resource provider`: Auto, Agent, or System Commands; default Auto. System Commands mode must never download, upload, install, or run the managed Resource Monitor agent. It may run existing target-host commands such as Linux `nvidia-smi` and must show unavailable reasons for metrics those commands cannot provide.
+
+ToolTab-local refresh interval changes are temporary and do not write this default setting.
 
 ## Workspace Tab Bar
 

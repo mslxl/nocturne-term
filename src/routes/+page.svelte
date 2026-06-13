@@ -38,6 +38,7 @@
   import { createWorkspaceStore } from "$lib/workspace/state.svelte";
   import { unwrapCommand } from "$lib/terminal/commands";
   import FilesToolTab from "$lib/files/FilesToolTab.svelte";
+  import ResourceMonitorToolTab from "$lib/resources/ResourceMonitorToolTab.svelte";
   import { DEFAULT_FILES_TOOLBAR_ACTION_IDS, normalizeFilesToolbarActionIds, type FilesToolbarActionId } from "$lib/files/toolbar-actions";
   import TransfersToolTab from "$lib/transfers/TransfersToolTab.svelte";
   import { routeTerminalPaneEvent, shouldHandleTerminalPaneEvent } from "$lib/terminal/event-routing";
@@ -582,6 +583,14 @@
 
   function firstContentGroupId(workspace: WorkspaceTabState): string | null {
     return firstGroupIdByRole(workspace.layout, "content");
+  }
+
+  function firstToolGroupId(workspace: WorkspaceTabState): string | null {
+    return (
+      firstGroupIdByRole(workspace.layout, "sidebar") ??
+      firstGroupIdByRole(workspace.layout, "panel") ??
+      firstContentGroupId(workspace)
+    );
   }
 
   function firstGroupIdByRole(layout: WorkspaceDockLayout, role: "content" | "panel" | "sidebar"): string | null {
@@ -1194,6 +1203,16 @@
     if (!tool) throw new Error("created Terminal ToolTab was not found in workspace snapshot");
     activeTerminalToolTabId = tool.id;
     await createHostSession(tool.host_id, { recordHistory, toolTabId: tool.id, workspaceId: workspace.id });
+  }
+
+  async function openWorkspaceResourceMonitor() {
+    const workspace = activeWorkspace;
+    if (!workspace) throw new Error("active workspace is not loaded");
+    await workspaceStore.dispatch({
+      kind: "open_resource_monitor_tool_tab",
+      workspace_id: workspace.id,
+      target_group_id: firstToolGroupId(workspace),
+    });
   }
 
   async function openDefaultWorkspace() {
@@ -3536,6 +3555,10 @@
       if (hasTauriRuntime()) await unwrapCommand(commands.openProfileNewDialog());
       return;
     }
+    if (id === "tool.openResources") {
+      await openWorkspaceResourceMonitor();
+      return;
+    }
     if (id === "terminal.movePaneLeft") return moveActivePane("left");
     if (id === "terminal.movePaneRight") return moveActivePane("right");
     if (id === "terminal.movePaneUp") return moveActivePane("up");
@@ -4513,6 +4536,8 @@
     {/key}
   {:else if tool.kind === "transfers"}
     <TransfersToolTab workspace={effectiveWorkspace} />
+  {:else if tool.kind === "resources"}
+    <ResourceMonitorToolTab toolTab={tool} workspaceId={effectiveWorkspace.id} viewId={slot.id} />
   {:else}
     {@const terminalMode = terminalRenderMode(workspace, effectiveWorkspace)}
     {@const runtime = terminalRuntimeForToolTab(tool.id)}

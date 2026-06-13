@@ -49,7 +49,7 @@ Rules:
 - The business queue is global.
 - The tool tab stores filter state, such as related to this workspace, all transfers, or a host filter.
 - Transfers tool tabs are persisted like other tool tabs.
-- Transfers defaults to a bottom dock panel when first opened, but it can be moved or floated.
+- Transfers defaults to the right-side dock group, beside Resource Monitor, when first opened in the default Workspace template. It can be moved or floated.
 
 The file list should show only lightweight per-row transfer markers. Detailed progress, failures, retries, conflicts, and cancellation live in Transfers.
 

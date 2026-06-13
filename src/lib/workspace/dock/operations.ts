@@ -13,6 +13,7 @@ import {
   type DockSide,
   type FloatingWindowId,
   type ToolSlot,
+  type ToolTab,
   type ToolTabId,
   type WorkspaceId,
   type WorkspaceLayoutSnapshot,
@@ -21,6 +22,11 @@ import {
 export type DockIdFactory = {
   slotId: () => DisplaySlotId;
   groupId: () => DockGroupId;
+};
+
+export type ResourceToolTabIdFactory = {
+  toolTabId: () => ToolTabId;
+  slotId: () => DisplaySlotId;
 };
 
 export function splitSlot(
@@ -154,6 +160,63 @@ export function closeOwnerToolTab(snapshot: WorkspaceLayoutSnapshot, toolTabId: 
       layout: requireCleanedDockLayout(removeOrCloseToolSlots(window.layout, toolTabId, closedSource, false)),
     })),
     toolTabs: snapshot.toolTabs.filter((item) => item.id !== toolTabId),
+  };
+}
+
+export function openResourceMonitorToolTab(
+  snapshot: WorkspaceLayoutSnapshot,
+  workspaceId: WorkspaceId,
+  targetGroupId: DockGroupId,
+  ids: ResourceToolTabIdFactory = resourceMonitorIds(snapshot),
+): WorkspaceLayoutSnapshot {
+  const workspace = snapshot.workspaces.find((item) => item.id === workspaceId);
+  if (!workspace) throw new Error(`workspace ${workspaceId} not found`);
+  const existing = snapshot.toolTabs.find(
+    (toolTab) => toolTab.ownerWorkspaceId === workspaceId && toolTab.kind === "resources",
+  );
+  if (existing) {
+    const existingSlot = listDockSlots(workspace.layout).find(
+      (slot) => slot.kind === "owned" && slot.toolTabId === existing.id,
+    );
+    if (existingSlot) {
+      return {
+        ...snapshot,
+        workspaces: snapshot.workspaces.map((item) =>
+          item.id === workspaceId ? { ...item, layout: activateSlot(item.layout, existingSlot.id) } : item,
+        ),
+      };
+    }
+    const slot = { kind: "owned" as const, id: ids.slotId(), toolTabId: existing.id };
+    return {
+      ...snapshot,
+      workspaces: snapshot.workspaces.map((item) =>
+        item.id === workspaceId
+          ? { ...item, layout: addSlotToGroup(item.layout, targetGroupId, slot) }
+          : item,
+      ),
+    };
+  }
+
+  const toolTab: ToolTab = {
+    id: ids.toolTabId(),
+    kind: "resources",
+    ownerWorkspaceId: workspaceId,
+    hostId: workspace.hostId,
+    title: "Resources",
+  };
+  const slot = { kind: "owned" as const, id: ids.slotId(), toolTabId: toolTab.id };
+  return {
+    ...snapshot,
+    workspaces: snapshot.workspaces.map((item) =>
+      item.id === workspaceId
+        ? {
+            ...item,
+            ownedToolTabIds: [...item.ownedToolTabIds, toolTab.id],
+            layout: addSlotToGroup(item.layout, targetGroupId, slot),
+          }
+        : item,
+    ),
+    toolTabs: [...snapshot.toolTabs, toolTab],
   };
 }
 
@@ -303,6 +366,22 @@ function collapseSingleChild(layout: DockLayout | null): DockLayout | null {
     children,
     ratios: normalizeDockRatios(layout.ratios.slice(0, children.length)),
   };
+}
+
+function resourceMonitorIds(snapshot: WorkspaceLayoutSnapshot): ResourceToolTabIdFactory {
+  return {
+    toolTabId: () => nextSequentialId("tool-resources", snapshot.toolTabs.map((toolTab) => toolTab.id)),
+    slotId: () => nextSequentialId("slot-resources", snapshot.workspaces.flatMap((workspace) => listDockSlots(workspace.layout).map((slot) => slot.id))),
+  };
+}
+
+function nextSequentialId(prefix: string, existingIds: string[]) {
+  const existing = new Set(existingIds);
+  for (let suffix = 1; suffix < Number.MAX_SAFE_INTEGER; suffix += 1) {
+    const candidate = `${prefix}-${suffix}`;
+    if (!existing.has(candidate)) return candidate;
+  }
+  throw new Error(`${prefix} id suffix space exhausted`);
 }
 
 function cleanupDockLayout(layout: DockLayout | null): DockLayout | null {

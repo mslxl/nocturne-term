@@ -3,6 +3,7 @@ mod config;
 mod error;
 mod files;
 mod logging;
+mod resources;
 mod ssh_trust;
 mod terminal;
 mod terminal_schemes;
@@ -16,7 +17,39 @@ use specta_typescript::Typescript;
 use tauri_specta::{collect_commands, Builder};
 
 pub use error::{ConfigError, Result};
+pub use files::{
+    build_remote_ripgrep_command_for_test, extract_ripgrep_helper_from_archive_for_test,
+    load_ripgrep_helper_bytes_from_path_for_test, load_ripgrep_helper_bytes_from_paths_for_test,
+    parse_remote_ripgrep_json_matches_for_test, plan_ripgrep_helper_upload_for_test,
+    ripgrep_helper_asset_name_for_test, ripgrep_helper_candidate_paths_for_test,
+    ripgrep_helper_resource_path_for_test, ripgrep_managed_command_for_test,
+};
+pub use resources::{
+    build_info_for_test, collect_linux_drm_gpu_metric_from_root_for_test,
+    collect_local_resource_snapshot, decide_resource_helper_deployment_for_test,
+    gpu_unavailable_metric_for_test, helper_asset_name_for_test, helper_download_plan_for_test,
+    helper_target_unknown_metric_for_test, load_resource_helper_bytes_from_path_for_test,
+    load_resource_helper_bytes_from_paths_for_test, local_resource_provider_descriptor_for_test,
+    normalize_cpu_metric_for_test, normalize_memory_metric_for_test,
+    normalize_resource_monitor_agent_metric_for_test, normalize_windows_gpu_pdh_samples_for_test,
+    parse_linux_free_b_for_test, parse_linux_nvidia_smi_csv_for_test,
+    parse_linux_proc_stat_cpu_for_test, parse_macos_memory_for_test, parse_remote_uname_for_test,
+    parse_remote_windows_platform_for_test, parse_resource_monitor_agent_ndjson_for_test,
+    parse_windows_memory_for_test, plan_resource_helper_upload_for_test,
+    remote_system_command_plan_for_test, remote_system_provider_runs_off_command_thread_for_test,
+    resolve_resource_target_for_test, resource_helper_candidate_paths_for_test,
+    resource_helper_resource_path_for_test, resource_settings_from_config_for_test,
+    LocalGpuDeviceMetric, LocalResourceMetric, LocalResourceMetricAvailability,
+    LocalResourceMetricDetails, LocalResourceMetricKind, LocalResourceSnapshot, NocturneBuildInfo,
+    RemoteResourceTargetDetection, RemoteSystemCommandPlan, ResourceHelperBytesSource,
+    ResourceHelperDeploymentDecision, ResourceHelperDeploymentMemory,
+    ResourceHelperDeploymentStatus, ResourceHelperDownloadPlan, ResourceHelperManifest,
+    ResourceHelperPolicy, ResourceHelperUploadPlan, ResourceMonitorAgentEvent,
+    ResourceMonitorAgentGpuDevice, ResourceMonitorAgentMetric, WindowsGpuAdapterInfo,
+    WindowsGpuPdhSample,
+};
 pub use types::*;
+pub use types::{HostResourceConfig, RemoteResourceTargetArch, RemoteResourceTargetOs};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -25,6 +58,8 @@ pub fn run() {
         .commands(collect_commands![
             config::get_config_root,
             config::get_config_snapshot,
+            resources::get_resource_settings,
+            resources::collect_resource_monitor_snapshot,
             terminal::get_terminal_settings,
             terminal::get_terminal_settings_for_theme,
             terminal::create_host_terminal_session,
