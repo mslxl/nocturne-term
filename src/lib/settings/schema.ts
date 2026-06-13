@@ -19,7 +19,7 @@ import type { MessageKey } from "$lib/i18n/messages";
 import { DEFAULT_FILES_TOOLBAR_ACTION_IDS, filesToolbarActionIdsFromSettingText, filesToolbarActionSettingText } from "$lib/files/toolbar-actions";
 import { defaultKeybindingMap, terminalKeybindings, type KeybindingMap } from "$lib/terminal/keybindings";
 
-export type SettingCategoryId = "appearance" | "workspace" | "terminal" | "files" | "transfers" | "keybindings" | "profiles" | "hosts";
+export type SettingCategoryId = "appearance" | "workspace" | "terminal" | "files" | "resources" | "transfers" | "keybindings" | "profiles" | "hosts";
 export type SettingValueKind = "text" | "number" | "integer" | "boolean" | "select" | "textarea" | "path-list" | "color" | "keybindings";
 export type SettingsPlatform = "windows" | "linux" | "macos";
 
@@ -76,6 +76,7 @@ export const settingCategories: { id: SettingCategoryId; label: MessageKey }[] =
   { id: "workspace", label: "workspace" },
   { id: "terminal", label: "terminal" },
   { id: "files", label: "files" },
+  { id: "resources", label: "resources" },
   { id: "transfers", label: "transfers" },
   { id: "keybindings", label: "keybindings" },
   { id: "profiles", label: "profiles" },
@@ -419,6 +420,22 @@ export const settingsSchema: SettingDefinition[] = [
       const ids = filesToolbarActionIdsFromSettingText(String(value));
       return ids.length ? configStringArray(ids) : undefined;
     },
+  },
+  {
+    key: "resources.default_refresh_interval",
+    category: "resources",
+    label: "defaultResourceRefreshInterval",
+    path: ["resources", "default_refresh_interval"],
+    kind: "select",
+    defaultValue: "2s",
+    options: [
+      { value: "1s", label: "oneSecond" },
+      { value: "2s", label: "twoSeconds" },
+      { value: "5s", label: "fiveSeconds" },
+      { value: "10s", label: "tenSeconds" },
+    ],
+    get: (root) => stringValue(valueAt(root, ["resources", "default_refresh_interval"])) ?? "2s",
+    toConfigValue: (value) => configString(String(value)),
   },
   {
     key: "transfers.global_concurrency",

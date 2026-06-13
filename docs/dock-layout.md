@@ -1,6 +1,6 @@
 # Dock Layout
 
-This document defines Nocturne's IDE-style dock system as the shared layout engine for Files, Terminal, Transfers, and future tool tabs.
+This document defines Nocturne's IDE-style dock system as the shared layout engine for Files, Terminal, Transfers, Resource Monitor, and future tool tabs.
 
 ## Goals
 
@@ -73,7 +73,7 @@ Every dock group has an explicit role. The role is spatial layout state, not a v
 
 - `content`: primary editor/terminal/content area. A workspace must always keep at least one content group. A content group may be empty and show an empty content surface.
 - `sidebar`: edge/sidebar area created by workspace-edge docking.
-- `panel`: bottom or auxiliary panel area such as Transfers.
+- `panel`: bottom or auxiliary panel area. Transfers and Resource Monitor default to a right-side group in the current Workspace template, but users may move them to panel groups.
 
 Do not infer group role from a terminal, files, transfers, mirror, or closed-source slot. A Files ToolTab inside a content group remains content; a Terminal ToolTab inside a sidebar remains sidebar. Rust must create and return layouts with explicit roles, and frontend/tests should fail on role-less layouts instead of migrating them.
 

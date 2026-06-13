@@ -6,6 +6,8 @@ import { invoke as __TAURI_INVOKE } from "@tauri-apps/api/core";
 export const commands = {
 	getConfigRoot: () => typedError<ConfigRootInfo, ConfigError>(__TAURI_INVOKE("get_config_root")),
 	getConfigSnapshot: () => typedError<AppConfigSnapshot, ConfigError>(__TAURI_INVOKE("get_config_snapshot")),
+	getResourceSettings: () => typedError<ResourceSettings, ConfigError>(__TAURI_INVOKE("get_resource_settings")),
+	collectResourceMonitorSnapshot: (input: ResourceMonitorCollectInput) => typedError<ResourceMonitorSnapshot, ConfigError>(__TAURI_INVOKE("collect_resource_monitor_snapshot", { input })),
 	getTerminalSettings: () => typedError<TerminalSettings, ConfigError>(__TAURI_INVOKE("get_terminal_settings")),
 	getTerminalSettingsForTheme: (input: TerminalSettingsInput) => typedError<TerminalSettings, ConfigError>(__TAURI_INVOKE("get_terminal_settings_for_theme", { input })),
 	createHostTerminalSession: (input: CreateHostTerminalSessionInput) => typedError<TerminalSessionInfo, ConfigError>(__TAURI_INVOKE("create_host_terminal_session", { input })),
@@ -150,6 +152,7 @@ export type ConnectionHostDocument = {
 	folder: string | null,
 	icon: ConnectionHostIcon | null,
 	files: HostFilesConfig | null,
+	resources: HostResourceConfig | null,
 	protocol: ConnectionProtocol,
 	local: LocalConnectionConfig | null,
 	ssh: SshConnectionConfig | null,
@@ -330,7 +333,9 @@ export type FileSearchInput = {
 	tool_tab_id: string,
 	root_path: string,
 	query: string,
+	mode: FileSearchMode,
 	include_hidden: boolean,
+	ignore_ignore_files: boolean,
 	follow_symlinks: boolean,
 	max_results: number,
 	accept_new_host_key: boolean,
@@ -343,7 +348,17 @@ export type FileSearchMatch = {
 	path: string,
 	name: string,
 	kind: FileEntryKind,
+	line_number: number | null,
+	line_text: string | null,
+	ranges: FileSearchMatchRange[],
 };
+
+export type FileSearchMatchRange = {
+	start: number,
+	end: number,
+};
+
+export type FileSearchMode = "name" | "content";
 
 export type FileSearchResult = {
 	provider_label: string,
@@ -379,12 +394,19 @@ export type HostFilesConfig = {
 	default_path: string | null,
 };
 
+export type HostResourceConfig = {
+	target_os: RemoteResourceTargetOs | null,
+	target_arch: RemoteResourceTargetArch | null,
+};
+
 export type LocalConnectionConfig = {
 	command: string | null,
 	args: string[],
 	cwd: string | null,
 	env: { [key in string]: string },
 };
+
+export type LocalResourceMetricKind = "cpu" | "memory" | "swap" | "gpu";
 
 export type MainConfigDocument = {
 	root: ConfigTable,
@@ -421,6 +443,10 @@ export type ProfileEntry = {
 	path: string,
 };
 
+export type RemoteResourceTargetArch = "x86_64" | "aarch64" | "armv7" | "i686";
+
+export type RemoteResourceTargetOs = "linux" | "macos" | "windows";
+
 export type RemoteSearchHelperInfo = {
 	available: boolean,
 	provider_label: string,
@@ -434,6 +460,44 @@ export type RemoteSearchHelperInput = {
 	update_changed_host_key: boolean,
 	credential: SshCredentialInput | null,
 	save_credential: boolean,
+};
+
+export type ResourceMonitorCollectInput = {
+	workspace_id: string,
+	tool_tab_id: string,
+};
+
+export type ResourceMonitorGpuDevice = {
+	id: string,
+	label: string,
+	compute_percent: number | null,
+	memory_used: string,
+	memory_total: string,
+};
+
+export type ResourceMonitorMetric = {
+	metric: LocalResourceMetricKind,
+	status: string,
+	used: string | null,
+	total: string | null,
+	percent: number | null,
+	available: string | null,
+	free: string | null,
+	reason: string | null,
+	cores: (number | null)[],
+	gpus: ResourceMonitorGpuDevice[],
+};
+
+export type ResourceMonitorSnapshot = {
+	provider: string,
+	collected_at_ms: string,
+	metrics: ResourceMonitorMetric[],
+};
+
+export type ResourceRefreshInterval = "one_second" | "two_seconds" | "five_seconds" | "ten_seconds";
+
+export type ResourceSettings = {
+	default_refresh_interval: ResourceRefreshInterval,
 };
 
 export type SshAuthTarget = {
@@ -735,7 +799,7 @@ export type WorkspaceFloatingWindowState = {
 	layout: WorkspaceDockLayout,
 };
 
-export type WorkspaceIntent = { kind: "create_workspace"; host_id: string } | { kind: "activate_workspace"; workspace_id: string } | { kind: "rename_workspace"; workspace_id: string; title: string } | { kind: "close_workspace"; workspace_id: string } | { kind: "close_other_workspaces"; workspace_id: string } | { kind: "close_workspaces_to_right"; workspace_id: string } | { kind: "activate_tool_slot"; workspace_id: string; slot_id: string } | { kind: "close_tool_slot"; workspace_id: string; slot_id: string } | { kind: "close_other_tool_slots"; workspace_id: string; slot_id: string } | { kind: "close_tool_slots_to_right"; workspace_id: string; slot_id: string } | { kind: "mirror_tool_tab"; source_tool_tab_id: string; target_workspace_id: string; target_group_id: string } | { kind: "float_tool_slot"; workspace_id: string; slot_id: string } | { kind: "close_floating_window"; floating_window_id: string } | { kind: "move_tool_slot_to_group"; workspace_id: string; slot_id: string; target_group_id: string } | { kind: "move_tool_slot_to_split"; workspace_id: string; slot_id: string; target_slot_id: string; side: WorkspaceDockSide } | { kind: "move_tool_slot_to_workspace_edge"; workspace_id: string; slot_id: string; side: WorkspaceDockSide } | { kind: "split_tool_slot"; workspace_id: string; target_slot_id: string; tool_tab_id: string; side: WorkspaceDockSide } | { kind: "create_terminal_tool_tab"; workspace_id: string; target_group_id: string | null };
+export type WorkspaceIntent = { kind: "create_workspace"; host_id: string } | { kind: "activate_workspace"; workspace_id: string } | { kind: "rename_workspace"; workspace_id: string; title: string } | { kind: "close_workspace"; workspace_id: string } | { kind: "close_other_workspaces"; workspace_id: string } | { kind: "close_workspaces_to_right"; workspace_id: string } | { kind: "activate_tool_slot"; workspace_id: string; slot_id: string } | { kind: "close_tool_slot"; workspace_id: string; slot_id: string } | { kind: "close_other_tool_slots"; workspace_id: string; slot_id: string } | { kind: "close_tool_slots_to_right"; workspace_id: string; slot_id: string } | { kind: "mirror_tool_tab"; source_tool_tab_id: string; target_workspace_id: string; target_group_id: string } | { kind: "float_tool_slot"; workspace_id: string; slot_id: string } | { kind: "close_floating_window"; floating_window_id: string } | { kind: "move_tool_slot_to_group"; workspace_id: string; slot_id: string; target_group_id: string } | { kind: "move_tool_slot_to_split"; workspace_id: string; slot_id: string; target_slot_id: string; side: WorkspaceDockSide } | { kind: "move_tool_slot_to_workspace_edge"; workspace_id: string; slot_id: string; side: WorkspaceDockSide } | { kind: "split_tool_slot"; workspace_id: string; target_slot_id: string; tool_tab_id: string; side: WorkspaceDockSide } | { kind: "create_terminal_tool_tab"; workspace_id: string; target_group_id: string | null } | { kind: "open_resource_monitor_tool_tab"; workspace_id: string; target_group_id: string | null };
 
 export type WorkspaceLayoutSnapshot = {
 	version: number,
@@ -767,7 +831,7 @@ export type WorkspaceTabState = {
 	layout: WorkspaceDockLayout,
 };
 
-export type WorkspaceToolKind = "files" | "terminal" | "transfers";
+export type WorkspaceToolKind = "files" | "terminal" | "transfers" | "resources";
 
 export type WorkspaceToolSlot = { kind: "owned"; id: string; tool_tab_id: string } | { kind: "mirror"; id: string; tool_tab_id: string; owner_workspace_id: string } | { kind: "floating_placeholder"; id: string; tool_tab_id: string; floating_window_id: string } | { kind: "closed_source"; id: string; previous_title: string; owner_workspace_title: string };
 

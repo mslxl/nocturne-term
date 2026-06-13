@@ -11,18 +11,21 @@
  * Starts the Vite dev server, starts tauri-driver, launches the Tauri
  * application provided by the TAURI_TEST_APPLICATION environment variable,
  * waits for the default Local Workspace, drags the Files ToolTab into the
- * content Dock group, drags that Files ToolTab to the left Workspace edge, and
- * drags the bottom Transfers ToolTab directly to the right Workspace edge using
- * real WebView pointer events in the launched Tauri application. During each
- * drag, the test inspects the hover drop preview before releasing the pointer.
+ * content Dock group, drags that Files ToolTab to the left Workspace edge,
+ * moves Transfers from the right tools sidebar into the content Dock group, and
+ * drags Transfers to the right Workspace edge using real WebView pointer events
+ * in the launched Tauri application. During each drag, the test inspects the
+ * hover drop preview before releasing the pointer.
  *
  * Expected:
- * After the left-edge drag, Files is docked in a left sidebar group before the
- * content group. After the right-edge drag, Transfers is docked in a right-side
- * sidebar group after the content group. The hover preview must be visible and must
- * mark the area that will receive the ToolTab before the pointer is released.
- * Edge docking must work even when the pointer is over a Dock group's surface
- * rather than directly over an existing tab.
+ * The default Workspace has Files in a left sidebar, Terminal in content, and
+ * Resources plus Transfers in a right sidebar. After the left-edge drag, Files
+ * is docked in a left sidebar group before the content group. After the
+ * right-edge drag, Transfers is docked in a right-side sidebar group after the
+ * content group. The hover preview must be visible and must mark the area that
+ * will receive the ToolTab before the pointer is released. Edge docking must
+ * work even when the pointer is over a Dock group's surface rather than directly
+ * over an existing tab.
  */
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
@@ -85,7 +88,11 @@ try {
     const state = await dockState();
     return state.groups.some((group) => group.role === "sidebar" && group.kinds.includes("files")) &&
       state.groups.some((group) => group.role === "content" && group.kinds.includes("terminal")) &&
-      state.groups.some((group) => group.role === "panel" && group.kinds.includes("transfers"));
+      state.groups.some((group) =>
+        group.role === "sidebar" &&
+        group.kinds.includes("resources") &&
+        group.kinds.includes("transfers")
+      );
   }, async () => `default Dock layout did not mount\n${await pageSummary()}`);
 
   const groupPreview = await dragToolKindToGroupSurface("files", "content");
@@ -93,7 +100,8 @@ try {
   await waitUntil(async () => {
     const state = await dockState();
     const content = contentGroup(state);
-    return Boolean(content?.kinds.includes("files")) && !state.groups.some((group) => group.role === "sidebar");
+    return Boolean(content?.kinds.includes("files")) &&
+      !state.groups.some((group) => group.role === "sidebar" && group.kinds.includes("files"));
   }, async () => `Files ToolTab did not move into the content Dock group\n${await pageSummary()}`);
 
   const leftEdgePreview = await dragToolKindToWorkspaceEdge("files", "left");
@@ -104,6 +112,15 @@ try {
     const content = contentGroup(state);
     return Boolean(sidebar && content && sidebar.rect.left < content.rect.left && !content.kinds.includes("files"));
   }, async () => `Files ToolTab did not dock to the left Workspace edge\n${await pageSummary()}`);
+
+  const transfersGroupPreview = await dragToolKindToGroupSurface("transfers", "content");
+  assertPreview(transfersGroupPreview, "group");
+  await waitUntil(async () => {
+    const state = await dockState();
+    const content = contentGroup(state);
+    return Boolean(content?.kinds.includes("transfers")) &&
+      !state.groups.some((group) => group.role === "sidebar" && group.kinds.includes("transfers"));
+  }, async () => `Transfers ToolTab did not move into the content Dock group\n${await pageSummary()}`);
 
   const rightEdgePreview = await dragToolKindToWorkspaceEdge("transfers", "right");
   assertPreview(rightEdgePreview, "workspace_edge", "right");

@@ -799,6 +799,7 @@ fn default_local_host_document() -> ConnectionHostDocument {
             name: "lucide:terminal".to_string(),
         }),
         files: None,
+        resources: None,
         protocol: crate::types::ConnectionProtocol::Local,
         local: Some(LocalConnectionConfig::default()),
         ssh: None,
@@ -1538,6 +1539,7 @@ fn parsed_to_openssh_hosts(parsed: ParsedOpenSshConfig, path: &Path) -> Vec<Conn
                         name: "devicon:ssh".to_string(),
                     }),
                     files: None,
+                    resources: None,
                     protocol: crate::types::ConnectionProtocol::Ssh,
                     local: None,
                     ssh: Some(SshConnectionConfig {
@@ -2581,6 +2583,7 @@ mod tests {
                 server_alive_interval: Some(30),
             }),
             files: None,
+            resources: None,
             telnet: None,
         };
 
@@ -2632,6 +2635,7 @@ mod tests {
                 server_alive_interval: None,
             }),
             files: None,
+            resources: None,
             telnet: None,
         };
         write_connection_host_document(
@@ -2677,6 +2681,7 @@ mod tests {
             local: None,
             ssh: None,
             files: None,
+            resources: None,
             telnet: None,
         };
 
@@ -2700,6 +2705,7 @@ mod tests {
             local: Some(LocalConnectionConfig::default()),
             ssh: None,
             files: None,
+            resources: None,
             telnet: None,
         };
 
@@ -2723,6 +2729,7 @@ mod tests {
             local: Some(LocalConnectionConfig::default()),
             ssh: None,
             files: None,
+            resources: None,
             telnet: None,
         };
 
@@ -2764,6 +2771,7 @@ mod tests {
                 server_alive_interval: None,
             }),
             files: None,
+            resources: None,
             telnet: None,
         };
         let second = ConnectionHostDocument {
@@ -2778,6 +2786,7 @@ mod tests {
             local: None,
             ssh: None,
             files: None,
+            resources: None,
             telnet: Some(TelnetConnectionConfig {
                 hostname: "192.0.2.1".to_string(),
                 port: 23,

@@ -16,6 +16,7 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   GH_REPO: ${{ github.repository }}
+  RIPGREP_VERSION: 14.1.1
 
 jobs:
   prepare:
@@ -154,9 +155,178 @@ jobs:
 
           gh release upload "$RELEASE_TAG" "CHANGELOG-${RELEASE_TAG}.md" --clobber
 
+  build_resource_monitor_agents:
+    name: Build Resource Monitor agent ${{ matrix.label }}
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: Linux x64
+            platform: ubuntu-22.04
+            rust-target: x86_64-unknown-linux-musl
+            artifact-path: linux/x86_64
+            binary-name: nocturne-resource-monitor-agent
+            asset-suffix: ""
+            builder: cargo
+          - label: Linux ARM64
+            platform: ubuntu-22.04
+            rust-target: aarch64-unknown-linux-musl
+            artifact-path: linux/aarch64
+            binary-name: nocturne-resource-monitor-agent
+            asset-suffix: ""
+            builder: cross
+          - label: Linux ARMv7
+            platform: ubuntu-22.04
+            rust-target: armv7-unknown-linux-musleabihf
+            artifact-path: linux/armv7
+            binary-name: nocturne-resource-monitor-agent
+            asset-suffix: ""
+            builder: cross
+          - label: macOS Intel
+            platform: macos-15-intel
+            rust-target: x86_64-apple-darwin
+            artifact-path: macos/x86_64
+            binary-name: nocturne-resource-monitor-agent
+            asset-suffix: ""
+            builder: cargo
+          - label: macOS Apple Silicon
+            platform: macos-15
+            rust-target: aarch64-apple-darwin
+            artifact-path: macos/aarch64
+            binary-name: nocturne-resource-monitor-agent
+            asset-suffix: ""
+            builder: cargo
+          - label: Windows x64
+            platform: windows-latest
+            rust-target: x86_64-pc-windows-msvc
+            artifact-path: windows/x86_64
+            binary-name: nocturne-resource-monitor-agent.exe
+            asset-suffix: .exe
+            builder: cargo
+          - label: Windows x86
+            platform: windows-latest
+            rust-target: i686-pc-windows-msvc
+            artifact-path: windows/i686
+            binary-name: nocturne-resource-monitor-agent.exe
+            asset-suffix: .exe
+            builder: cargo
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.1.2
+          run_install: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust-target }}
+
+      - name: Install Linux agent dependencies
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+
+      - name: Install cross for Linux ARM agents
+        if: matrix.builder == 'cross'
+        shell: bash
+        run: cargo install cross --git https://github.com/cross-rs/cross
+
+      - name: Install JavaScript dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build Resource Monitor agent
+        shell: bash
+        env:
+          NOCTURNE_RESOURCE_MONITOR_AGENT_TARGETS: ${{ matrix.rust-target }}
+          NOCTURNE_RESOURCE_MONITOR_AGENT_BUILDER: ${{ matrix.builder }}
+        run: pnpm build:resource-monitor-agents
+
+      - name: Upload Resource Monitor agent
+        uses: actions/upload-artifact@v4
+        with:
+          name: resource-monitor-agent-${{ matrix.rust-target }}
+          path: src-tauri/resources/nocturne-resource-monitor-agent
+
+      - name: Upload Resource Monitor agent release asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+          AGENT_SOURCE: src-tauri/resources/nocturne-resource-monitor-agent/${{ matrix.artifact-path }}
+          AGENT_ASSET: nocturne-resource-monitor-agent-${{ needs.prepare.outputs.tag }}-${{ matrix.artifact-path }}
+          AGENT_BINARY: ${{ matrix.binary-name }}
+          AGENT_ASSET_SUFFIX: ${{ matrix.asset-suffix }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          asset_name="${AGENT_ASSET//\//-}${AGENT_ASSET_SUFFIX}"
+          source_file="${AGENT_SOURCE}/${AGENT_BINARY}"
+
+          if [[ ! -f "$source_file" ]]; then
+            echo "Resource Monitor agent binary was not produced at ${source_file}" >&2
+            exit 1
+          fi
+
+          upload_dir="$(mktemp -d)"
+          upload_file="${upload_dir}/${asset_name}"
+          cp "$source_file" "$upload_file"
+
+          gh release upload "$RELEASE_TAG" "$upload_file" --clobber
+
+  prepare_ripgrep_helpers:
+    name: Prepare ripgrep helpers
+    needs: prepare
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.1.2
+          run_install: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install JavaScript dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Prepare ripgrep helper
+        shell: bash
+        run: pnpm prepare:ripgrep-helpers
+
+      - name: Upload ripgrep helper
+        uses: actions/upload-artifact@v4
+        with:
+          name: ripgrep-helpers
+          path: src-tauri/resources/ripgrep
+
   build:
     name: Build ${{ matrix.label }}
-    needs: prepare
+    needs:
+      - prepare
+      - build_resource_monitor_agents
+      - prepare_ripgrep_helpers
     strategy:
       fail-fast: false
       matrix:
@@ -287,6 +457,23 @@ jobs:
             return channelOffset + number;
           }
           NODE
+
+      - name: Download Resource Monitor agents
+        uses: actions/download-artifact@v4
+        with:
+          pattern: resource-monitor-agent-*
+          path: src-tauri/resources/nocturne-resource-monitor-agent
+          merge-multiple: true
+
+      - name: Download ripgrep helpers
+        uses: actions/download-artifact@v4
+        with:
+          pattern: ripgrep-helpers
+          path: src-tauri/resources/ripgrep
+          merge-multiple: true
+
+      - name: Validate bundled helper resources
+        run: pnpm validate:helper-resources
 
       - name: Build and upload release assets
         uses: tauri-apps/tauri-action@v0

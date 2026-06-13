@@ -44,6 +44,16 @@ export const staticPaletteCommands: StaticPaletteCommand[] = [
     },
   },
   {
+    id: "tool.openResources",
+    title: { en: "Open Resource Monitor", zh: "打开资源监视器" },
+    scope: { en: "Workspace Tool", zh: "Workspace 工具" },
+    keywords: {
+      en: ["resource monitor", "resources", "cpu", "memory", "swap", "gpu", "metrics"],
+      zh: ["资源监视器", "资源", "监控", "cpu", "内存", "交换", "显存", "gpu"],
+      pinyin: ["ziyuanjianshiqi", "zyjsq", "ziyuan", "zy", "jiankong", "jk", "neicun", "nc", "jiaohuan", "jh", "xiancun", "xc"],
+    },
+  },
+  {
     id: "terminal.splitRight",
     title: { en: "Split Right", zh: "向右拆分" },
     scope: { en: "Terminal", zh: "终端" },

@@ -4,11 +4,21 @@ use specta::Type;
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
 #[serde(tag = "kind", content = "message")]
 pub enum ConfigError {
-    Io { message: String },
-    Parse { message: String },
-    Missing { message: String },
-    Invalid { message: String },
-    Terminal { message: String },
+    Io {
+        message: String,
+    },
+    Parse {
+        message: String,
+    },
+    Missing {
+        message: String,
+    },
+    Invalid {
+        message: String,
+    },
+    Terminal {
+        message: String,
+    },
     SshWorkspaceChallenge {
         challenge: crate::types::SshWorkspaceChallenge,
         message: String,

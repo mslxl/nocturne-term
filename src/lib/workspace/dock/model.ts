@@ -8,7 +8,7 @@ export type DockDirection = "row" | "column";
 export type DockSide = "left" | "right" | "up" | "down";
 export type DockGroupRole = "content" | "sidebar" | "panel";
 
-export type ToolTabKind = "files" | "terminal" | "transfers";
+export type ToolTabKind = "files" | "terminal" | "transfers" | "resources";
 
 export type ToolTab = {
   id: ToolTabId;

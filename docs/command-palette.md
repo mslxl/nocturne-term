@@ -10,7 +10,7 @@ The command palette is a fast app-local entry point for commands and dynamic act
 - switch app theme
 - create or switch host workspaces
 - split or move tool tabs in the Dock layout
-- open Files, Terminal, and Transfers tool tabs
+- open Files, Terminal, Resource Monitor, and Transfers tool tabs
 - open settings
 - jump to a workspace or tool tab
 - search remote files
@@ -120,6 +120,7 @@ dock.focusGroupUp
 dock.focusGroupDown
 tool.openFiles
 tool.openTerminal
+tool.openResources
 tool.openTransfers
 tool.close
 tool.closeOthers

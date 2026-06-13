@@ -25,6 +25,13 @@ This keeps local development versions stable while ensuring generated installer 
 
 The base Tauri config keeps the production app identifier `com.mslxl.nocturne` so build artifacts and release asset discovery agree on production filenames. Development Tauri runs merge `src-tauri/tauri.dev.conf.json`, which overrides the identifier to `com.mslxl.nocturne.dev`.
 
+The Tauri build script embeds two diagnostic values into the binary:
+
+- `NOCTURNE_BUILD_COMMIT`: the current Git commit id
+- `NOCTURNE_BUILD_TAG`: the exact current Git tag, or empty for untagged builds
+
+Resource Monitor helper downloads rely on `NOCTURNE_BUILD_TAG`. If the app is not built from an exact release tag, missing Resource Monitor helper binaries are reported as unavailable instead of downloading from GitHub. Files ripgrep helper downloads do not use Nocturne release tags; they use the locked `RIPGREP_VERSION` and download from the official `BurntSushi/ripgrep` release for that exact version.
+
 ## Build Matrix
 
 The release builds the common desktop installer formats:
@@ -37,6 +44,18 @@ The release builds the common desktop installer formats:
 Tauri's bundle target is set to `all` in `src-tauri/tauri.conf.json`, while the workflow passes platform-specific `--bundles` arguments so each runner only builds formats supported for its OS.
 
 Each generated installer file is uploaded as its own GitHub Release asset. Asset names include the app name, version, platform, architecture, and setup marker when applicable.
+
+Resource Monitor agent binaries are built before the app bundle and are uploaded twice: first as workflow artifacts so every app build can bundle all helper targets, then as GitHub Release assets so an installed app can ask the user to download a missing helper from the same release tag. Helper release assets use this naming scheme:
+
+```text
+nocturne-resource-monitor-agent-<tag>-<os>-<arch>[.exe]
+```
+
+Files ripgrep helper binaries are prepared before the app bundle by one Ubuntu job because this step downloads upstream prebuilt archives instead of compiling target-specific code. The job prepares every supported target and uploads one workflow artifact containing all flat `rg-*` resource files for app bundle jobs to download. Nocturne does not upload `rg` binaries to its own GitHub Release because they are third-party versioned artifacts.
+
+If a bundled `rg` helper is missing at runtime, Nocturne may ask the user to download the official ripgrep archive from `BurntSushi/ripgrep` for the locked `RIPGREP_VERSION`, extract `rg` or `rg.exe`, then upload that extracted binary to the target Host according to the normal remote helper policy. The runtime downloader never uses `latest`, a Nocturne app tag, or a guessed ripgrep version.
+
+Before Tauri packaging starts, release CI runs `pnpm validate:helper-resources` against `src-tauri/resources`. The validation fails the build if any supported Resource Monitor agent or ripgrep helper is missing or empty, so an installer cannot be published with helper resources that would immediately fall back to runtime downloads.
 
 macOS DMG builds pass Tauri's `--ci` flag and set `CI=true` explicitly. The DMG bundler generates and runs `bundle_dmg.sh`; CI mode keeps that script non-interactive and avoids CI-unsafe Finder scripting during DMG layout. If a macOS DMG job fails, the workflow prints the generated DMG directory and `bundle_dmg.sh` contents so the failing `hdiutil` or packaging command is visible in the GitHub Actions log instead of only reporting `failed to run bundle_dmg.sh`.
 

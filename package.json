@@ -6,6 +6,9 @@
   "scripts": {
     "dev": "vite dev",
     "build": "vite build",
+    "build:resource-monitor-agents": "node scripts/build-resource-monitor-agents.mjs",
+    "prepare:ripgrep-helpers": "node scripts/prepare-ripgrep-helpers.mjs",
+    "validate:helper-resources": "node scripts/validate-helper-resources.mjs",
     "test": "node --test --import tsx \"src/**/*.test.ts\" \"tests/**/*.test.ts\"",
     "test:tauri:terminal-workspace-close-single-session": "node tests/tauri/terminal-workspace-close-single-session.test.mjs",
     "test:tauri:terminal-workspace-close-active-switches-to-live-session": "node tests/tauri/terminal-workspace-close-active-switches-to-live-session.test.mjs",
@@ -20,6 +23,8 @@
     "test:tauri:terminal-workspace-single-toolbar": "node tests/tauri/terminal-workspace-single-toolbar.test.mjs",
     "test:tauri:workspace-startup-does-not-restore-state": "node tests/tauri/workspace-startup-does-not-restore-state.test.mjs",
     "test:tauri:workspace-new-workspace-unique-title": "node tests/tauri/workspace-new-workspace-unique-title.test.mjs",
+    "test:tauri:workspace-non-terminal-layout-memory": "node tests/tauri/workspace-non-terminal-layout-memory.test.mjs",
+    "test:tauri:resource-monitor-ui-layout": "node tests/tauri/resource-monitor-ui-layout.test.mjs",
     "test:tauri:integrated-titlebar-decorum-layout": "node tests/tauri/integrated-titlebar-decorum-layout.test.mjs",
     "test:tauri:tooltab-edge-docking": "node tests/tauri/tooltab-edge-docking.test.mjs",
     "test:tauri:tooltab-workspace-hover-preview": "node tests/tauri/tooltab-workspace-hover-preview.test.mjs",

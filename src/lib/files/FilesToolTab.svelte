@@ -49,6 +49,9 @@
   let viewModeInitialized = false;
   let searchOpen = $state(false);
   let searchQuery = $state("");
+  let searchMode = $state<"name" | "content">("name");
+  let searchIgnoreIgnoreFiles = $state(false);
+  let searchFollowSymlinks = $state(false);
   let searchResult = $state<FileSearchResult | null>(null);
   let searchLoading = $state(false);
   let previewPath = $state("");
@@ -333,14 +336,14 @@
     searchLoading = true;
     operationError = "";
     try {
-      if (!remoteHelperChecked) {
+      if (result?.provider.kind === "sftp" && !remoteHelperChecked) {
         remoteHelperChecked = true;
         const helper = await unwrapCommand(
           commands.remoteSearchHelperInfo({
             ...providerCommandAuth(),
           }),
         );
-        if (!helper.available) {
+        if (!helper.available && searchMode === "name") {
           const choice = await message(
             `${helper.reason ?? "A remote search helper is not available."}\n\nUse SFTP scan for this search?`,
             {
@@ -360,8 +363,10 @@
         commands.searchFiles({
           root_path: currentPath,
           query,
+          mode: searchMode,
           include_hidden: showHidden,
-          follow_symlinks: false,
+          ignore_ignore_files: searchIgnoreIgnoreFiles,
+          follow_symlinks: searchFollowSymlinks,
           max_results: 500,
           ...providerCommandAuth(),
         }),
@@ -1638,7 +1643,19 @@
         });
       }}
     >
-      <input bind:value={searchQuery} placeholder="Search names recursively" />
+      <div class="search-mode" role="group" aria-label="Search mode">
+        <button type="button" class:active={searchMode === "name"} onclick={() => (searchMode = "name")}>Name</button>
+        <button type="button" class:active={searchMode === "content"} onclick={() => (searchMode = "content")}>Content</button>
+      </div>
+      <input bind:value={searchQuery} placeholder={searchMode === "content" ? "Search file contents" : "Search names recursively"} />
+      <label class="search-toggle">
+        <input type="checkbox" bind:checked={searchIgnoreIgnoreFiles} />
+        <span>No ignore</span>
+      </label>
+      <label class="search-toggle">
+        <input type="checkbox" bind:checked={searchFollowSymlinks} />
+        <span>Follow links</span>
+      </label>
       <button type="submit" disabled={searchLoading}>{searchLoading ? "Searching" : "Search"}</button>
       <button type="button" onclick={clearSearch}>Close</button>
     </form>
@@ -1661,7 +1678,7 @@
           {/if}
         </header>
         <OverlayScrollbarsComponent element="div" class="search-list" options={overlayVerticalOptions} defer>
-          {#each searchResult.matches as match (match.path)}
+          {#each searchResult.matches as match, index (`${match.path}-${match.line_number ?? "path"}-${index}`)}
             <button
               class:selected={isPathSelected(match.path)}
               class="search-row"
@@ -1675,8 +1692,16 @@
                 });
               }}
             >
-              <span>{match.name}</span>
-              <small>{match.path}</small>
+              <span class="search-match-name">{match.name}</span>
+              <span class="search-match-path">{match.path}</span>
+              {#if match.line_text}
+                <span class="search-match-line">
+                  {#if match.line_number}
+                    <small>{match.line_number}</small>
+                  {/if}
+                  <span>{match.line_text}</span>
+                </span>
+              {/if}
             </button>
           {/each}
           {#each searchResult.diagnostics as diagnostic, index (`${index}-${diagnostic}`)}
@@ -2068,14 +2093,16 @@
 
   .search-bar {
     min-width: 0;
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) auto auto;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
     gap: 6px;
     padding: 5px 6px;
     border-bottom: 1px solid var(--app-border);
   }
 
-  .search-bar input {
+  .search-bar input:not([type="checkbox"]) {
+    flex: 1 1 180px;
     min-width: 0;
     height: 28px;
     border: 1px solid color-mix(in srgb, var(--app-fg) 13%, transparent);
@@ -2085,6 +2112,15 @@
     color: inherit;
     font: inherit;
     font-size: 12px;
+  }
+
+  .search-mode {
+    height: 28px;
+    display: inline-flex;
+    border: 1px solid color-mix(in srgb, var(--app-fg) 13%, transparent);
+    border-radius: 6px;
+    overflow: hidden;
+    background: color-mix(in srgb, var(--app-bg) 88%, var(--app-control));
   }
 
   .search-bar button {
@@ -2115,6 +2151,30 @@
     min-width: 0;
     min-height: 0;
     font-size: 12px;
+  }
+
+  .search-mode button {
+    min-width: 68px;
+    border-radius: 0;
+  }
+
+  .search-mode button.active {
+    background: color-mix(in srgb, var(--app-active) 76%, transparent);
+  }
+
+  .search-toggle {
+    height: 28px;
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 0 6px;
+    color: color-mix(in srgb, var(--app-fg) 72%, transparent);
+    font-size: 12px;
+    white-space: nowrap;
+  }
+
+  .search-toggle input {
+    margin: 0;
   }
 
   .files-selection-surface {
@@ -2172,9 +2232,10 @@
 
   .search-row {
     width: 100%;
-    min-height: 32px;
+    min-height: 34px;
     display: grid;
     grid-template-columns: 180px minmax(0, 1fr);
+    grid-template-rows: auto;
     gap: 10px;
     align-items: center;
     border: 0;
@@ -2184,17 +2245,29 @@
     text-align: left;
   }
 
-  .search-row span,
-  .search-row small {
+  .search-match-name,
+  .search-match-path,
+  .search-match-line span,
+  .search-match-line small {
     min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
 
-  .search-row small,
+  .search-match-path,
+  .search-match-line small,
   .search-diagnostic {
     color: color-mix(in srgb, var(--app-fg) 58%, transparent);
+  }
+
+  .search-match-line {
+    grid-column: 1 / -1;
+    min-width: 0;
+    display: grid;
+    grid-template-columns: 44px minmax(0, 1fr);
+    gap: 8px;
+    color: color-mix(in srgb, var(--app-fg) 74%, transparent);
   }
 
   .search-diagnostic {
