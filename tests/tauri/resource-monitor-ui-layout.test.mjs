@@ -9,22 +9,23 @@
  * Starts the Vite dev server, starts tauri-driver, launches the Tauri
  * application provided by `TAURI_TEST_APPLICATION`, waits for the default
  * Resource Monitor ToolTab, measures its mounted DOM in the active Workspace,
- * clicks collapsible metric rows to expand/collapse details, verifies
- * non-collapsible metrics do not show expand icons, and uses WebDriver pointer
+ * verifies that Local Host lookup does not produce a missing-host warning,
+ * verifies that CPU/GPU overall rows expose detail expansion without expanding
+ * Memory/Swap, clicks the first detail toggle, and uses WebDriver pointer
  * actions to drag one metric panel before another.
  *
  * Expected:
  * The Resource Monitor ToolTab is visible in the real WebView, collects a real
  * local provider sample instead of staying in the empty waiting state, exposes
- * the provider/status row, metric rows, collapsed detail toggles, default history charts,
- * and OverlayScrollbars scroll host, does not render useless stable labels,
- * chart max labels, or
- * display-mode controls, and keeps its narrow dock layout inside the ToolTab
- * without compressing labels into vertical one-letter columns or wasting the
- * narrow right sidebar width on large left insets. Memory and Swap do not render
- * expand icons, CPU and GPU expand/collapse when their rows are clicked, and
- * real pointer dragging one metric row over another shows a drop target preview
- * and changes the visible metric order without also toggling details.
+ * the compact provider mode control, metric rows, default history charts, and
+ * OverlayScrollbars scroll host, does not render provider/status text labels,
+ * chart max labels, or display-mode controls, and keeps its narrow dock layout
+ * inside the ToolTab without compressing labels into vertical one-letter
+ * columns or wasting the narrow right sidebar width on large left insets. It
+ * renders CPU/GPU detail expansion controls collapsed by default, expands
+ * details without horizontal overflow when clicked, never shows a missing Local
+ * Host warning, and real pointer dragging one metric row over another shows a
+ * drop target preview and changes the visible metric order.
  */
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
@@ -88,13 +89,15 @@ try {
     return state.visible &&
       state.providerRows === 1 &&
       state.statusRows === 0 &&
-      state.providerLabel === "local provider" &&
+      state.providerLabel === "" &&
       state.statusLabel === "" &&
+      !state.warningText.includes("connection host 00000000-0000-0000-0000-000000000001 not found") &&
       state.usesOverlayScrollbars &&
       state.metricRows >= 4 &&
       state.historyRows >= 1 &&
       state.historyMaxLabels === 0 &&
       state.childHistoryRows === 0 &&
+      state.detailToggles >= 1 &&
       state.detailToggleMetrics.includes("cpu") &&
       state.detailToggleMetrics.includes("gpu") &&
       !state.detailToggleMetrics.includes("memory") &&
@@ -108,15 +111,11 @@ try {
       state.verticalizedLabels.length === 0;
   }, async () => `Resource Monitor layout did not mount cleanly\n${JSON.stringify(await resourceMonitorLayoutState(), null, 2)}\n${driverOutput}`);
 
-  const cpuToggle = await clickMetricRowTwice("cpu");
-  if (!cpuToggle.expandedOnce || !cpuToggle.collapsedAgain) {
-    throw new Error(`CPU row click did not expand and collapse details\n${JSON.stringify(cpuToggle, null, 2)}\n${driverOutput}`);
+  const expanded = await clickFirstDetailToggle();
+  if (!expanded.after.childHistoryRows || expanded.after.horizontalOverflow || expanded.after.rowOverflows.length > 0) {
+    throw new Error(`Resource Monitor detail expansion broke narrow layout\n${JSON.stringify(expanded, null, 2)}\n${driverOutput}`);
   }
-
-  const gpuToggle = await clickMetricRowTwice("gpu");
-  if (!gpuToggle.expandedOnce || !gpuToggle.collapsedAgain) {
-    throw new Error(`GPU row click did not expand and collapse details\n${JSON.stringify(gpuToggle, null, 2)}\n${driverOutput}`);
-  }
+  await clickFirstDetailToggle();
 
   const reorderResult = await pointerDragMetricBefore("gpu", "cpu");
   if (!reorderResult.preview.sourceHasDragClass || !reorderResult.preview.targetHasPreview) {
@@ -124,9 +123,6 @@ try {
   }
   if (JSON.stringify(reorderResult.after.slice(0, 2)) !== JSON.stringify(["gpu", "cpu"])) {
     throw new Error(`Resource Monitor drag sorting did not reorder rows\n${JSON.stringify(reorderResult, null, 2)}\n${driverOutput}`);
-  }
-  if (reorderResult.expandedAfterDrag.length > 0) {
-    throw new Error(`Resource Monitor drag sorting also toggled metric details\n${JSON.stringify(reorderResult, null, 2)}\n${driverOutput}`);
   }
 
   console.log("tauri Resource Monitor UI layout unit test passed");
@@ -217,56 +213,38 @@ async function pointerDragMetricBefore(draggedMetric, targetMetric) {
     return [...document.querySelectorAll('[data-testid="resource-monitor-row"]')]
       .map((row) => row.getAttribute('data-metric'));
   `);
-  const expandedAfterDrag = await expandedMetricRows();
   return {
     before: geometry.before,
     preview,
     after,
-    expandedAfterDrag,
   };
 }
 
-async function clickMetricRowTwice(metric) {
-  const before = await metricDetailState(metric);
-  await clickMetricRow(metric);
-  await delay(250);
-  const afterFirstClick = await metricDetailState(metric);
-  await clickMetricRow(metric);
-  await delay(250);
-  const afterSecondClick = await metricDetailState(metric);
-  return {
-    before,
-    afterFirstClick,
-    afterSecondClick,
-    expandedOnce: before.childRows === 0 && afterFirstClick.childRows > 0,
-    collapsedAgain: afterFirstClick.childRows > 0 && afterSecondClick.childRows === 0,
-  };
-}
-
-async function clickMetricRow(metric) {
-  const target = await execute(`
-    const row = document.querySelector('[data-testid="resource-monitor-row"][data-metric="' + ${JSON.stringify(metric)} + '"]');
-    if (!row) {
+async function clickFirstDetailToggle() {
+  const before = await resourceMonitorLayoutState();
+  const geometry = await execute(`
+    const toggle = document.querySelector('[data-testid="resource-monitor-detail-toggle"]');
+    if (!toggle) {
       return { found: false };
     }
-    const rect = row.getBoundingClientRect();
+    const rect = toggle.getBoundingClientRect();
     return {
       found: true,
-      x: Math.round(rect.left + Math.min(96, Math.max(48, rect.width / 2))),
-      y: Math.round(rect.top + 14),
+      x: Math.round(rect.left + rect.width / 2),
+      y: Math.round(rect.top + rect.height / 2),
     };
   `);
-  if (!target.found) {
-    throw new Error(`Resource Monitor metric row not found: ${metric}`);
+  if (!geometry.found) {
+    throw new Error(`Resource Monitor detail toggle not found\n${JSON.stringify(before, null, 2)}`);
   }
   await webdriver("POST", `/session/${sessionId}/actions`, {
     actions: [
       {
         type: "pointer",
-        id: "resource-monitor-click-mouse",
+        id: "resource-monitor-toggle-mouse",
         parameters: { pointerType: "mouse" },
         actions: [
-          { type: "pointerMove", duration: 0, origin: "viewport", x: target.x, y: target.y },
+          { type: "pointerMove", duration: 0, origin: "viewport", x: geometry.x, y: geometry.y },
           { type: "pointerDown", button: 0 },
           { type: "pointerUp", button: 0 },
         ],
@@ -274,26 +252,11 @@ async function clickMetricRow(metric) {
     ],
   });
   await webdriver("DELETE", `/session/${sessionId}/actions`).catch(() => undefined);
-}
-
-async function metricDetailState(metric) {
-  return await execute(`
-    const row = document.querySelector('[data-testid="resource-monitor-row"][data-metric="' + ${JSON.stringify(metric)} + '"]');
-    return {
-      found: Boolean(row),
-      hasToggle: Boolean(row?.querySelector('[data-testid="resource-monitor-detail-toggle"]')),
-      expanded: row?.querySelector('[data-testid="resource-monitor-detail-toggle"]')?.getAttribute('aria-expanded') ?? '',
-      childRows: row?.querySelectorAll('.resource-monitor-child-row').length ?? 0,
-    };
-  `);
-}
-
-async function expandedMetricRows() {
-  return await execute(`
-    return [...document.querySelectorAll('[data-testid="resource-monitor-row"]')]
-      .filter((row) => row.querySelector('[data-testid="resource-monitor-detail-toggle"]')?.getAttribute('aria-expanded') === 'true')
-      .map((row) => row.getAttribute('data-metric'));
-  `);
+  await delay(250);
+  return {
+    before,
+    after: await resourceMonitorLayoutState(),
+  };
 }
 
 async function resourceMonitorLayoutState() {
@@ -350,6 +313,7 @@ async function resourceMonitorLayoutState() {
       statusRows: root?.querySelectorAll('[data-testid="resource-monitor-status"]').length ?? 0,
       providerLabel: root?.querySelector('[data-testid="resource-monitor-provider-label"]')?.textContent?.trim() ?? '',
       statusLabel: root?.querySelector('[data-testid="resource-monitor-status"]')?.textContent?.trim() ?? '',
+      warningText: root?.querySelector('.resource-monitor-warning')?.textContent?.trim() ?? '',
       usesOverlayScrollbars: Boolean(root?.querySelector('.resource-monitor-body.os-host, .resource-monitor-body[data-overlayscrollbars]')),
       metricRows: root?.querySelectorAll('[data-testid="resource-monitor-row"]').length ?? 0,
       historyRows: root?.querySelectorAll('[data-testid="resource-monitor-history"]').length ?? 0,

@@ -2169,6 +2169,9 @@ pub(crate) fn update_main_config(
 pub(crate) fn read_connection_host(app: AppHandle, id: String) -> Result<ConnectionHostEntry> {
     let root = ensure_layout(&app)?;
     let state = load_state(Path::new(&root.state_path))?;
+    if id == DEFAULT_LOCAL_HOST_ID && !state.default_local_host_removed {
+        return Ok(virtual_default_local_host());
+    }
     let root_path = Path::new(&root.root_dir);
     let path = connection_host_path_from_id(root_path, &state.active_profile, &id)?;
     let base = connection_host_base_dir_for_path(root_path, &state.active_profile, &path)?;

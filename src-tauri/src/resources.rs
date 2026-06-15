@@ -370,6 +370,7 @@ pub enum ResourceHelperDeploymentDecision {
 #[derive(Debug, Clone, Default)]
 pub struct ResourceHelperDeploymentMemory {
     verified: BTreeMap<String, ResourceHelperManifest>,
+    canceled_prompts: BTreeMap<String, String>,
 }
 
 impl ResourceHelperDeploymentMemory {
@@ -386,13 +387,25 @@ impl ResourceHelperDeploymentMemory {
             .get(host_id)
             .map(|manifest| manifest.sha256.as_str())
     }
+
+    pub fn record_canceled_prompt(
+        &mut self,
+        host_id: impl Into<String>,
+        manifest: ResourceHelperManifest,
+    ) {
+        self.canceled_prompts
+            .insert(host_id.into(), manifest.sha256);
+    }
+
+    pub fn has_canceled_prompt(&self, host_id: &str, manifest: &ResourceHelperManifest) -> bool {
+        self.canceled_prompts.get(host_id) == Some(&manifest.sha256)
+    }
 }
 
 impl Default for ResourceSettings {
     fn default() -> Self {
         Self {
             default_refresh_interval: ResourceRefreshInterval::TwoSeconds,
-            remote_provider: ResourceRemoteProviderMode::Auto,
         }
     }
 }
@@ -421,17 +434,6 @@ fn parse_refresh_interval(value: &str) -> Result<ResourceRefreshInterval> {
     }
 }
 
-fn parse_remote_provider_mode(value: &str) -> Result<ResourceRemoteProviderMode> {
-    match value {
-        "auto" => Ok(ResourceRemoteProviderMode::Auto),
-        "agent" => Ok(ResourceRemoteProviderMode::Agent),
-        "system_commands" => Ok(ResourceRemoteProviderMode::SystemCommands),
-        _ => Err(invalid_error(
-            "resources.remote_provider must be auto, agent, or system_commands",
-        )),
-    }
-}
-
 fn resource_settings_from_config(config: &toml::Value) -> Result<ResourceSettings> {
     let mut settings = ResourceSettings::default();
     let Some(table) = resources_table(config)? else {
@@ -448,14 +450,10 @@ fn resource_settings_from_config(config: &toml::Value) -> Result<ResourceSetting
         }
         None => {}
     }
-    match table.get("remote_provider") {
-        Some(toml::Value::String(value)) => {
-            settings.remote_provider = parse_remote_provider_mode(value)?;
-        }
-        Some(_) => {
-            return Err(invalid_error("resources.remote_provider must be a string"));
-        }
-        None => {}
+    if table.contains_key("remote_provider") {
+        return Err(invalid_error(
+            "resources.remote_provider belongs to Host resource config",
+        ));
     }
     Ok(settings)
 }
@@ -528,8 +526,8 @@ fn collect_remote_resource_snapshot(
             return Ok(unavailable_snapshot_dto(reason));
         }
     };
-    let settings = resource_settings_from_config(&effective_application_config(&app)?)?;
-    match settings.remote_provider {
+    let remote_provider = remote_provider_mode_for_host_resources(host.document.resources.as_ref());
+    match remote_provider {
         ResourceRemoteProviderMode::SystemCommands => {
             return collect_remote_system_resource_snapshot(&connection, target_os);
         }
@@ -638,6 +636,14 @@ fn collect_remote_system_resource_metrics(
             ),
         ]),
     }
+}
+
+fn remote_provider_mode_for_host_resources(
+    host_config: Option<&HostResourceConfig>,
+) -> ResourceRemoteProviderMode {
+    host_config
+        .and_then(|config| config.remote_provider)
+        .unwrap_or(ResourceRemoteProviderMode::Auto)
 }
 
 fn collect_remote_linux_system_resource_metrics(
@@ -765,6 +771,17 @@ fn deploy_resource_helper_if_needed(
         return Ok(ResourceHelperDeploymentRuntime::Ready(helper_upload_path));
     }
 
+    {
+        let memory_guard = memory
+            .lock()
+            .map_err(|_| invalid_error("resource helper deployment memory is poisoned"))?;
+        if memory_guard.has_canceled_prompt(&host.id, &plan.manifest) {
+            return Ok(ResourceHelperDeploymentRuntime::Unavailable {
+                reason: "Resource Monitor helper upload was canceled by the user".to_string(),
+            });
+        }
+    }
+
     let decision = decide_resource_helper_deployment(
         policy,
         ResourceHelperDeploymentStatus::Missing,
@@ -782,6 +799,10 @@ fn deploy_resource_helper_if_needed(
         ResourceHelperDeploymentDecision::Prompt(prompt)
             if !confirm_resource_helper_upload(app, &prompt) =>
         {
+            memory
+                .lock()
+                .map_err(|_| invalid_error("resource helper deployment memory is poisoned"))?
+                .record_canceled_prompt(&host.id, plan.manifest.clone());
             return Ok(ResourceHelperDeploymentRuntime::Unavailable {
                 reason: "Resource Monitor helper upload was canceled by the user".to_string(),
             });
@@ -2618,6 +2639,12 @@ pub fn resolve_resource_target_for_test(
     uname_output: Option<(&str, &str)>,
 ) -> RemoteResourceTargetDetection {
     resolve_resource_target(host_config, uname_output)
+}
+
+pub fn remote_provider_mode_for_host_resources_for_test(
+    host_config: Option<&HostResourceConfig>,
+) -> ResourceRemoteProviderMode {
+    remote_provider_mode_for_host_resources(host_config)
 }
 
 pub fn parse_remote_uname_for_test(

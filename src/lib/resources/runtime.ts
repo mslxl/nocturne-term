@@ -73,6 +73,16 @@ export function resourceMonitorHistoryForView(viewId: string, metric: ResourceMe
   return store.historyForView(viewId, metric);
 }
 
+export function beginResourceMonitorProviderSwitch(ownerToolTabId: string): ResourceMonitorState {
+  store.beginProviderSwitch(ownerToolTabId);
+  return store.stateForOwner(ownerToolTabId);
+}
+
+export function endResourceMonitorProviderSwitch(ownerToolTabId: string): ResourceMonitorState {
+  store.endProviderSwitch(ownerToolTabId);
+  return store.stateForOwner(ownerToolTabId);
+}
+
 export async function tickResourceMonitorView(viewId: string): Promise<ResourceTickResult> {
   return store.tickForView(viewId);
 }

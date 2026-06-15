@@ -7,17 +7,16 @@
  * Operation:
  * Builds a Resource Monitor snapshot with overall CPU, per-core CPU details,
  * memory, swap, and two GPU devices, then converts it into render rows with
- * CPU and GPU groups collapsed by default, then expanded explicitly with custom
- * metric ordering and history samples.
+ * custom metric ordering and history samples.
  *
  * Expected:
  * The view model returns a provider/status summary, uses current values and
- * compact auxiliary text, keeps collapsible child rows hidden when groups are
- * closed, exposes CPU cores and GPU devices when groups are explicitly opened,
- * always exposes history data for available rows, exposes CPU overall and
- * per-core history, omits useless "Updated now" status text, sample-count
- * labels, and chart max labels, respects custom metric order, and represents
- * unavailable metrics with their reasons instead of failing the whole UI.
+ * compact auxiliary text, keeps CPU and GPU as one overall row each by default,
+ * exposes CPU core and GPU device child rows for expandable details, always
+ * exposes history data for available overall rows, omits useless "Updated now"
+ * status text, sample-count labels, and chart max labels, respects custom
+ * metric order, and represents unavailable metrics with their reasons instead
+ * of failing the whole UI.
  */
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
@@ -25,7 +24,7 @@ import { buildResourceMonitorViewModel } from "../src/lib/resources/view-model";
 import type { ResourceCollection } from "../src/lib/resources/store";
 
 describe("Resource Monitor UI view model", () => {
-  it("builds dense rows with collapsible CPU cores and GPU devices", () => {
+  it("builds dense overall rows with expandable CPU core and GPU device details", () => {
     const snapshot: ResourceCollection = {
       ownerToolTabId: "tool-resources-1",
       provider: "local provider",
@@ -79,7 +78,6 @@ describe("Resource Monitor UI view model", () => {
 
     const collapsedModel = buildResourceMonitorViewModel({
       snapshot,
-      expandedGroups: new Set(),
       historyForMetric: () => [],
       metricOrder: ["memory", "cpu", "swap", "gpu"],
       stale: false,
@@ -87,14 +85,13 @@ describe("Resource Monitor UI view model", () => {
     });
 
     assert.equal(collapsedModel.providerLabel, "local provider");
+    assert.equal(collapsedModel.rows.find((row) => row.id === "cpu")?.collapsible, true);
     assert.equal(collapsedModel.rows.find((row) => row.id === "cpu")?.expanded, false);
-    assert.equal(collapsedModel.rows.find((row) => row.id === "cpu")?.children.length, 0);
+    assert.equal(collapsedModel.rows.find((row) => row.id === "gpu")?.collapsible, true);
     assert.equal(collapsedModel.rows.find((row) => row.id === "gpu")?.expanded, false);
-    assert.equal(collapsedModel.rows.find((row) => row.id === "gpu")?.children.length, 0);
 
     const model = buildResourceMonitorViewModel({
       snapshot,
-      expandedGroups: new Set(["cpu", "gpu"]),
       historyForMetric: (metric) => metric === "cpu"
         ? [
             {
@@ -128,6 +125,7 @@ describe("Resource Monitor UI view model", () => {
           ]
         : [],
       metricOrder: ["memory", "cpu", "swap", "gpu"],
+      expandedMetrics: new Set(["cpu", "gpu"]),
       stale: false,
       warning: null,
     });
@@ -141,9 +139,12 @@ describe("Resource Monitor UI view model", () => {
     assert.equal(cpu?.auxiliary, "2 cores");
     assert.deepEqual(cpu?.history?.points, [12, 36]);
     assert.equal("maxLabel" in (cpu?.history ?? {}), false);
-    assert.deepEqual(cpu?.children?.map((row) => `${row.label}:${row.primary}`), ["Core 0:10%", "Core 1:62%"]);
-    assert.deepEqual(cpu?.children?.[0]?.history?.points, [8, 10]);
-    assert.deepEqual(cpu?.children?.[1]?.history?.points, [16, 62]);
+    assert.equal(cpu?.collapsible, true);
+    assert.equal(cpu?.expanded, true);
+    assert.deepEqual(cpu?.children.map((child) => [child.id, child.primary]), [
+      ["cpu-core-0", "10%"],
+      ["cpu-core-1", "62%"],
+    ]);
     assert.equal(cpu?.history?.label, "");
 
     const memory = model.rows[0];
@@ -151,16 +152,20 @@ describe("Resource Monitor UI view model", () => {
     assert.match(memory?.auxiliary ?? "", /8 GiB \/ 16 GiB/);
     assert.match(memory?.auxiliary ?? "", /available 6 GiB/);
     assert.deepEqual(memory?.history?.points, []);
+    assert.equal(memory?.collapsible, false);
 
     const swap = model.rows[2];
     assert.equal(swap?.status, "unavailable");
     assert.equal(swap?.reason, "Swap is disabled on this host.");
+    assert.equal(swap?.collapsible, false);
 
     const gpu = model.rows[3];
-    assert.equal(gpu?.auxiliary, "2 GPUs");
-    assert.deepEqual(gpu?.children?.map((row) => `${row.label}:${row.primary}:${row.auxiliary}`), [
-      "GPU 0:10% compute:1 GiB / 4 GiB VRAM",
-      "GPU 1:70% compute:3 GiB / 4 GiB VRAM",
+    assert.equal(gpu?.auxiliary, "2 GPUs, 4 GiB / 8 GiB VRAM");
+    assert.equal(gpu?.collapsible, true);
+    assert.equal(gpu?.expanded, true);
+    assert.deepEqual(gpu?.children.map((child) => [child.id, child.label, child.primary]), [
+      ["gpu-gpu-0", "GPU 0", "10%"],
+      ["gpu-gpu-1", "GPU 1", "70%"],
     ]);
   });
 });

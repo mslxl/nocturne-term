@@ -9,7 +9,7 @@
  * Registers multiple visible views for the same owner ToolTab, triggers polling
  * ticks, triggers overlapping ticks, simulates provider failures, and returns a
  * successful snapshot where one metric is unavailable while other metrics are
- * available.
+ * available, and simulates a user switching remote provider modes.
  *
  * Expected:
  * The store owns polling by owner ToolTab id so mirrors do not duplicate
@@ -17,6 +17,9 @@
  * five-second provider timeout by default, marks data stale after three
  * consecutive failures while preserving the last successful snapshot, and keeps
  * per-metric unavailable reasons without failing the whole Resource Monitor.
+ * When a provider mode switch begins, the store clears the previous provider's
+ * snapshot and history so the panel cannot display metrics from the wrong
+ * source while the new provider is loading.
  */
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
@@ -172,5 +175,36 @@ describe("Resource Monitor frontend store", () => {
     assert.equal(state.latest?.metrics.cpu?.status, "available");
     assert.equal(state.latest?.metrics.gpu?.status, "unavailable");
     assert.equal(state.latest?.metrics.gpu?.reason, "No GPU provider is available on this host.");
+  });
+
+  it("clears stale provider data and history when a provider switch begins", async () => {
+    const store = createResourceMonitorStore({
+      provider: {
+        collect: async () => ({
+          ownerToolTabId: "tool-resources-1",
+          provider: "system commands on remote",
+          collectedAtMs: 1000,
+          metrics: {
+            cpu: available("cpu", 40),
+            gpu: available("gpu", 20),
+          },
+        }),
+      },
+    });
+    store.setViewVisibility({ viewId: "owner-view", ownerToolTabId: "tool-resources-1", visible: true });
+    await store.tickForView("owner-view");
+
+    assert.equal(store.stateForOwner("tool-resources-1").latest?.provider, "system commands on remote");
+    assert.equal(store.historyForMetric("tool-resources-1", "cpu").length, 1);
+
+    store.beginProviderSwitch("tool-resources-1");
+
+    const state = store.stateForOwner("tool-resources-1");
+    assert.equal(state.latest, null);
+    assert.equal(state.stale, false);
+    assert.equal(state.warning, null);
+    assert.equal(state.consecutiveFailures, 0);
+    assert.deepEqual(store.historyForMetric("tool-resources-1", "cpu"), []);
+    assert.deepEqual(store.historyForMetric("tool-resources-1", "gpu"), []);
   });
 });

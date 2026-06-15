@@ -228,9 +228,14 @@ Resource Monitor settings belong with Workspace/Tools or the peer tool settings 
 Settings should expose:
 
 - `Default resource refresh interval`: 1s, 2s, 5s, or 10s; default 2s
-- `Remote resource provider`: Auto, Agent, or System Commands; default Auto. System Commands mode must never download, upload, install, or run the managed Resource Monitor agent. It may run existing target-host commands such as Linux `nvidia-smi` and must show unavailable reasons for metrics those commands cannot provide.
 
 ToolTab-local refresh interval changes are temporary and do not write this default setting.
+
+Remote resource provider mode is not a global Settings page value. It belongs
+to the current Workspace Host as `[resources].remote_provider` and is exposed
+through a compact control in the Resource Monitor ToolTab. This keeps provider
+selection close to the provider status and prevents one global setting from
+unexpectedly changing every SSH Workspace.
 
 ## Workspace Tab Bar
 

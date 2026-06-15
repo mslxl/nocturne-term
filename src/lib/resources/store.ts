@@ -67,6 +67,7 @@ export type ResourceMonitorState = {
   ownerToolTabId: string;
   latest: ResourceCollection | null;
   inFlight: boolean;
+  providerSwitchInProgress: boolean;
   consecutiveFailures: number;
   stale: boolean;
   warning: string | null;
@@ -77,6 +78,7 @@ export type ResourceTickResult =
   | { kind: "collected"; ownerToolTabId: string; collection: ResourceCollection }
   | { kind: "skipped_in_flight"; ownerToolTabId: string }
   | { kind: "skipped_not_visible"; ownerToolTabId: string }
+  | { kind: "skipped_provider_switch"; ownerToolTabId: string }
   | { kind: "failed"; ownerToolTabId: string; error: Error };
 
 type ResourceViewRegistration = {
@@ -96,6 +98,8 @@ export type ResourceMonitorStore = {
   unregisterView(viewId: string): void;
   visibleOwnerToolTabIds(): string[];
   stateForOwner(ownerToolTabId: string): ResourceMonitorState;
+  beginProviderSwitch(ownerToolTabId: string): void;
+  endProviderSwitch(ownerToolTabId: string): void;
   tickForView(viewId: string): Promise<ResourceTickResult>;
   tickForOwner(ownerToolTabId: string): Promise<ResourceTickResult>;
   tickVisibleOwners(): Promise<ResourceTickResult[]>;
@@ -120,6 +124,7 @@ export function createResourceMonitorStore(options: {
       ownerToolTabId,
       latest: null,
       inFlight: false,
+      providerSwitchInProgress: false,
       inFlightPromise: null,
       history: new Map(),
       consecutiveFailures: 0,
@@ -144,6 +149,9 @@ export function createResourceMonitorStore(options: {
     const state = ownerState(ownerToolTabId);
     if (!hasVisibleView(ownerToolTabId)) {
       return { kind: "skipped_not_visible", ownerToolTabId };
+    }
+    if (state.providerSwitchInProgress) {
+      return { kind: "skipped_provider_switch", ownerToolTabId };
     }
     if (state.inFlightPromise) {
       return { kind: "skipped_in_flight", ownerToolTabId };
@@ -208,11 +216,25 @@ export function createResourceMonitorStore(options: {
         ownerToolTabId: state.ownerToolTabId,
         latest: state.latest,
         inFlight: state.inFlight,
+        providerSwitchInProgress: state.providerSwitchInProgress,
         consecutiveFailures: state.consecutiveFailures,
         stale: state.stale,
         warning: state.warning,
         lastError: state.lastError,
       };
+    },
+    beginProviderSwitch(ownerToolTabId) {
+      const state = ownerState(ownerToolTabId);
+      state.providerSwitchInProgress = true;
+      state.latest = null;
+      state.history.clear();
+      state.consecutiveFailures = 0;
+      state.stale = false;
+      state.warning = null;
+      state.lastError = null;
+    },
+    endProviderSwitch(ownerToolTabId) {
+      ownerState(ownerToolTabId).providerSwitchInProgress = false;
     },
     tickForView(viewId) {
       const view = views.get(viewId);

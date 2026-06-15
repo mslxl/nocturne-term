@@ -13,12 +13,13 @@
  * Tauri command thread, SSH Workspaces no longer return the old placeholder
  * provider, remote collection resolves a target, loads bundled helper bytes or
  * a same-tag download plan when the configured provider allows the managed
- * agent, applies the unified remote helper policy before deployment, deploys
- * the helper over SFTP only after policy approval, executes the helper, parses
- * NDJSON, and reuses the Files SSH command helpers instead of duplicating
- * command execution code. When `resources.remote_provider` is
- * `system_commands`, remote collection returns the system-command snapshot
- * before helper bytes are loaded or uploaded.
+ * agent, reads remote provider mode from Host resource config, applies the
+ * unified remote helper policy before deployment, deploys the helper over SFTP
+ * only after policy approval, executes the helper, parses NDJSON, and reuses
+ * the Files SSH command helpers instead of duplicating command execution code.
+ * When Host `resources.remote_provider` is `system_commands`, remote collection
+ * returns the system-command snapshot before helper bytes are loaded or
+ * uploaded.
  */
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
@@ -35,6 +36,7 @@ describe("Resource Monitor remote helper source", () => {
     assert.doesNotMatch(resources, /remote resource provider is not connected yet/);
     assert.match(resources, /ConnectionProtocol::Ssh => collect_remote_resource_snapshot/);
     assert.match(resources, /detect_remote_resource_target/);
+    assert.match(resources, /remote_provider_mode_for_host_resources\(host\.document\.resources\.as_ref\(\)\)/);
     assert.match(resources, /ResourceRemoteProviderMode::SystemCommands/);
     assert.match(resources, /return collect_remote_system_resource_snapshot\(&connection, target_os\)/);
     assert.match(resources, /LINUX_NVIDIA_SMI_QUERY_COMMAND/);

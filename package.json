@@ -25,6 +25,7 @@
     "test:tauri:workspace-new-workspace-unique-title": "node tests/tauri/workspace-new-workspace-unique-title.test.mjs",
     "test:tauri:workspace-non-terminal-layout-memory": "node tests/tauri/workspace-non-terminal-layout-memory.test.mjs",
     "test:tauri:resource-monitor-ui-layout": "node tests/tauri/resource-monitor-ui-layout.test.mjs",
+    "test:tauri:resource-monitor-ssh-provider-mode-persists": "node tests/tauri/resource-monitor-ssh-provider-mode-persists.test.mjs",
     "test:tauri:integrated-titlebar-decorum-layout": "node tests/tauri/integrated-titlebar-decorum-layout.test.mjs",
     "test:tauri:tooltab-edge-docking": "node tests/tauri/tooltab-edge-docking.test.mjs",
     "test:tauri:tooltab-workspace-hover-preview": "node tests/tauri/tooltab-workspace-hover-preview.test.mjs",

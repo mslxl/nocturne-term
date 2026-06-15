@@ -438,22 +438,6 @@ export const settingsSchema: SettingDefinition[] = [
     toConfigValue: (value) => configString(String(value)),
   },
   {
-    key: "resources.remote_provider",
-    category: "resources",
-    label: "resourceRemoteProvider",
-    path: ["resources", "remote_provider"],
-    kind: "select",
-    defaultValue: "auto",
-    help: "resourceRemoteProviderHelp",
-    options: [
-      { value: "auto", label: "auto" },
-      { value: "agent", label: "resourceProviderAgent" },
-      { value: "system_commands", label: "resourceProviderSystemCommands" },
-    ],
-    get: (root) => stringValue(valueAt(root, ["resources", "remote_provider"])) ?? "auto",
-    toConfigValue: (value) => configString(String(value)),
-  },
-  {
     key: "transfers.global_concurrency",
     category: "transfers",
     label: "globalTransferConcurrency",

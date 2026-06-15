@@ -6,21 +6,25 @@
  * for remote helper selection.
  *
  * Operation:
- * Resolves target OS/architecture from optional Host resource config, parses
- * fixture outputs from Unix `uname` and Windows platform commands, and simulates
- * a failed detection where the user cancels manual selection.
+ * Resolves target OS/architecture and remote provider mode from optional Host
+ * resource config, parses fixture outputs from Unix `uname` and Windows
+ * platform commands, and simulates a failed detection where the user cancels
+ * manual selection.
  *
  * Expected:
- * Explicit Host config wins over command output, supported Linux/macOS/Windows
- * command outputs map to structured target OS/architecture values, failed
- * detection does not guess, and helper-backed metrics become unavailable with
- * the explicit `Target OS/architecture unknown` reason when the user cancels.
+ * Explicit Host config wins over command output, Host config owns remote
+ * provider selection, missing provider selection defaults to auto, supported
+ * Linux/macOS/Windows command outputs map to structured target OS/architecture
+ * values, failed detection does not guess, and helper-backed metrics become
+ * unavailable with the explicit `Target OS/architecture unknown` reason when
+ * the user cancels.
  */
 use nocturne_lib::{
     helper_target_unknown_metric_for_test, parse_remote_uname_for_test,
-    parse_remote_windows_platform_for_test, resolve_resource_target_for_test, HostResourceConfig,
-    LocalResourceMetricAvailability, LocalResourceMetricKind, RemoteResourceTargetArch,
-    RemoteResourceTargetDetection, RemoteResourceTargetOs,
+    parse_remote_windows_platform_for_test, remote_provider_mode_for_host_resources_for_test,
+    resolve_resource_target_for_test, HostResourceConfig, LocalResourceMetricAvailability,
+    LocalResourceMetricKind, RemoteResourceTargetArch, RemoteResourceTargetDetection,
+    RemoteResourceTargetOs, ResourceRemoteProviderMode,
 };
 
 #[test]
@@ -29,6 +33,7 @@ fn configured_host_resource_target_wins_over_command_output() {
         Some(HostResourceConfig {
             target_os: Some(RemoteResourceTargetOs::Linux),
             target_arch: Some(RemoteResourceTargetArch::X86_64),
+            remote_provider: None,
         }),
         Some(("Darwin", "arm64")),
     );
@@ -40,6 +45,22 @@ fn configured_host_resource_target_wins_over_command_output() {
             arch: RemoteResourceTargetArch::X86_64,
             source: "host_config",
         }
+    );
+}
+
+#[test]
+fn host_resource_config_owns_remote_provider_mode() {
+    assert_eq!(
+        remote_provider_mode_for_host_resources_for_test(None),
+        ResourceRemoteProviderMode::Auto
+    );
+    assert_eq!(
+        remote_provider_mode_for_host_resources_for_test(Some(&HostResourceConfig {
+            target_os: None,
+            target_arch: None,
+            remote_provider: Some(ResourceRemoteProviderMode::SystemCommands),
+        })),
+        ResourceRemoteProviderMode::SystemCommands
     );
 }
 
@@ -89,6 +110,7 @@ fn detection_failure_requires_user_choice_without_guessing() {
             Some(HostResourceConfig {
                 target_os: Some(RemoteResourceTargetOs::Linux),
                 target_arch: None,
+                remote_provider: None,
             }),
             None,
         ),

@@ -5,17 +5,16 @@
  * Verifies the Settings schema for Resource Monitor settings.
  *
  * Operation:
- * Reads the frontend Settings schema, finds the Resource Monitor refresh and
- * remote provider settings, checks their category, labels, config paths, fixed
- * select options, default values, fallback values for an empty config root,
- * configured value mapping, and serialized config values.
+ * Reads the frontend Settings schema, finds the Resource Monitor refresh
+ * setting, and verifies that remote provider selection is not exposed as a
+ * global setting.
  *
  * Expected:
- * The settings appear under the Resource Monitor tool category. Refresh stores
+ * The setting appears under the Resource Monitor tool category. Refresh stores
  * `resources.default_refresh_interval`, only allows 1s, 2s, 5s, and 10s, and
- * defaults to 2s. Remote provider stores `resources.remote_provider`, only
- * allows auto, agent, and system_commands, defaults to auto, and writes TOML
- * string values.
+ * defaults to 2s. Remote provider selection is absent from the global Settings
+ * schema because it belongs to the current Workspace Host and is edited from
+ * the Resource Monitor ToolTab.
  */
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
@@ -41,18 +40,8 @@ describe("Resource Monitor settings schema", () => {
     assert.deepEqual(setting.toConfigValue("10s"), configString("10s"));
   });
 
-  it("defines a remote provider mode setting", () => {
+  it("does not define a global remote provider mode setting", () => {
     const setting = settingsSchema.find((item) => item.key === "resources.remote_provider");
-    assert.ok(setting, "resources.remote_provider setting must exist");
-
-    assert.equal(setting.category, "resources");
-    assert.equal(setting.label, "resourceRemoteProvider");
-    assert.deepEqual(setting.path, ["resources", "remote_provider"]);
-    assert.equal(setting.kind, "select");
-    assert.equal(setting.defaultValue, "auto");
-    assert.deepEqual(setting.options?.map((option) => option.value), ["auto", "agent", "system_commands"]);
-    assert.equal(setting.get({ values: {} }), "auto");
-    assert.equal(setting.get({ values: { resources: { kind: "Table", value: { remote_provider: configString("system_commands") } } } }), "system_commands");
-    assert.deepEqual(setting.toConfigValue("agent"), configString("agent"));
+    assert.equal(setting, undefined);
   });
 });

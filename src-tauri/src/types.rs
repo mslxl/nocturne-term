@@ -137,6 +137,7 @@ pub struct HostFilesConfig {
 pub struct HostResourceConfig {
     pub target_os: Option<RemoteResourceTargetOs>,
     pub target_arch: Option<RemoteResourceTargetArch>,
+    pub remote_provider: Option<ResourceRemoteProviderMode>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
@@ -1028,7 +1029,6 @@ pub enum ResourceRemoteProviderMode {
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
 pub struct ResourceSettings {
     pub default_refresh_interval: ResourceRefreshInterval,
-    pub remote_provider: ResourceRemoteProviderMode,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]

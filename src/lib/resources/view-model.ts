@@ -20,10 +20,10 @@ export type ResourceMetricRow = {
   primary: string;
   auxiliary: string;
   reason: string | null;
+  history: ResourceMetricHistory | null;
   collapsible: boolean;
   expanded: boolean;
   children: ResourceMetricChildRow[];
-  history: ResourceMetricHistory | null;
 };
 
 export type ResourceMetricChildRow = {
@@ -41,9 +41,9 @@ export type ResourceMetricHistory = {
 
 export function buildResourceMonitorViewModel(input: {
   snapshot: ResourceCollection | null;
-  expandedGroups: ReadonlySet<string>;
   historyForMetric?: (metric: ResourceMetricId) => ResourceMetric[];
   metricOrder?: readonly ResourceMetricId[];
+  expandedMetrics?: ReadonlySet<ResourceMetricId>;
   stale: boolean;
   warning: string | null;
 }): ResourceMonitorViewModel {
@@ -57,7 +57,6 @@ export function buildResourceMonitorViewModel(input: {
         unavailableRow({
           metric,
           reason: "Collection has not started.",
-          expandedGroups: input.expandedGroups,
         }),
       ),
     };
@@ -71,8 +70,8 @@ export function buildResourceMonitorViewModel(input: {
       rowForMetric({
         metric,
         sample: input.snapshot?.metrics[metric] ?? null,
-        expandedGroups: input.expandedGroups,
         historySamples: input.historyForMetric?.(metric) ?? [],
+        expanded: input.expandedMetrics?.has(metric) ?? false,
       }),
     ),
   };
@@ -81,27 +80,25 @@ export function buildResourceMonitorViewModel(input: {
 function rowForMetric(input: {
   metric: ResourceMetricId;
   sample: ResourceMetric | null;
-  expandedGroups: ReadonlySet<string>;
   historySamples: ResourceMetric[];
+  expanded: boolean;
 }): ResourceMetricRow {
   if (!input.sample) {
     return unavailableRow({
       metric: input.metric,
       reason: "Metric is unavailable.",
-      expandedGroups: input.expandedGroups,
     });
   }
   if (input.sample.status === "unavailable") {
     return unavailableRow({
       metric: input.metric,
       reason: input.sample.reason,
-      expandedGroups: input.expandedGroups,
     });
   }
 
-  const children = childRows(input.sample, input.historySamples);
-  const expanded = input.expandedGroups.has(input.metric);
   const history = historyForSamples(input.historySamples);
+  const children = childRowsForMetric(input.metric, input.sample);
+  const collapsible = children.length > 0;
   return {
     id: input.metric,
     metric: input.metric,
@@ -110,17 +107,16 @@ function rowForMetric(input: {
     primary: `${formatPercent(input.sample.percent)}%`,
     auxiliary: auxiliaryText(input.sample),
     reason: null,
-    collapsible: children.length > 0,
-    expanded,
-    children: expanded ? children : [],
     history,
+    collapsible,
+    expanded: collapsible && input.expanded,
+    children,
   };
 }
 
 function unavailableRow(input: {
   metric: ResourceMetricId;
   reason: string;
-  expandedGroups: ReadonlySet<string>;
 }): ResourceMetricRow {
   return {
     id: input.metric,
@@ -130,65 +126,48 @@ function unavailableRow(input: {
     primary: "Unavailable",
     auxiliary: "",
     reason: input.reason,
-    collapsible: false,
-    expanded: input.expandedGroups.has(input.metric),
-    children: [],
     history: null,
+    collapsible: false,
+    expanded: false,
+    children: [],
   };
+}
+
+function childRowsForMetric(
+  metric: ResourceMetricId,
+  sample: Extract<ResourceMetric, { status: "available" }>,
+): ResourceMetricChildRow[] {
+  if (metric === "cpu") {
+    return (sample.details?.cores ?? []).map((core) => ({
+      id: `cpu-core-${core.id}`,
+      label: core.label,
+      primary: `${formatPercent(core.percent)}%`,
+      auxiliary: "",
+      history: {
+        points: [core.percent],
+        label: "",
+      },
+    }));
+  }
+  if (metric === "gpu") {
+    return (sample.details?.gpus ?? []).map((gpu) => ({
+      id: `gpu-${gpu.id}`,
+      label: gpu.label,
+      primary: `${formatPercent(gpu.computePercent)}%`,
+      auxiliary: `${formatBytes(gpu.memoryUsed)} / ${formatBytes(gpu.memoryTotal)} VRAM`,
+      history: {
+        points: [gpu.computePercent],
+        label: "",
+      },
+    }));
+  }
+  return [];
 }
 
 function historyForSamples(samples: ResourceMetric[]): ResourceMetricHistory {
   const points = samples
     .filter((sample): sample is Extract<ResourceMetric, { status: "available" }> => sample.status === "available")
     .map((sample) => sample.percent);
-  return {
-    points,
-    label: "",
-  };
-}
-
-function childRows(
-  sample: Extract<ResourceMetric, { status: "available" }>,
-  historySamples: ResourceMetric[],
-): ResourceMetricChildRow[] {
-  if (sample.metric === "cpu") {
-    return (sample.details?.cores ?? []).map((core) => ({
-      id: `cpu-core-${core.id}`,
-      label: core.label,
-      primary: `${formatPercent(core.percent)}%`,
-      auxiliary: "",
-      history: childHistoryForSamples(historySamples, (historySample) => {
-        if (historySample.status !== "available" || historySample.metric !== "cpu") {
-          return null;
-        }
-        return historySample.details?.cores?.find((historyCore) => historyCore.id === core.id)?.percent ?? null;
-      }),
-    }));
-  }
-  if (sample.metric === "gpu") {
-    return (sample.details?.gpus ?? []).map((gpu) => ({
-      id: `gpu-${gpu.id}`,
-      label: gpu.label,
-      primary: `${formatPercent(gpu.computePercent)}% compute`,
-      auxiliary: `${formatBytes(gpu.memoryUsed)} / ${formatBytes(gpu.memoryTotal)} VRAM`,
-      history: childHistoryForSamples(historySamples, (historySample) => {
-        if (historySample.status !== "available" || historySample.metric !== "gpu") {
-          return null;
-        }
-        return historySample.details?.gpus?.find((historyGpu) => historyGpu.id === gpu.id)?.computePercent ?? null;
-      }),
-    }));
-  }
-  return [];
-}
-
-function childHistoryForSamples(
-  samples: ResourceMetric[],
-  pointForSample: (sample: ResourceMetric) => number | null,
-): ResourceMetricHistory {
-  const points = samples
-    .map(pointForSample)
-    .filter((point): point is number => point !== null);
   return {
     points,
     label: "",
@@ -202,7 +181,10 @@ function auxiliaryText(sample: Extract<ResourceMetric, { status: "available" }>)
   }
   if (sample.metric === "gpu") {
     const gpuCount = sample.details?.gpus?.length ?? 0;
-    return gpuCount > 0 ? `${gpuCount} ${gpuCount === 1 ? "GPU" : "GPUs"}` : `${formatBytes(sample.used)} / ${formatBytes(sample.total)}`;
+    const capacity = `${formatBytes(sample.used)} / ${formatBytes(sample.total)} VRAM`;
+    return gpuCount > 0
+      ? `${gpuCount} ${gpuCount === 1 ? "GPU" : "GPUs"}, ${capacity}`
+      : capacity;
   }
   const secondary = sample.available !== undefined
     ? `available ${formatBytes(sample.available)}`

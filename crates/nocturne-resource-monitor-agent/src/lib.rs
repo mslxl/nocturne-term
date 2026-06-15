@@ -394,14 +394,25 @@ fn linux_drm_gpu_device_metric(
     card_id: &str,
     device_path: &Path,
 ) -> Result<Option<ResourceMonitorAgentGpuDevice>, String> {
-    let used_path = device_path.join("mem_info_vram_used");
-    let total_path = device_path.join("mem_info_vram_total");
-    if !used_path.exists() || !total_path.exists() {
+    let Some(memory_used) = read_first_existing_u64_file(&[
+        device_path.join("mem_info_vram_used"),
+        device_path.join("mem_info_vram_used_bytes"),
+        device_path.join("mem_info_vis_vram_used"),
+        device_path.join("mem_info_gtt_used"),
+    ])?
+    else {
         return Ok(None);
-    }
+    };
+    let Some(memory_total) = read_first_existing_u64_file(&[
+        device_path.join("mem_info_vram_total"),
+        device_path.join("mem_info_vram_total_bytes"),
+        device_path.join("mem_info_vis_vram_total"),
+        device_path.join("mem_info_gtt_total"),
+    ])?
+    else {
+        return Ok(None);
+    };
 
-    let memory_used = read_u64_file(&used_path)?;
-    let memory_total = read_u64_file(&total_path)?;
     let label = read_first_existing_trimmed(&[
         device_path.join("product_name"),
         device_path.join("device_name"),
@@ -416,6 +427,16 @@ fn linux_drm_gpu_device_metric(
         memory_used,
         memory_total,
     }))
+}
+
+fn read_first_existing_u64_file(paths: &[PathBuf]) -> Result<Option<u64>, String> {
+    for path in paths {
+        if !path.exists() {
+            continue;
+        }
+        return read_u64_file(path).map(Some);
+    }
+    Ok(None)
 }
 
 #[cfg(target_os = "linux")]

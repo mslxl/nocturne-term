@@ -9,19 +9,20 @@
  * Operation:
  * Validates a `nocturne-resource-monitor-agent` manifest, rejects mismatched helper names
  * and hashes, evaluates Ask/Never/Allow helper policies for missing or changed
- * manifests, records a verified deployment hash for one Host, and builds a
- * helper upload plan from bundled helper bytes.
+ * manifests, records verified and canceled deployment decisions for one Host,
+ * and builds a helper upload plan from bundled helper bytes.
  *
  * Expected:
  * Only a manifest matching helper name, purpose, target OS, target architecture,
  * upload path, checksum, and capabilities is valid. Never blocks upload with an
  * unavailable reason, Allow uploads without prompting, Ask produces a prompt
  * containing all required fields, deployment/hash verification is remembered
- * per Host without carrying credentials, and upload planning creates stable
- * target-specific resource paths, remote helper paths, manifest paths,
- * checksums, executable modes, verification commands, launch commands, and
- * manifest JSON for every runtime-supported OS/architecture without requiring
- * a live SSH connection.
+ * per Host without carrying credentials. A canceled Ask prompt is remembered
+ * per Host and helper hash so automatic refresh ticks do not reopen the same
+ * dialog forever. Upload planning creates stable target-specific resource
+ * paths, remote helper paths, manifest paths, checksums, executable modes,
+ * verification commands, launch commands, and manifest JSON for every
+ * runtime-supported OS/architecture without requiring a live SSH connection.
  */
 use nocturne_lib::{
     decide_resource_helper_deployment_for_test, plan_resource_helper_upload_for_test,
@@ -178,6 +179,16 @@ fn remembers_verified_deployment_hash_per_host() {
     assert_eq!(memory.verified_hash("host-a"), Some("aaa"));
     assert_eq!(memory.verified_hash("host-b"), Some("bbb"));
     assert_eq!(memory.verified_hash("host-c"), None);
+}
+
+#[test]
+fn remembers_canceled_upload_prompt_per_host_and_hash() {
+    let mut memory = ResourceHelperDeploymentMemory::default();
+    memory.record_canceled_prompt("host-a", manifest("aaa"));
+
+    assert!(memory.has_canceled_prompt("host-a", &manifest("aaa")));
+    assert!(!memory.has_canceled_prompt("host-a", &manifest("bbb")));
+    assert!(!memory.has_canceled_prompt("host-b", &manifest("aaa")));
 }
 
 #[test]

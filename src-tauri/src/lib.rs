@@ -36,6 +36,7 @@ pub use resources::{
     parse_linux_proc_stat_cpu_for_test, parse_macos_memory_for_test, parse_remote_uname_for_test,
     parse_remote_windows_platform_for_test, parse_resource_monitor_agent_ndjson_for_test,
     parse_windows_memory_for_test, plan_resource_helper_upload_for_test,
+    remote_provider_mode_for_host_resources_for_test,
     remote_system_command_plan_for_test, remote_system_provider_runs_off_command_thread_for_test,
     resolve_resource_target_for_test, resource_helper_candidate_paths_for_test,
     resource_helper_resource_path_for_test, resource_settings_from_config_for_test,

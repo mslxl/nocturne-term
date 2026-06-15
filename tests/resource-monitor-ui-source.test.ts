@@ -7,20 +7,26 @@
  *
  * Operation:
  * Reads the Resource Monitor ToolTab component source and checks for the
- * provider row, metric rows, collapsed-by-default detail controls, hidden
- * non-collapsible detail spacers, per-metric always-on history rendering,
+ * provider row, compact Host-scoped provider mode control, metric rows,
+ * expandable CPU/GPU detail rendering, provider-switch loading state,
  * OverlayScrollbars usage, pointer drag ordering hooks, and CSS that prevents
  * horizontal scrolling in a dense single-column panel.
  *
  * Expected:
  * The Resource Monitor UI is a native-feeling dense panel rather than a
- * dashboard-card placeholder, exposes the expected controls, always renders
- * bordered history charts without top max labels, allows metric panels to be
- * reordered by pointer drag without native HTML drag interference, starts every
- * collapsible detail view closed, uses non-button spacers for metrics that
- * cannot expand, uses OverlayScrollbars rather than native scrollbars, and
- * hides horizontal overflow while preserving vertical scrolling for narrow dock
- * groups.
+ * dashboard-card placeholder, exposes the expected controls, persists remote
+ * provider mode through Host config instead of global settings, always renders
+ * provider-mode save errors until the next user action, enters a loading state
+ * while switching remote provider modes so old provider data is hidden, avoids
+ * rendering provider/status text in the compact header, avoids cloning generated
+ * Tauri binding objects with `structuredClone`, reads editable Host config only
+ * for SSH Resource Monitor ToolTabs so Local Resource Monitor cannot show a
+ * missing Local Host error, always renders bordered overall and detail history
+ * charts without top max labels, allows metric panels to be reordered by pointer
+ * drag without native HTML drag interference, keeps CPU/GPU detail expansion
+ * controls available but closed by default, uses OverlayScrollbars rather than
+ * native scrollbars, and hides horizontal overflow while preserving vertical
+ * scrolling for narrow dock groups.
  */
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
@@ -30,9 +36,27 @@ import { resolve } from "node:path";
 const source = readFileSync(resolve("src/lib/resources/ResourceMonitorToolTab.svelte"), "utf8");
 
 describe("Resource Monitor UI source", () => {
-  it("defines dense rows, provider status, collapsible details, and no horizontal scroll", () => {
+  it("defines dense overall rows, Host provider mode control, and no horizontal scroll", () => {
     assert.match(source, /data-testid="resource-monitor-provider-row"/);
-    assert.match(source, /data-testid="resource-monitor-status"/);
+    assert.match(source, /data-testid="resource-monitor-provider-mode"/);
+    assert.match(source, /let providerModeLoading = \$state\(false\)/);
+    assert.match(source, /beginResourceMonitorProviderSwitch\(toolTab\.id\)/);
+    assert.match(source, /class:provider-loading=\{providerModeLoading\}/);
+    assert.match(source, /data-testid="resource-monitor-loading"/);
+    assert.match(source, /aria-label="Loading resource metrics"/);
+    assert.match(source, /if \(toolTab\.host_id === LOCAL_HOST_ID\)/);
+    assert.match(source, /commands\.readConnectionHost\(toolTab\.host_id\)/);
+    assert.match(source, /commands\.updateConnectionHost/);
+    assert.match(source, /remote_provider:\s*value/);
+    assert.match(source, /cloneHostDocument\(hostEntry\.document\)/);
+    assert.doesNotMatch(source, /structuredClone\(hostEntry\.document\)/);
+    assert.match(source, /providerModeError = "";\s*remoteProviderMode = value;/);
+    assert.doesNotMatch(source, /catch \(error\) \{[\s\S]*providerModeError = error instanceof Error \? error\.message : String\(error\);[\s\S]*await refreshHostProviderMode\(\);[\s\S]*\}/);
+    assert.doesNotMatch(source, /data-testid="resource-monitor-provider-label"/);
+    assert.doesNotMatch(source, /data-testid="resource-monitor-status"/);
+    assert.doesNotMatch(source, /\{model\.providerLabel\}/);
+    assert.doesNotMatch(source, /\{model\.statusLabel\}/);
+    assert.doesNotMatch(source, />Loading<\/div>/);
     assert.match(source, /data-testid="resource-monitor-row"/);
     assert.match(source, /data-testid="resource-monitor-detail-toggle"/);
     assert.match(source, /resource-monitor-detail-spacer/);
@@ -41,7 +65,7 @@ describe("Resource Monitor UI source", () => {
     assert.match(source, /data-testid="resource-monitor-child-history"/);
     assert.match(source, /OverlayScrollbarsComponent/);
     assert.match(source, /reorderResourceMetricOrder/);
-    assert.match(source, /let expandedGroups = \$state<Set<string>>\(new Set\(\)\)/);
+    assert.match(source, /let expandedGroups = \$state<Set<ResourceMetricId>>\(new Set\(\)\)/);
     assert.doesNotMatch(source, /new Set\(\["cpu", "gpu"\]\)/);
     assert.match(source, /onpointerdown=/);
     assert.match(source, /pointer-drag-source/);

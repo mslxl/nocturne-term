@@ -397,6 +397,7 @@ export type HostFilesConfig = {
 export type HostResourceConfig = {
 	target_os: RemoteResourceTargetOs | null,
 	target_arch: RemoteResourceTargetArch | null,
+	remote_provider: ResourceRemoteProviderMode | null,
 };
 
 export type LocalConnectionConfig = {
@@ -500,7 +501,6 @@ export type ResourceRemoteProviderMode = "auto" | "agent" | "system_commands";
 
 export type ResourceSettings = {
 	default_refresh_interval: ResourceRefreshInterval,
-	remote_provider: ResourceRemoteProviderMode,
 };
 
 export type SshAuthTarget = {

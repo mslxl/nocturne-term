@@ -1,7 +1,13 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { OverlayScrollbarsComponent } from "overlayscrollbars-svelte";
-  import type { WorkspaceToolTab } from "$lib/bindings";
+  import {
+    commands,
+    type ConnectionHostDocument,
+    type ConnectionHostEntry,
+    type ResourceRemoteProviderMode,
+    type WorkspaceToolTab,
+  } from "$lib/bindings";
   import {
     buildResourceMonitorViewModel,
     type ResourceMetricRow,
@@ -9,12 +15,15 @@
   import type { ResourceMetricId, ResourceMonitorState } from "$lib/resources/store";
   import { defaultResourceMetricOrder, reorderResourceMetricOrder } from "$lib/resources/metric-order";
   import {
+    beginResourceMonitorProviderSwitch,
+    endResourceMonitorProviderSwitch,
     registerResourceMonitorView,
     resourceMonitorHistoryForView,
     resourceMonitorStateForOwner,
     tickResourceMonitorView,
     unregisterResourceMonitorView,
   } from "$lib/resources/runtime";
+  import { unwrapCommand } from "$lib/terminal/commands";
   import Activity from "~icons/lucide/activity";
   import ChevronRight from "~icons/lucide/chevron-right";
   import Cpu from "~icons/lucide/cpu";
@@ -55,19 +64,31 @@
     },
   } as const;
 
-  let expandedGroups = $state<Set<string>>(new Set());
   let monitorState = $state<ResourceMonitorState | null>(null);
   let metricOrder = $state<ResourceMetricId[]>([...defaultResourceMetricOrder]);
+  let expandedGroups = $state<Set<ResourceMetricId>>(new Set());
   let pointerDrag = $state<MetricPointerDrag | null>(null);
   let suppressedMetricClick = $state<SuppressedMetricClick | null>(null);
   let stopPointerDragListeners: (() => void) | null = null;
+  let hostEntry = $state<ConnectionHostEntry | null>(null);
+  let remoteProviderMode = $state<ResourceRemoteProviderMode>("auto");
+  let providerModeSaving = $state(false);
+  let providerModeLoading = $state(false);
+  let providerModeError = $state("");
+
+  const LOCAL_HOST_ID = "00000000-0000-0000-0000-000000000001";
+
+  const canEditRemoteProvider = $derived(
+    !!hostEntry && hostEntry.document.protocol === "ssh" && !hostEntry.read_only,
+  );
+  const showRemoteProviderControl = $derived(hostEntry?.document.protocol === "ssh");
 
   const model = $derived(
     buildResourceMonitorViewModel({
       snapshot: monitorState?.latest ?? null,
-      expandedGroups,
       historyForMetric: (metric) => resourceMonitorHistoryForView(viewId, metric),
       metricOrder,
+      expandedMetrics: expandedGroups,
       stale: monitorState?.stale ?? false,
       warning: monitorState?.warning ?? null,
     }),
@@ -94,6 +115,7 @@
       visible: true,
     });
     void tickView();
+    void refreshHostProviderMode();
     intervalId = setInterval(() => {
       void tickView();
     }, 2000);
@@ -108,17 +130,56 @@
     };
   });
 
-  function toggleGroup(row: ResourceMetricRow) {
-    if (!row.collapsible) {
+  async function refreshHostProviderMode() {
+    if (toolTab.host_id === LOCAL_HOST_ID) {
+      hostEntry = null;
+      remoteProviderMode = "auto";
+      providerModeError = "";
       return;
     }
-    const next = new Set(expandedGroups);
-    if (next.has(row.id)) {
-      next.delete(row.id);
-    } else {
-      next.add(row.id);
+    try {
+      hostEntry = await unwrapCommand(commands.readConnectionHost(toolTab.host_id));
+      remoteProviderMode = hostEntry.document.resources?.remote_provider ?? "auto";
+      providerModeError = "";
+    } catch (error) {
+      providerModeError = error instanceof Error ? error.message : String(error);
     }
-    expandedGroups = next;
+  }
+
+  async function updateRemoteProviderMode(value: ResourceRemoteProviderMode) {
+    if (!hostEntry || !canEditRemoteProvider) {
+      return;
+    }
+    providerModeSaving = true;
+    providerModeLoading = true;
+    providerModeError = "";
+    remoteProviderMode = value;
+    monitorState = beginResourceMonitorProviderSwitch(toolTab.id);
+    try {
+      const document = cloneHostDocument(hostEntry.document);
+      document.resources = {
+        target_os: document.resources?.target_os ?? null,
+        target_arch: document.resources?.target_arch ?? null,
+        remote_provider: value,
+      };
+      hostEntry = await unwrapCommand(commands.updateConnectionHost({
+        id: hostEntry.id,
+        directory: null,
+        folder: document.folder,
+        document,
+      }));
+      remoteProviderMode = hostEntry.document.resources?.remote_provider ?? "auto";
+      monitorState = endResourceMonitorProviderSwitch(toolTab.id);
+      await tickResourceMonitorView(viewId);
+      monitorState = resourceMonitorStateForOwner(toolTab.id);
+    } catch (error) {
+      providerModeError = error instanceof Error ? error.message : String(error);
+      remoteProviderMode = hostEntry.document.resources?.remote_provider ?? "auto";
+      monitorState = endResourceMonitorProviderSwitch(toolTab.id);
+    } finally {
+      providerModeSaving = false;
+      providerModeLoading = false;
+    }
   }
 
   function clickMetricRow(row: ResourceMetricRow) {
@@ -128,6 +189,19 @@
     }
     suppressedMetricClick = null;
     toggleGroup(row);
+  }
+
+  function toggleGroup(row: ResourceMetricRow) {
+    if (!row.collapsible) {
+      return;
+    }
+    const next = new Set(expandedGroups);
+    if (next.has(row.metric)) {
+      next.delete(row.metric);
+    } else {
+      next.add(row.metric);
+    }
+    expandedGroups = next;
   }
 
   function startMetricPointerDrag(metric: ResourceMetricId, event: PointerEvent) {
@@ -263,29 +337,62 @@
       })
       .join(" ");
   }
+
+  function cloneHostDocument(document: ConnectionHostDocument): ConnectionHostDocument {
+    return {
+      version: document.version,
+      id: document.id,
+      name: document.name,
+      folder: document.folder,
+      icon: document.icon ? { ...document.icon } : null,
+      files: document.files ? { ...document.files } : null,
+      resources: document.resources ? { ...document.resources } : null,
+      protocol: document.protocol,
+      local: document.local ? { ...document.local } : null,
+      ssh: document.ssh ? { ...document.ssh } : null,
+      telnet: document.telnet ? { ...document.telnet } : null,
+    };
+  }
 </script>
 
-<section class="resource-monitor-tooltab" aria-label="Resource Monitor" data-testid="resource-monitor-tooltab">
+<section class="resource-monitor-tooltab" class:provider-loading={providerModeLoading} aria-label="Resource Monitor" data-testid="resource-monitor-tooltab">
   <header class="resource-monitor-header">
     <div class="resource-monitor-title">
       <Activity aria-hidden="true" />
       <strong>{toolTab.title}</strong>
     </div>
     <div class="resource-monitor-provider-row" data-testid="resource-monitor-provider-row">
-      <span data-testid="resource-monitor-provider-label">{model.providerLabel}</span>
-      {#if model.statusLabel}
-        <span class:stale={model.warning !== null} data-testid="resource-monitor-status">{model.statusLabel}</span>
+      {#if showRemoteProviderControl}
+        <label class="resource-monitor-provider-mode" title={canEditRemoteProvider ? "Remote resource provider for this Host" : "Remote provider is editable only on Nocturne user hosts"}>
+          <span class="sr-only">Remote resource provider</span>
+          <select
+            aria-label="Remote resource provider"
+            data-testid="resource-monitor-provider-mode"
+            value={remoteProviderMode}
+            disabled={!canEditRemoteProvider || providerModeSaving}
+            onchange={(event) => updateRemoteProviderMode(event.currentTarget.value as ResourceRemoteProviderMode)}
+          >
+            <option value="auto">Auto</option>
+            <option value="agent">Agent</option>
+            <option value="system_commands">Commands</option>
+          </select>
+        </label>
       {/if}
     </div>
   </header>
 
-  {#if model.warning}
+  {#if providerModeError}
+    <div class="resource-monitor-warning" role="status">{providerModeError}</div>
+  {:else if model.warning}
     <div class="resource-monitor-warning" role="status">{model.warning}</div>
   {/if}
 
   <OverlayScrollbarsComponent element="div" class="resource-monitor-body" role="list" options={overlayResourceOptions} defer>
-    {#each model.rows as row (row.id)}
-      <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_noninteractive_element_interactions (Metric rows use pointer drag sorting; collapsible rows also support row-click expansion while the visible toggle button remains the explicit keyboard target.) -->
+    {#if providerModeLoading}
+      <div class="resource-monitor-loading" data-testid="resource-monitor-loading" role="status" aria-label="Loading resource metrics"></div>
+    {:else}
+      {#each model.rows as row (row.id)}
+      <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_noninteractive_element_interactions (Metric rows use pointer drag sorting; row clicks are ignored after a drag so sorting does not trigger another action.) -->
       <section
         class="resource-monitor-row"
         data-testid="resource-monitor-row"
@@ -379,8 +486,10 @@
             {/each}
           </div>
         {/if}
+
       </section>
-    {/each}
+      {/each}
+    {/if}
   </OverlayScrollbarsComponent>
 </section>
 
@@ -432,9 +541,11 @@
   }
 
   .resource-monitor-provider-row {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr);
+    display: flex;
+    flex-wrap: wrap;
     justify-content: normal;
+    align-items: center;
+    gap: 5px;
     color: var(--app-muted);
     line-height: 1.35;
   }
@@ -446,7 +557,40 @@
     white-space: nowrap;
   }
 
-  .resource-monitor-provider-row .stale,
+  .resource-monitor-provider-mode {
+    flex: 0 0 auto;
+    min-width: 0;
+    display: inline-flex;
+    align-items: center;
+  }
+
+  .resource-monitor-provider-mode select {
+    width: auto;
+    max-width: 104px;
+    min-height: 22px;
+    border: 1px solid var(--app-border);
+    border-radius: 5px;
+    padding: 1px 20px 1px 6px;
+    background: var(--app-bg);
+    color: var(--app-fg);
+    font: inherit;
+    font-size: 11px;
+  }
+
+  .resource-monitor-provider-mode select:disabled {
+    color: color-mix(in srgb, var(--app-muted) 70%, transparent);
+    background: color-mix(in srgb, var(--app-bg) 86%, var(--app-fg));
+  }
+
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+  }
+
   .resource-monitor-warning {
     color: var(--app-warning-fg, #b56a00);
   }
@@ -480,6 +624,49 @@
   .resource-monitor-row.pointer-drop-target {
     box-shadow: inset 0 2px 0 var(--app-accent, #4f8cff);
     background: color-mix(in srgb, var(--app-accent, #4f8cff) 8%, transparent);
+  }
+
+  .resource-monitor-loading {
+    min-height: 42px;
+    padding: 6px 9px;
+    position: relative;
+    overflow: hidden;
+  }
+
+  .resource-monitor-loading::before {
+    content: "";
+    position: absolute;
+    left: 9px;
+    right: 9px;
+    top: 16px;
+    height: 3px;
+    border-radius: 999px;
+    background:
+      linear-gradient(
+        90deg,
+        transparent 0%,
+        color-mix(in srgb, var(--app-accent, #4f8cff) 58%, transparent) 45%,
+        transparent 100%
+      ),
+      color-mix(in srgb, var(--app-muted) 18%, transparent);
+    animation: resource-monitor-loading-pulse 900ms ease-in-out infinite;
+  }
+
+  @keyframes resource-monitor-loading-pulse {
+    0% {
+      opacity: 0.42;
+      transform: translateX(-16%);
+    }
+
+    50% {
+      opacity: 1;
+      transform: translateX(0);
+    }
+
+    100% {
+      opacity: 0.42;
+      transform: translateX(16%);
+    }
   }
 
   .resource-monitor-row-main {
@@ -558,7 +745,7 @@
   .resource-monitor-primary.unavailable,
   .resource-monitor-reason,
   .resource-monitor-auxiliary,
-  .resource-monitor-child-row small {
+  .resource-monitor-auxiliary {
     color: var(--app-muted);
   }
 
@@ -566,14 +753,6 @@
   .resource-monitor-reason {
     line-height: 1.35;
     overflow-wrap: anywhere;
-  }
-
-  .resource-monitor-children {
-    min-width: 0;
-    display: flex;
-    flex-direction: column;
-    padding: 0 5px 7px 22px;
-    gap: 7px;
   }
 
   .resource-monitor-history {
@@ -584,13 +763,7 @@
     line-height: 1.35;
   }
 
-  .resource-monitor-child-history {
-    min-width: 0;
-    display: block;
-  }
-
-  .resource-monitor-history svg,
-  .resource-monitor-child-history svg {
+  .resource-monitor-history svg {
     width: 100%;
     display: block;
     border: 1px solid color-mix(in srgb, var(--app-border) 82%, transparent);
@@ -602,11 +775,58 @@
     height: 32px;
   }
 
-  .resource-monitor-child-history svg {
-    height: 24px;
+  .resource-monitor-history polyline {
+    fill: none;
+    stroke: var(--app-accent, #4f8cff);
+    stroke-width: 2;
+    vector-effect: non-scaling-stroke;
   }
 
-  .resource-monitor-history polyline,
+  .resource-monitor-children {
+    min-width: 0;
+    padding: 0 5px 8px 22px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .resource-monitor-child-row {
+    align-items: stretch;
+    flex-direction: column;
+    gap: 3px;
+  }
+
+  .resource-monitor-child-summary {
+    min-width: 0;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    line-height: 1.35;
+  }
+
+  .resource-monitor-child-summary span,
+  .resource-monitor-child-summary small {
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+
+  .resource-monitor-child-summary small {
+    color: var(--app-muted);
+  }
+
+  .resource-monitor-child-history {
+    min-width: 0;
+  }
+
+  .resource-monitor-child-history svg {
+    width: 100%;
+    height: 24px;
+    display: block;
+    border: 1px solid color-mix(in srgb, var(--app-border) 82%, transparent);
+    border-radius: 3px;
+    background: color-mix(in srgb, var(--app-bg) 94%, var(--app-fg));
+  }
+
   .resource-monitor-child-history polyline {
     fill: none;
     stroke: var(--app-accent, #4f8cff);
@@ -614,28 +834,4 @@
     vector-effect: non-scaling-stroke;
   }
 
-  .resource-monitor-child-row {
-    display: grid;
-    grid-template-columns: minmax(0, 0.42fr) minmax(0, 0.58fr);
-    align-items: start;
-    gap: 7px;
-    color: var(--app-fg);
-    line-height: 1.35;
-  }
-
-  .resource-monitor-child-summary {
-    min-width: 0;
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 6px;
-  }
-
-  .resource-monitor-child-row span,
-  .resource-monitor-child-row small {
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
 </style>

@@ -161,9 +161,17 @@ default_path = "/var/www"
 [resources]
 target_os = "linux"       # optional: linux | macos | windows
 target_arch = "x86_64"    # optional: x86_64 | aarch64 | armv7 | i686
+remote_provider = "auto"  # optional: auto | agent | system_commands
 ```
 
 `[resources].target_os` and `[resources].target_arch` are optional hints for Resource Monitor helper selection. Leave both unset to let Nocturne detect the remote target at runtime. If only one is set, Nocturne treats the resource target config as incomplete and asks the Workspace to choose rather than guessing.
+
+`[resources].remote_provider` is the Host-scoped Resource Monitor provider mode
+for SSH Workspaces. It defaults to `auto` when omitted. `agent` uses the managed
+Resource Monitor helper according to the remote helper policy, and
+`system_commands` only runs commands already present on the target Host. The
+Resource Monitor ToolTab exposes a compact control that edits this Host field
+for editable Nocturne user hosts.
 
 Example local host:
 
