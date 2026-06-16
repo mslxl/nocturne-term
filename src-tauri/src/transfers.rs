@@ -1035,9 +1035,13 @@ mod tests {
             path: "/var/www".to_string(),
         };
 
+        let expected_local = PathBuf::from("/tmp/root")
+            .join("child.txt")
+            .to_string_lossy()
+            .into_owned();
         assert_eq!(
             join_endpoint_path(&local, "child.txt"),
-            "/tmp/root/child.txt"
+            expected_local
         );
         assert_eq!(join_endpoint_path(&sftp, "child.txt"), "/var/www/child.txt");
     }

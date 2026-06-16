@@ -1221,6 +1221,8 @@ fn move_tool_slot_to_split(
             "target display slot {target_slot_id} not found"
         )));
     }
+    let inserted_role = find_group_role_containing_slot(&workspace.layout, slot_id)
+        .ok_or_else(|| missing_error(format!("display slot {slot_id} not found")))?;
     let (layout_without_slot, removed) = remove_slot_for_move(workspace.layout.clone(), slot_id)?;
     let removed =
         removed.ok_or_else(|| missing_error(format!("display slot {slot_id} not found")))?;
@@ -1230,7 +1232,14 @@ fn move_tool_slot_to_split(
         return Ok(());
     }
     let workspace = require_workspace_mut(snapshot, workspace_id)?;
-    workspace.layout = split_slot(layout_without_slot, target_slot_id, removed, side)?;
+    workspace.layout = cleanup_dock_layout(Some(split_slot_with_inserted_role(
+        layout_without_slot,
+        target_slot_id,
+        removed,
+        side,
+        inserted_role,
+    )?))?
+    .ok_or_else(|| invalid_error("dock layout cleanup removed every group"))?;
     Ok(())
 }
 
@@ -1333,7 +1342,19 @@ fn split_slot(
             workspace_slot_id(&inserted_slot)
         )));
     }
-    split_slot_recursive(layout, target_slot_id, inserted_slot, side)
+    let target_role = find_group_role_containing_slot(&layout, target_slot_id)
+        .ok_or_else(|| missing_error(format!("target display slot {target_slot_id} not found")))?;
+    split_slot_with_inserted_role(layout, target_slot_id, inserted_slot, side, target_role)
+}
+
+fn split_slot_with_inserted_role(
+    layout: WorkspaceDockLayout,
+    target_slot_id: &str,
+    inserted_slot: WorkspaceToolSlot,
+    side: WorkspaceDockSide,
+    inserted_role: WorkspaceDockGroupRole,
+) -> Result<WorkspaceDockLayout> {
+    split_slot_recursive(layout, target_slot_id, inserted_slot, side, inserted_role)
 }
 
 fn split_workspace_edge(
@@ -1379,6 +1400,7 @@ fn split_slot_recursive(
     target_slot_id: &str,
     inserted_slot: WorkspaceToolSlot,
     side: WorkspaceDockSide,
+    inserted_role: WorkspaceDockGroupRole,
 ) -> Result<WorkspaceDockLayout> {
     match layout {
         WorkspaceDockLayout::Group {
@@ -1412,7 +1434,7 @@ fn split_slot_recursive(
             let inserted_id = workspace_slot_id(&inserted_slot).to_string();
             let inserted = WorkspaceDockLayout::Group {
                 id: new_id("group"),
-                role,
+                role: inserted_role,
                 slots: vec![inserted_slot],
                 active_slot_id: inserted_id,
             };
@@ -1442,6 +1464,7 @@ fn split_slot_recursive(
                             target_slot_id,
                             inserted_slot.clone(),
                             side.clone(),
+                            inserted_role,
                         )
                     } else {
                         Ok(child)
@@ -2052,6 +2075,24 @@ fn find_group_containing_slot<'a>(
         WorkspaceDockLayout::Split { children, .. } => children
             .iter()
             .find_map(|child| find_group_containing_slot(child, needle)),
+    }
+}
+
+fn find_group_role_containing_slot(
+    layout: &WorkspaceDockLayout,
+    needle: &str,
+) -> Option<WorkspaceDockGroupRole> {
+    match layout {
+        WorkspaceDockLayout::Group { role, slots, .. } => {
+            if slots.iter().any(|slot| workspace_slot_id(slot) == needle) {
+                Some(*role)
+            } else {
+                None
+            }
+        }
+        WorkspaceDockLayout::Split { children, .. } => children
+            .iter()
+            .find_map(|child| find_group_role_containing_slot(child, needle)),
     }
 }
 

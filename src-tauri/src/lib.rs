@@ -12,6 +12,12 @@ mod types;
 mod workspace;
 mod workspace_ssh;
 
+// The Tauri app binaries get their own manifest through tauri_build; this only links the
+// extra Common Controls v6 resource into the Windows test harness executable.
+#[cfg(all(test, windows))]
+#[link(name = "nocturne_test_common_controls_v6", kind = "static")]
+extern "C" {}
+
 #[cfg(debug_assertions)]
 use specta_typescript::Typescript;
 use tauri_specta::{collect_commands, Builder};
