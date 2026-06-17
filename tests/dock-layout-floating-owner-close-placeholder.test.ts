@@ -15,7 +15,7 @@
  * mirror display as a closed-source placeholder, matching Workspace mirror
  * behavior instead of silently removing the floating display.
  */
-import { describe, it } from "node:test";
+import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import {
   createDockGroup,

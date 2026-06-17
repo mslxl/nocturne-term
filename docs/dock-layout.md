@@ -197,6 +197,8 @@ Vitest unit tests should cover:
 - close others and close to the right
 - invalid layout rejection
 
+Single-module Vitest unit tests may live beside the module as `*.test.ts`. Dock tests that cover multiple modules, source contracts, generated artifacts, or cross-feature behavior must live under `/tests`.
+
 Tauri unit tests should cover real-app workflows such as:
 
 - drag to split targets

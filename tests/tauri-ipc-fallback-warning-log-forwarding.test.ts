@@ -7,7 +7,7 @@
  * forwarding.
  */
 
-import { describe, it } from "node:test";
+import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import { shouldForwardConsoleLog } from "../src/lib/tauri/logging";
 

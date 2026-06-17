@@ -16,7 +16,7 @@
  * the DMG bundler avoids interactive prompts and CI-unsafe Finder scripting,
  * and the workflow contains a macOS failure diagnostic step for bundle_dmg.sh.
  */
-import { describe, it } from "node:test";
+import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 

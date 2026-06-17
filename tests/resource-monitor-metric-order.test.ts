@@ -14,7 +14,7 @@
  * inserted before the target panel, self moves preserve the order, and invalid
  * metric ids fail loudly instead of silently corrupting the panel order.
  */
-import { describe, it } from "node:test";
+import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import { defaultResourceMetricOrder, reorderResourceMetricOrder } from "../src/lib/resources/metric-order";
 

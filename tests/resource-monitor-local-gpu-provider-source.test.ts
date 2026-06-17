@@ -14,7 +14,7 @@
  * code, and the Windows provider must use PDH plus DXGI APIs instead of
  * shelling out.
  */
-import { describe, it } from "node:test";
+import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";

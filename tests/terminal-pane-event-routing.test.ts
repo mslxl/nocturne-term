@@ -8,7 +8,7 @@
  * events, while events for known pane ids are handled locally.
  */
 
-import { describe, it } from "node:test";
+import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import { routeTerminalPaneEvent, shouldHandleTerminalPaneEvent } from "../src/lib/terminal/event-routing";
 

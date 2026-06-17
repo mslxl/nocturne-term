@@ -17,7 +17,7 @@
  * the setting keeps the current single-row layout. macOS keeps its existing
  * native overlay behavior and never uses this setting.
  */
-import { describe, it } from "node:test";
+import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 

@@ -28,7 +28,7 @@
  * native scrollbars, and hides horizontal overflow while preserving vertical
  * scrolling for narrow dock groups.
  */
-import { describe, it } from "node:test";
+import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";

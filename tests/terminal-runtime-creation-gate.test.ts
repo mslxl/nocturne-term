@@ -15,7 +15,7 @@
  * both callers resolve from the same in-flight creation instead of creating a
  * duplicate backend terminal session such as term-1 plus term-2.
  */
-import { describe, it } from "node:test";
+import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import { TerminalRuntimeCreationGate } from "../src/lib/terminal/runtime-creation";
 

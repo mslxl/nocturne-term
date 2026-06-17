@@ -16,7 +16,7 @@
  * schema because it belongs to the current Workspace Host and is edited from
  * the Resource Monitor ToolTab.
  */
-import { describe, it } from "node:test";
+import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import { settingsSchema, settingCategories } from "../src/lib/settings/schema";
 import { configString } from "../src/lib/config/document";

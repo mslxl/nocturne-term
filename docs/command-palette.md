@@ -188,6 +188,7 @@ Unavailable actions are hidden by default. If the user searches for a very speci
 ## Implementation Notes
 
 - Put reusable search and ranking logic in a small library module with direct tests.
+- Single-module Vitest unit tests may live beside the module as `*.test.ts`; command-palette tests that cover multiple modules or source contracts must live under `/tests`.
 - Keep Svelte UI as a thin renderer over palette items and execution callbacks.
 - Profile and theme changes write config through typed Tauri commands and then refresh app menu/config state.
 - Settings and profile creation should use existing app shell commands or generated command helpers rather than duplicating window creation behavior in the frontend.

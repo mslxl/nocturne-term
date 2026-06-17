@@ -17,7 +17,7 @@
  * Interactive controls remain normal controls under integrated titlebar mode,
  * while safe empty header areas still allow native window dragging.
  */
-import { describe, it } from "node:test";
+import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 

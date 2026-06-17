@@ -21,7 +21,7 @@
  * snapshot and history so the panel cannot display metrics from the wrong
  * source while the new provider is loading.
  */
-import { describe, it } from "node:test";
+import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import {
   RESOURCE_PROVIDER_TIMEOUT_MS,

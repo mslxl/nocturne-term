@@ -13,7 +13,7 @@
  * The manifest sets `default-run` to `nocturne` so adding helper binaries such
  * as `nocturne-resource-monitor-agent` does not make the Tauri debug flow ambiguous.
  */
-import { describe, it } from "node:test";
+import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";

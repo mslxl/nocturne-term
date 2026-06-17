@@ -3,7 +3,7 @@ Feature: Files preview horizontal overflow behavior.
 Operation: Inspect the FilesToolTab preview scroll configuration and preview render calls for text and image preview content.
 Expected: Preview content uses an overlay scrollbar configuration that hides horizontal overflow, so file previews wrap or fit instead of showing a horizontal scrollbar.
 */
-import { describe, it } from "node:test";
+import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 

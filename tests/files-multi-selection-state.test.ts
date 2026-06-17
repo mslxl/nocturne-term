@@ -13,7 +13,7 @@
  * file-list semantics so Tree, Columns, owner views, and mirror views can share
  * the same business selection state while keeping drag rectangle UI local.
  */
-import { describe, it } from "node:test";
+import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import {
   emptyFilesSelection,

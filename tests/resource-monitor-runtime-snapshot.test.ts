@@ -16,7 +16,7 @@
  * usage, and VRAM usage, and does not drop grouped GPU details before the UI
  * view model renders them.
  */
-import { describe, it } from "node:test";
+import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import { collectionFromSnapshotForTest } from "../src/lib/resources/runtime";
 import type { ResourceMonitorSnapshot } from "../src/lib/bindings";

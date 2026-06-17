@@ -3,7 +3,7 @@ Feature: Files preview visibility for unsupported content.
 Operation: Evaluate preview results returned for text, image, unsupported, over-limit, and loading states.
 Expected: Only completed text and image preview results create a preview region; loading, unsupported, and over-limit files do not produce any visible preview area.
 */
-import { describe, it } from "node:test";
+import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import { isRenderableFilePreview, shouldShowFilePreviewRegion, type FileTreePreviewResult } from "../src/lib/files/tree";
 

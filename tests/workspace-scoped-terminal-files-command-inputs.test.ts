@@ -19,7 +19,7 @@
  * as that Workspace's encrypted temporary credential and reused by Files in the
  * same Workspace without accidentally crossing into another Workspace.
  */
-import { describe, it } from "node:test";
+import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 

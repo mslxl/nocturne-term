@@ -16,7 +16,7 @@
  * duplicate polling, and no history is persisted outside the frontend store
  * instance.
  */
-import { describe, it } from "node:test";
+import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import { createResourceMonitorStore, type ResourceCollection, type ResourceMetric } from "../src/lib/resources/store";
 

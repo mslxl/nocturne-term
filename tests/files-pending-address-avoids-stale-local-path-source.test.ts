@@ -16,7 +16,7 @@
  * address field does not show the old local desktop path before the remote
  * provider returns its current path.
  */
-import { describe, it } from "node:test";
+import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 

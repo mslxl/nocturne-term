@@ -15,7 +15,7 @@
  * rule, so unsupported, loading, and over-limit previews do not leave an empty
  * preview region on screen.
  */
-import { describe, it } from "node:test";
+import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 

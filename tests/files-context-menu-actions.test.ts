@@ -13,7 +13,7 @@
  * multi-selection when chmod is available, and Delete, Copy, Cut, and Download
  * support every non-empty selection while remaining out of the toolbar model.
  */
-import { describe, it } from "node:test";
+import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import {
   filesSelectionContextMenuActions,

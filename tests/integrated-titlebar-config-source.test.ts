@@ -15,7 +15,7 @@
  * No source or documentation keeps `ui.macos_integrated_titlebar`; the new
  * `ui.integrated_titlebar` key is used consistently with a default of true.
  */
-import { describe, it } from "node:test";
+import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import { readFile, readdir } from "node:fs/promises";
 import { extname } from "node:path";

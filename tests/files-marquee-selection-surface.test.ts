@@ -15,7 +15,7 @@
  * component event forwarding, so real Tauri WebView mouse drags can reach the
  * selection logic.
  */
-import { describe, it } from "node:test";
+import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";

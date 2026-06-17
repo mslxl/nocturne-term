@@ -301,6 +301,8 @@ Vitest unit tests should cover pure terminal and Dock frontend logic that can ru
 - command registry mapping for terminal and Dock split commands
 - close confirmation decisions
 
+Single-module Vitest unit tests may live beside the module as `*.test.ts`. Terminal tests that cover multiple modules, source contracts, generated artifacts, or cross-feature behavior must live under `/tests`.
+
 Rust unit tests should cover Rust-side terminal command and service logic that does not require a real WebView, PTY process, or native window.
 
 Tauri unit tests should cover real-app workflows that require the real Tauri app, WebView, PTY, native input, or window lifecycle:

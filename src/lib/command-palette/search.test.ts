@@ -1,4 +1,4 @@
-import { describe, it } from "node:test";
+import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import { staticPaletteCommands } from "./commands";
 import { localizeCommand, searchPaletteItems, type PaletteItem } from "./search";

@@ -18,7 +18,7 @@
  * access through native popup menus instead of WebView-drawn menu overlays or
  * lost system menu functionality.
  */
-import { describe, it } from "node:test";
+import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 

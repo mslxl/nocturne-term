@@ -15,7 +15,7 @@
  * remaining Terminal group, the root split keeps only valid children and
  * ratios, and the resulting snapshot passes Dock layout validation.
  */
-import { describe, it } from "node:test";
+import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import {
   createDockGroup,

@@ -3,7 +3,7 @@ Feature: Workspace Dock group resize ratios.
 Operation: Resize the divider between adjacent Dock split children with horizontal and vertical pointer deltas.
 Expected: The targeted split ratios update while preserving a normalized ratio total, respecting a minimum child size, and leaving unrelated nested splits unchanged.
 */
-import { describe, it } from "node:test";
+import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import { resizeWorkspaceDockSplit } from "../src/lib/workspace/dock/resize";
 import type { WorkspaceDockLayout } from "../src/lib/bindings";

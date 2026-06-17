@@ -16,7 +16,7 @@
  * collapses, and the remaining left content group becomes the whole content
  * layout instead of leaving an unrelated empty split region behind.
  */
-import { describe, it } from "node:test";
+import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import {
   createDockGroup,

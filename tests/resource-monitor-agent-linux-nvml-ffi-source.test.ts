@@ -15,7 +15,7 @@
  * the `nvmlDeviceGetName` and `CStr::from_ptr` calls without pointer type
  * mismatches.
  */
-import { describe, it } from "node:test";
+import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";

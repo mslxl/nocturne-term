@@ -18,7 +18,7 @@
  * Monitor plus Transfer Queue share the right sidebar group with Resource
  * Monitor active by default.
  */
-import { describe, it } from "node:test";
+import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 

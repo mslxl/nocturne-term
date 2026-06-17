@@ -14,7 +14,7 @@
  * `open_resource_monitor_tool_tab` intent for create-or-focus behavior, and no
  * global app-only Resource Monitor command path is introduced.
  */
-import { describe, it } from "node:test";
+import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";

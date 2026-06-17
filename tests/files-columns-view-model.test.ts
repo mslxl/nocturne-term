@@ -17,7 +17,7 @@
  * right-side column so the UI does not temporarily collapse from two columns
  * back to one column.
  */
-import { describe, it } from "node:test";
+import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import { buildFilesColumnsView, columnsForPath, columnsForVisiblePane } from "../src/lib/files/columns";
 

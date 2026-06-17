@@ -3,7 +3,7 @@ Feature: Workspace Dock resize handles.
 Operation: Inspect the main workspace stylesheet for Dock split resize handle rules.
 Expected: Dock split handles expose column and row resize cursors for row and column split boundaries.
 */
-import { describe, it } from "node:test";
+import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 

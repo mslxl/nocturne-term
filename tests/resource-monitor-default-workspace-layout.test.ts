@@ -15,7 +15,7 @@
  * Monitor plus Transfer Queue are docked together in the right-side group with
  * Resource Monitor active by default.
  */
-import { describe, it } from "node:test";
+import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import {
   defaultWorkspaceLayoutSnapshot,

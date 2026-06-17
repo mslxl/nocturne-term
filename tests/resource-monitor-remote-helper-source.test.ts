@@ -23,7 +23,7 @@
  * collection returns the system-command snapshot before helper bytes are loaded
  * or uploaded.
  */
-import { describe, it } from "node:test";
+import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";

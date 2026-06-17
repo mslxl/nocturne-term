@@ -436,4 +436,4 @@ Use Tauri unit tests for:
 - mirrored Resource Monitor views do not duplicate collection
 - helper upload prompt behavior when policy is Ask
 
-Every test file must live under `tests/` and start with an English comment describing feature, operation, and expected result.
+Single-module Vitest unit tests may live beside the module as `*.test.ts`. Resource Monitor tests that cover multiple modules, source contracts, packaging, helper resources, generated artifacts, or cross-feature behavior must live under `/tests` and start with an English comment describing feature, operation, and expected result.

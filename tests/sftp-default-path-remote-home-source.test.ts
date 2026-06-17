@@ -20,7 +20,7 @@
  * is not sent to SFTP as a remote path. The SFTP default-path resolver must not
  * call the local home-directory helper or rely on the local Windows home path.
  */
-import { describe, it } from "node:test";
+import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 

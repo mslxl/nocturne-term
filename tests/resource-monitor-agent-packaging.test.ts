@@ -24,7 +24,7 @@
  * and release assets are uploaded with deterministic same-tag names so a
  * missing bundled helper can only be downloaded from the current app release.
  */
-import { describe, it } from "node:test";
+import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";

@@ -17,7 +17,7 @@
  * wrappers. Slow remote SFTP operations therefore cannot freeze the app while
  * the WebView waits for a command response.
  */
-import { describe, it } from "node:test";
+import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 

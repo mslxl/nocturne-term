@@ -19,7 +19,7 @@
  * explicit Dock group roles remain spatial instead of ToolTab-derived, and
  * invalid layout contracts fail fast.
  */
-import { describe, it } from "node:test";
+import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import {
   createDockGroup,

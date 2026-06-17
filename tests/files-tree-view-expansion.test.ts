@@ -3,7 +3,7 @@ Feature: Files Tree view expansion.
 Operation: Build Tree view rows from root entries plus lazily loaded child entries and activate a directory row with click and double-click actions.
 Expected: Expanded directories reveal indented child rows without changing the current browser path, clicking any directory row area maps to a Tree expansion toggle, and directory double-click does not perform a second toggle or path navigation.
 */
-import { describe, it } from "node:test";
+import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import {
   buildFileTreeRows,

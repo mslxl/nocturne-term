@@ -14,7 +14,7 @@
  * second open does not create a duplicate and instead focuses the existing
  * Resource Monitor display slot.
  */
-import { describe, it } from "node:test";
+import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import {
   createDockGroup,

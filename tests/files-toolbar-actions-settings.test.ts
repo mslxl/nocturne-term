@@ -14,7 +14,7 @@
  * allow hiding omitted actions, and fall back to the built-in Files toolbar
  * order when the setting has no usable action.
  */
-import { describe, it } from "node:test";
+import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import {
   DEFAULT_FILES_TOOLBAR_ACTION_IDS,

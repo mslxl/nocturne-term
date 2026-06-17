@@ -14,7 +14,7 @@
  * Settings page must not display 8px for horizontal padding when the runtime
  * terminal surface uses 10px by default.
  */
-import { describe, it } from "node:test";
+import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import { settingsSchema } from "../src/lib/settings/schema";
 

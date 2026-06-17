@@ -16,7 +16,7 @@
  * limiting dimension are marked as constraining, and a session with no usable
  * participants keeps the last valid PTY size without requesting a resize.
  */
-import { describe, it } from "node:test";
+import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import { computeTerminalMirrorPtySize } from "../src/lib/terminal/mirror-size";
 

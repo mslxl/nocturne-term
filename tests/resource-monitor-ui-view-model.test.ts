@@ -18,7 +18,7 @@
  * metric order, and represents unavailable metrics with their reasons instead
  * of failing the whole UI.
  */
-import { describe, it } from "node:test";
+import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import { buildResourceMonitorViewModel } from "../src/lib/resources/view-model";
 import type { ResourceCollection } from "../src/lib/resources/store";

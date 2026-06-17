@@ -19,7 +19,7 @@
  * are not recreated, and animation cleanup collapses back to one current pane
  * after the motion.
  */
-import { describe, it } from "node:test";
+import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 
