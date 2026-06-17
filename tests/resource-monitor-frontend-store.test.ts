@@ -25,6 +25,7 @@ import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import {
   RESOURCE_PROVIDER_TIMEOUT_MS,
+  ResourceProviderPendingError,
   createResourceMonitorStore,
   type ResourceCollection,
 } from "../src/lib/resources/store";
@@ -118,6 +119,49 @@ describe("Resource Monitor frontend store", () => {
     assert.equal(store.stateForOwner("tool-resources-1").consecutiveFailures, 1);
   });
 
+  it("keeps an over-timeout collection in flight and applies its later result", async () => {
+    let calls = 0;
+    const observed = { signal: null as AbortSignal | null };
+    let resolveCollection: (value: ResourceCollection) => void = () => {
+      throw new Error("collection resolver was not installed");
+    };
+    const collection = new Promise<ResourceCollection>((resolve) => {
+      resolveCollection = resolve;
+    });
+    const store = createResourceMonitorStore({
+      timeoutMs: 1,
+      provider: {
+        collect: ({ signal }) => {
+          calls += 1;
+          observed.signal = signal;
+          return collection;
+        },
+      },
+    });
+    store.setViewVisibility({ viewId: "owner-view", ownerToolTabId: "tool-resources-1", visible: true });
+
+    const first = await store.tickForView("owner-view");
+    const second = await store.tickForView("owner-view");
+    resolveCollection({
+      ownerToolTabId: "tool-resources-1",
+      provider: "nocturne-resource-monitor-agent on remote",
+      collectedAtMs: 2000,
+      metrics: { cpu: available("cpu", 77) },
+    });
+    await waitUntil(() => store.stateForOwner("tool-resources-1").latest?.provider === "nocturne-resource-monitor-agent on remote");
+
+    const state = store.stateForOwner("tool-resources-1");
+    assert.equal(calls, 1);
+    assert.equal(observed.signal?.aborted, false);
+    assert.equal(first.kind, "failed");
+    assert.match(first.error.message, /timed out/i);
+    assert.equal(second.kind, "skipped_in_flight");
+    assert.equal(state.inFlight, false);
+    assert.equal(state.latest?.metrics.cpu?.status, "available");
+    assert.equal(state.latest?.metrics.cpu?.percent, 77);
+    assert.equal(state.consecutiveFailures, 0);
+  });
+
   it("marks stale after three failures while preserving the last successful data", async () => {
     let shouldFail = false;
     const store = createResourceMonitorStore({
@@ -207,4 +251,50 @@ describe("Resource Monitor frontend store", () => {
     assert.deepEqual(store.historyForMetric("tool-resources-1", "cpu"), []);
     assert.deepEqual(store.historyForMetric("tool-resources-1", "gpu"), []);
   });
+
+  it("skips helper upload pending ticks without replacing the current metrics", async () => {
+    let pending = false;
+    const store = createResourceMonitorStore({
+      provider: {
+        collect: async () => {
+          if (pending) {
+            throw new ResourceProviderPendingError("Waiting for Resource Monitor helper upload confirmation");
+          }
+          return {
+            ownerToolTabId: "tool-resources-1",
+            provider: "system commands on remote",
+            collectedAtMs: 1000,
+            metrics: {
+              cpu: available("cpu", 55),
+            },
+          };
+        },
+      },
+    });
+    store.setViewVisibility({ viewId: "owner-view", ownerToolTabId: "tool-resources-1", visible: true });
+    await store.tickForView("owner-view");
+
+    pending = true;
+    const result = await store.tickForView("owner-view");
+    const state = store.stateForOwner("tool-resources-1");
+
+    assert.equal(result.kind, "skipped_provider_pending");
+    assert.equal(state.latest?.provider, "system commands on remote");
+    assert.equal(state.latest?.metrics.cpu?.status, "available");
+    assert.equal(state.latest?.metrics.cpu?.percent, 55);
+    assert.equal(state.consecutiveFailures, 0);
+    assert.equal(state.warning, null);
+    assert.equal(store.historyForMetric("tool-resources-1", "cpu").length, 1);
+  });
 });
+
+async function waitUntil(condition: () => boolean): Promise<void> {
+  const deadline = Date.now() + 1000;
+  while (Date.now() < deadline) {
+    if (condition()) {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  assert.equal(condition(), true);
+}

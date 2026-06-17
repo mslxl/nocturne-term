@@ -65,12 +65,12 @@ fn windows_pdh_samples_report_grouped_gpu_devices_without_commands() {
     assert_eq!(metric.gpus.len(), 2);
     assert_eq!(metric.gpus[0].id, "luid_0x00000000_0x00012abc");
     assert_eq!(metric.gpus[0].label, "NVIDIA RTX");
-    assert_eq!(metric.gpus[0].compute_percent, 20.0);
+    assert_eq!(metric.gpus[0].compute_percent, Some(20.0));
     assert_eq!(metric.gpus[0].memory_used, 1024 * 1024 * 1024);
     assert_eq!(metric.gpus[0].memory_total, 4 * 1024 * 1024 * 1024);
     assert_eq!(metric.gpus[1].id, "luid_0x00000000_0x00034def");
     assert_eq!(metric.gpus[1].label, "AMD Radeon");
-    assert_eq!(metric.gpus[1].compute_percent, 40.0);
+    assert_eq!(metric.gpus[1].compute_percent, Some(40.0));
     assert_eq!(metric.gpus[1].memory_used, 2 * 1024 * 1024 * 1024);
     assert_eq!(metric.gpus[1].memory_total, 8 * 1024 * 1024 * 1024);
 }

@@ -3,7 +3,7 @@ export const RESOURCE_STALE_FAILURE_THRESHOLD = 3;
 export const RESOURCE_HISTORY_RETENTION_MS = 5 * 60 * 1_000;
 export const RESOURCE_HISTORY_MAX_SAMPLES = 300;
 
-export type ResourceMetricId = "cpu" | "memory" | "swap" | "gpu";
+export type ResourceMetricId = "cpu" | "memory" | "swap" | "gpu" | "disk";
 
 export type ResourceAvailableMetric = {
   metric: ResourceMetricId;
@@ -29,6 +29,7 @@ export type ResourceMetric = ResourceAvailableMetric | ResourceUnavailableMetric
 export type ResourceMetricDetails = {
   cores?: ResourceCpuCoreSample[];
   gpus?: ResourceGpuDeviceSample[];
+  disks?: ResourceDiskMountSample[];
 };
 
 export type ResourceCpuCoreSample = {
@@ -40,9 +41,21 @@ export type ResourceCpuCoreSample = {
 export type ResourceGpuDeviceSample = {
   id: string;
   label: string;
-  computePercent: number;
+  computePercent: number | null;
+  computeUnavailableReason?: string;
   memoryUsed: number;
   memoryTotal: number;
+};
+
+export type ResourceDiskMountSample = {
+  id: string;
+  mountPoint: string;
+  deviceName: string;
+  fileSystem: string;
+  used: number;
+  total: number;
+  available: number;
+  percent: number;
 };
 
 export type ResourceMetricMap = Partial<Record<ResourceMetricId, ResourceMetric>>;
@@ -79,6 +92,7 @@ export type ResourceTickResult =
   | { kind: "skipped_in_flight"; ownerToolTabId: string }
   | { kind: "skipped_not_visible"; ownerToolTabId: string }
   | { kind: "skipped_provider_switch"; ownerToolTabId: string }
+  | { kind: "skipped_provider_pending"; ownerToolTabId: string; reason: string }
   | { kind: "failed"; ownerToolTabId: string; error: Error };
 
 type ResourceViewRegistration = {
@@ -106,6 +120,13 @@ export type ResourceMonitorStore = {
   historyForMetric(ownerToolTabId: string, metric: ResourceMetricId): ResourceMetric[];
   historyForView(viewId: string, metric: ResourceMetricId): ResourceMetric[];
 };
+
+export class ResourceProviderPendingError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ResourceProviderPendingError";
+  }
+}
 
 export function createResourceMonitorStore(options: {
   provider: ResourceProvider;
@@ -158,38 +179,53 @@ export function createResourceMonitorStore(options: {
     }
 
     state.inFlight = true;
-    const collectionPromise = collectWithTimeout(options.provider, ownerToolTabId, timeoutMs)
-      .then((collection): ResourceTickResult => {
-        if (collection.ownerToolTabId !== ownerToolTabId) {
-          throw new Error(
-            `resource provider returned owner ${collection.ownerToolTabId} for ${ownerToolTabId}`,
-          );
+    const controller = new AbortController();
+    let timeoutId: ReturnType<typeof setTimeout> | null = null;
+    let timedOut = false;
+    const providerPromise = options.provider.collect({ ownerToolTabId, signal: controller.signal });
+    providerPromise.catch(() => {
+      // Prevent a late provider rejection after timeout from surfacing as an unhandled rejection.
+    });
+
+    const timeout = new Promise<never>((_resolve, reject) => {
+      timeoutId = setTimeout(() => {
+        timedOut = true;
+        reject(new Error(`Resource collection timed out after ${timeoutMs}ms`));
+      }, timeoutMs);
+    });
+
+    const firstResultPromise = Promise.race([providerPromise, timeout])
+      .then((collection) => {
+        if (timeoutId) {
+          clearTimeout(timeoutId);
+          timeoutId = null;
         }
-        state.latest = collection;
-        appendHistory(state, collection);
-        state.consecutiveFailures = 0;
-        state.stale = false;
-        state.warning = null;
-        state.lastError = null;
-        return { kind: "collected", ownerToolTabId, collection };
+        return applyCollection(state, ownerToolTabId, collection);
       })
-      .catch((error: unknown): ResourceTickResult => {
-        const normalizedError = normalizeError(error);
-        state.consecutiveFailures += 1;
-        state.lastError = normalizedError;
-        if (state.latest && state.consecutiveFailures >= RESOURCE_STALE_FAILURE_THRESHOLD) {
-          state.stale = true;
-          state.warning = `Resource data is stale after ${state.consecutiveFailures} consecutive collection failures.`;
+      .catch((error: unknown) => handleCollectionError(state, ownerToolTabId, error));
+
+    state.inFlightPromise = providerPromise
+      .then((collection) => {
+        if (timedOut) {
+          return applyCollection(state, ownerToolTabId, collection);
         }
-        return { kind: "failed", ownerToolTabId, error: normalizedError };
+        return { kind: "collected", ownerToolTabId, collection } satisfies ResourceTickResult;
+      })
+      .catch((error: unknown) => {
+        if (timedOut) {
+          return handleCollectionError(state, ownerToolTabId, error);
+        }
+        return { kind: "failed", ownerToolTabId, error: normalizeError(error) } satisfies ResourceTickResult;
       })
       .finally(() => {
+        if (timeoutId) {
+          clearTimeout(timeoutId);
+        }
         state.inFlight = false;
         state.inFlightPromise = null;
       });
 
-    state.inFlightPromise = collectionPromise;
-    return collectionPromise;
+    return firstResultPromise;
   }
 
   return {
@@ -260,6 +296,47 @@ export function createResourceMonitorStore(options: {
   };
 }
 
+function applyCollection(
+  state: InternalOwnerState,
+  ownerToolTabId: string,
+  collection: ResourceCollection,
+): ResourceTickResult {
+  if (collection.ownerToolTabId !== ownerToolTabId) {
+    throw new Error(
+      `resource provider returned owner ${collection.ownerToolTabId} for ${ownerToolTabId}`,
+    );
+  }
+  state.latest = collection;
+  appendHistory(state, collection);
+  state.consecutiveFailures = 0;
+  state.stale = false;
+  state.warning = null;
+  state.lastError = null;
+  return { kind: "collected", ownerToolTabId, collection };
+}
+
+function handleCollectionError(
+  state: InternalOwnerState,
+  ownerToolTabId: string,
+  error: unknown,
+): ResourceTickResult {
+  if (error instanceof ResourceProviderPendingError) {
+    return {
+      kind: "skipped_provider_pending",
+      ownerToolTabId,
+      reason: error.message,
+    };
+  }
+  const normalizedError = normalizeError(error);
+  state.consecutiveFailures += 1;
+  state.lastError = normalizedError;
+  if (state.latest && state.consecutiveFailures >= RESOURCE_STALE_FAILURE_THRESHOLD) {
+    state.stale = true;
+    state.warning = `Resource data is stale after ${state.consecutiveFailures} consecutive collection failures.`;
+  }
+  return { kind: "failed", ownerToolTabId, error: normalizedError };
+}
+
 function appendHistory(state: InternalOwnerState, collection: ResourceCollection): void {
   const cutoffMs = collection.collectedAtMs - RESOURCE_HISTORY_RETENTION_MS;
   for (const metric of Object.values(collection.metrics)) {
@@ -271,32 +348,6 @@ function appendHistory(state: InternalOwnerState, collection: ResourceCollection
       .filter((sample) => sample.collectedAtMs >= cutoffMs)
       .slice(-RESOURCE_HISTORY_MAX_SAMPLES);
     state.history.set(metric.metric, next);
-  }
-}
-
-async function collectWithTimeout(
-  provider: ResourceProvider,
-  ownerToolTabId: string,
-  timeoutMs: number,
-): Promise<ResourceCollection> {
-  const controller = new AbortController();
-  let timeoutId: ReturnType<typeof setTimeout> | null = null;
-  const timeout = new Promise<never>((_resolve, reject) => {
-    timeoutId = setTimeout(() => {
-      controller.abort();
-      reject(new Error(`Resource collection timed out after ${timeoutMs}ms`));
-    }, timeoutMs);
-  });
-  const collection = provider.collect({ ownerToolTabId, signal: controller.signal });
-  collection.catch(() => {
-    // Prevent a late provider rejection after timeout from surfacing as an unhandled rejection.
-  });
-  try {
-    return await Promise.race([collection, timeout]);
-  } finally {
-    if (timeoutId) {
-      clearTimeout(timeoutId);
-    }
   }
 }
 

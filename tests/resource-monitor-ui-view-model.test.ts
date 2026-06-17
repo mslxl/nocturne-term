@@ -6,17 +6,18 @@
  *
  * Operation:
  * Builds a Resource Monitor snapshot with overall CPU, per-core CPU details,
- * memory, swap, and two GPU devices, then converts it into render rows with
- * custom metric ordering and history samples.
+ * memory, swap, two GPU devices, and two Disk mount points, then converts it
+ * into render rows with custom metric ordering and history samples.
  *
  * Expected:
  * The view model returns a provider/status summary, uses current values and
- * compact auxiliary text, keeps CPU and GPU as one overall row each by default,
- * exposes CPU core and GPU device child rows for expandable details, always
- * exposes history data for available overall rows, omits useless "Updated now"
- * status text, sample-count labels, and chart max labels, respects custom
- * metric order, and represents unavailable metrics with their reasons instead
- * of failing the whole UI.
+ * compact auxiliary text, keeps CPU, GPU, and Disk as one overall row each by
+ * default, exposes CPU core, GPU device, and Disk mount child rows for
+ * expandable details, keeps history curves for non-Disk available overall
+ * rows, renders Disk as a progress-style capacity row without a history curve,
+ * omits useless "Updated now" status text, sample-count labels, and chart max
+ * labels, respects custom metric order, and represents unavailable metrics
+ * with their reasons instead of failing the whole UI.
  */
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
@@ -24,7 +25,7 @@ import { buildResourceMonitorViewModel } from "../src/lib/resources/view-model";
 import type { ResourceCollection } from "../src/lib/resources/store";
 
 describe("Resource Monitor UI view model", () => {
-  it("builds dense overall rows with expandable CPU core and GPU device details", () => {
+  it("builds dense overall rows with expandable CPU, GPU, and Disk details", () => {
     const snapshot: ResourceCollection = {
       ownerToolTabId: "tool-resources-1",
       provider: "local provider",
@@ -68,8 +69,54 @@ describe("Resource Monitor UI view model", () => {
           collectedAtMs: 120000,
           details: {
             gpus: [
-              { id: "gpu-0", label: "GPU 0", computePercent: 10, memoryUsed: 1 * 1024 ** 3, memoryTotal: 4 * 1024 ** 3 },
-              { id: "gpu-1", label: "GPU 1", computePercent: 70, memoryUsed: 3 * 1024 ** 3, memoryTotal: 4 * 1024 ** 3 },
+              {
+                id: "gpu-0",
+                label: "GPU 0",
+                computePercent: 10,
+                memoryUsed: 1 * 1024 ** 3,
+                memoryTotal: 4 * 1024 ** 3,
+              },
+              {
+                id: "gpu-1",
+                label: "GPU 1",
+                computePercent: null,
+                computeUnavailableReason: "compute unavailable",
+                memoryUsed: 3 * 1024 ** 3,
+                memoryTotal: 4 * 1024 ** 3,
+              },
+            ],
+          },
+        },
+        disk: {
+          metric: "disk",
+          status: "available",
+          percent: 60,
+          used: 60 * 1024 ** 3,
+          total: 100 * 1024 ** 3,
+          available: 40 * 1024 ** 3,
+          collectedAtMs: 120000,
+          details: {
+            disks: [
+              {
+                id: "/",
+                mountPoint: "/",
+                deviceName: "/dev/nvme0n1p2",
+                fileSystem: "ext4",
+                used: 60 * 1024 ** 3,
+                total: 100 * 1024 ** 3,
+                available: 40 * 1024 ** 3,
+                percent: 60,
+              },
+              {
+                id: "/data",
+                mountPoint: "/data",
+                deviceName: "/dev/sdb1",
+                fileSystem: "xfs",
+                used: 500 * 1024 ** 3,
+                total: 1000 * 1024 ** 3,
+                available: 500 * 1024 ** 3,
+                percent: 50,
+              },
             ],
           },
         },
@@ -79,7 +126,7 @@ describe("Resource Monitor UI view model", () => {
     const collapsedModel = buildResourceMonitorViewModel({
       snapshot,
       historyForMetric: () => [],
-      metricOrder: ["memory", "cpu", "swap", "gpu"],
+      metricOrder: ["memory", "cpu", "swap", "gpu", "disk"],
       stale: false,
       warning: null,
     });
@@ -89,6 +136,8 @@ describe("Resource Monitor UI view model", () => {
     assert.equal(collapsedModel.rows.find((row) => row.id === "cpu")?.expanded, false);
     assert.equal(collapsedModel.rows.find((row) => row.id === "gpu")?.collapsible, true);
     assert.equal(collapsedModel.rows.find((row) => row.id === "gpu")?.expanded, false);
+    assert.equal(collapsedModel.rows.find((row) => row.id === "disk")?.collapsible, true);
+    assert.equal(collapsedModel.rows.find((row) => row.id === "disk")?.expanded, false);
 
     const model = buildResourceMonitorViewModel({
       snapshot,
@@ -124,15 +173,15 @@ describe("Resource Monitor UI view model", () => {
             },
           ]
         : [],
-      metricOrder: ["memory", "cpu", "swap", "gpu"],
-      expandedMetrics: new Set(["cpu", "gpu"]),
+      metricOrder: ["memory", "cpu", "swap", "gpu", "disk"],
+      expandedMetrics: new Set(["cpu", "gpu", "disk"]),
       stale: false,
       warning: null,
     });
 
     assert.equal(model.providerLabel, "local provider");
     assert.equal(model.statusLabel, "");
-    assert.deepEqual(model.rows.map((row) => row.id), ["memory", "cpu", "swap", "gpu"]);
+    assert.deepEqual(model.rows.map((row) => row.id), ["memory", "cpu", "swap", "gpu", "disk"]);
 
     const cpu = model.rows[1];
     assert.equal(cpu?.primary, "36%");
@@ -165,7 +214,19 @@ describe("Resource Monitor UI view model", () => {
     assert.equal(gpu?.expanded, true);
     assert.deepEqual(gpu?.children.map((child) => [child.id, child.label, child.primary]), [
       ["gpu-gpu-0", "GPU 0", "10%"],
-      ["gpu-gpu-1", "GPU 1", "70%"],
+      ["gpu-gpu-1", "GPU 1", "Compute unavailable"],
+    ]);
+
+    const disk = model.rows[4];
+    assert.equal(disk?.primary, "60%");
+    assert.equal(disk?.auxiliary, "60 GiB / 100 GiB, available 40 GiB");
+    assert.equal(disk?.collapsible, true);
+    assert.equal(disk?.expanded, true);
+    assert.equal(disk?.history, null);
+    assert.equal(disk?.progressPercent, 60);
+    assert.deepEqual(disk?.children.map((child) => [child.id, child.label, child.primary, child.auxiliary, child.progressPercent]), [
+      ["disk-_", "/", "60%", "/dev/nvme0n1p2, ext4, 60 GiB / 100 GiB, available 40 GiB", 60],
+      ["disk-_data", "/data", "50%", "/dev/sdb1, xfs, 500 GiB / 1000 GiB, available 500 GiB", 50],
     ]);
   });
 });

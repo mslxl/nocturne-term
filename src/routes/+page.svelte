@@ -38,6 +38,7 @@
   import { createWorkspaceStore } from "$lib/workspace/state.svelte";
   import { unwrapCommand } from "$lib/terminal/commands";
   import FilesToolTab from "$lib/files/FilesToolTab.svelte";
+  import { FILES_WORKSPACE_SSH_VERIFICATION_SUBMITTED_EVENT } from "$lib/files/workspace-verification";
   import ResourceMonitorToolTab from "$lib/resources/ResourceMonitorToolTab.svelte";
   import { DEFAULT_FILES_TOOLBAR_ACTION_IDS, normalizeFilesToolbarActionIds, type FilesToolbarActionId } from "$lib/files/toolbar-actions";
   import TransfersToolTab from "$lib/transfers/TransfersToolTab.svelte";
@@ -3642,6 +3643,7 @@
           }
         : { kind: "cancel" },
     }));
+    notifyFilesWorkspaceVerificationSubmitted(workspaceId);
   }
 
   function terminalPaneIdForToolTab(toolTabId: string | null) {
@@ -3663,6 +3665,7 @@
         save_credential: pending.save,
       },
     }));
+    notifyFilesWorkspaceVerificationSubmitted(pending.workspaceId);
   }
 
   function cancelSshCredential() {
@@ -3673,6 +3676,12 @@
       workspace_id: pending.workspaceId,
       verification_id: pending.verificationId,
       response: { kind: "cancel" },
+    })).finally(() => notifyFilesWorkspaceVerificationSubmitted(pending.workspaceId));
+  }
+
+  function notifyFilesWorkspaceVerificationSubmitted(workspaceId: string) {
+    window.dispatchEvent(new CustomEvent(FILES_WORKSPACE_SSH_VERIFICATION_SUBMITTED_EVENT, {
+      detail: { workspaceId },
     }));
   }
 

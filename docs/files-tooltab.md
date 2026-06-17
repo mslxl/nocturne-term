@@ -52,6 +52,12 @@ Workspace-owned structured SSH verification events. While the backend waits for
 the Workspace prompt result, Files should remain in a loading or prompt state
 instead of converting the challenge into a final provider error.
 
+If a Files toolbar or initial directory load races ahead of SSH credential or
+host-key verification, the ToolTab must show a waiting state and retry the
+current directory after the Workspace verification response is submitted. It
+must not leave the toolbar or directory listing in a final failed state that
+requires a manual refresh after the connection handshake succeeds.
+
 ## Host Defaults
 
 Hosts may define a default file path:

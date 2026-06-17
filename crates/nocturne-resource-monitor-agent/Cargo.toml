@@ -30,6 +30,10 @@ path = "../../tests/resource-monitor-agent-linux-drm-gpu.rs"
 name = "resource-monitor-agent-windows-pdh-gpu"
 path = "../../tests/resource-monitor-agent-windows-pdh-gpu.rs"
 
+[[test]]
+name = "resource-monitor-agent-cpu-cores"
+path = "../../tests/resource-monitor-agent-cpu-cores.rs"
+
 [profile.release]
 codegen-units = 1
 lto = "thin"

@@ -1,6 +1,6 @@
 import type { ResourceMetricId } from "$lib/resources/store";
 
-export const defaultResourceMetricOrder: ResourceMetricId[] = ["cpu", "memory", "swap", "gpu"];
+export const defaultResourceMetricOrder: ResourceMetricId[] = ["cpu", "memory", "swap", "gpu", "disk"];
 
 export function reorderResourceMetricOrder(
   order: readonly ResourceMetricId[],

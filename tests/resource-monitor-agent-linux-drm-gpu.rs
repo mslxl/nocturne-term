@@ -7,15 +7,16 @@
  * Operation:
  * Creates temporary Linux GPU fixtures with DRM card device directories,
  * AMD-style VRAM usage files, alternate kernel VRAM filenames, and an
- * NVIDIA-style NVML sample, then asks the helper library to collect GPU metrics
- * without executing vendor commands.
+ * NVIDIA-style procfs fixture and NVML sample, then asks the helper library to
+ * collect GPU metrics without executing vendor commands.
  *
  * Expected:
  * The helper reports available GPU metrics from DRM/sysfs when those files are
  * present, accepts multiple DRM/sysfs VRAM filename conventions before falling
- * back to NVML, falls back to an in-process NVML provider when DRM has no VRAM
- * files, preserves per-device VRAM and compute details, and does not require
- * `nvidia-smi` or any external process.
+ * back to NVIDIA procfs and then NVML, treats VRAM-only procfs data as an
+ * available GPU metric with unavailable compute details, preserves per-device
+ * VRAM and compute details, and does not require `nvidia-smi` or any external
+ * process.
  */
 use std::{fs, path::Path};
 
@@ -95,7 +96,63 @@ fn linux_gpu_provider_falls_back_to_nvml_when_drm_vram_files_are_missing() {
     assert_eq!(metric.gpus.len(), 1);
     assert_eq!(metric.gpus[0].id, "nvml-0");
     assert_eq!(metric.gpus[0].label, "NVIDIA RTX 4090");
-    assert_eq!(metric.gpus[0].compute_percent, 37.5);
+    assert_eq!(metric.gpus[0].compute_percent, Some(37.5));
+}
+
+#[test]
+fn linux_gpu_provider_falls_back_to_nvidia_procfs_before_nvml() {
+    let root = tempdir().expect("tempdir");
+    let device = root
+        .path()
+        .join("class")
+        .join("drm")
+        .join("card0")
+        .join("device");
+    fs::create_dir_all(&device).expect("device dir");
+    fs::write(device.join("product_name"), "NVIDIA RTX").expect("product name");
+    let gpu_info = root
+        .path()
+        .join("proc")
+        .join("driver")
+        .join("nvidia")
+        .join("gpus")
+        .join("0000_01_00.0");
+    fs::create_dir_all(&gpu_info).expect("gpu proc dir");
+    fs::write(
+        gpu_info.join("information"),
+        "Model: NVIDIA RTX 6000 Ada\nIRQ: 141\n",
+    )
+    .expect("information");
+    fs::write(
+        gpu_info.join("fb_memory_usage"),
+        "Total: 49140 MiB\nReserved: 640 MiB\nUsed: 2048 MiB\nFree: 46452 MiB\n",
+    )
+    .expect("fb memory");
+
+    let metric = collect_linux_gpu_metric_from_sources_for_test(
+        root.path(),
+        vec![LinuxNvmlDeviceSample {
+            id: "nvml-0".to_string(),
+            label: "NVML fallback should not be used".to_string(),
+            compute_percent: 99.0,
+            memory_used: 1,
+            memory_total: 2,
+        }],
+    );
+
+    assert_eq!(metric.metric, ResourceMetricKind::Gpu);
+    assert_eq!(metric.status, ResourceMonitorAgentMetricStatus::Available);
+    assert_eq!(metric.used, Some(2048 * 1024 * 1024));
+    assert_eq!(metric.total, Some(49140 * 1024 * 1024));
+    assert_eq!(metric.percent, Some(0.0));
+    assert_eq!(metric.gpus.len(), 1);
+    assert_eq!(metric.gpus[0].id, "nvidia-0000_01_00.0");
+    assert_eq!(metric.gpus[0].label, "NVIDIA RTX 6000 Ada");
+    assert_eq!(metric.gpus[0].compute_percent, None);
+    assert_eq!(
+        metric.gpus[0].compute_unavailable_reason.as_deref(),
+        Some("NVIDIA procfs does not expose compute utilization")
+    );
 }
 
 #[test]

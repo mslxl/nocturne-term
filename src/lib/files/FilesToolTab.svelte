@@ -16,6 +16,11 @@
   import { selectFilesContextTarget, selectFilesEntry, selectFilesMarquee } from "$lib/files/selection";
   import { DEFAULT_FILES_TOOLBAR_ACTION_IDS, normalizeFilesToolbarActionIds, type FilesToolbarActionId } from "$lib/files/toolbar-actions";
   import { buildFileTreeRows, fileTreeClickAction, fileTreeDoubleClickAction, isRenderableFilePreview, shouldShowFilePreviewRegion } from "$lib/files/tree";
+  import {
+    FILES_WORKSPACE_SSH_VERIFICATION_SUBMITTED_EVENT,
+    isFilesWorkspaceVerificationPendingError,
+    type FilesWorkspaceSshVerificationSubmittedDetail,
+  } from "$lib/files/workspace-verification";
   import { hasTauriRuntime } from "$lib/tauri/runtime";
   import { unwrapCommand } from "$lib/terminal/commands";
 
@@ -201,6 +206,23 @@
     };
   });
 
+  onMount(() => {
+    function retryAfterWorkspaceVerification(event: Event) {
+      const detail = (event as CustomEvent<FilesWorkspaceSshVerificationSubmittedDetail>).detail;
+      if (detail?.workspaceId !== workspaceId) return;
+      if (!filesError && !filesLoading) return;
+      void loadFilesForPath(path ?? result?.provider.current_path ?? null, {
+        hostId: toolTab.host_id,
+        toolTabId: toolTab.id,
+        force: true,
+      });
+    }
+    window.addEventListener(FILES_WORKSPACE_SSH_VERIFICATION_SUBMITTED_EVENT, retryAfterWorkspaceVerification);
+    return () => {
+      window.removeEventListener(FILES_WORKSPACE_SSH_VERIFICATION_SUBMITTED_EVENT, retryAfterWorkspaceVerification);
+    };
+  });
+
   const result = $derived(filesResult);
   const currentPath = $derived(result?.provider.current_path ?? toolTab.title);
   const entries = $derived((result?.entries ?? []).filter((entry) => showHidden || !entry.name.startsWith(".")));
@@ -322,6 +344,11 @@
       filesLoading = false;
     } catch (error) {
       if (generation !== filesLoadGeneration) return;
+      if (isFilesWorkspaceVerificationPendingError(error)) {
+        filesError = error;
+        filesLoading = true;
+        return;
+      }
       filesError = error;
       filesLoading = false;
     }
@@ -1661,7 +1688,9 @@
     </form>
   {/if}
 
-  {#if filesLoading && !result}
+  {#if filesError && isFilesWorkspaceVerificationPendingError(filesError)}
+    <div class="files-status">Waiting for Workspace verification...</div>
+  {:else if filesLoading && !result}
     <div class="files-status">Loading...</div>
   {:else if filesError}
     <div class="files-status error">{filesError instanceof Error ? filesError.message : String(filesError)}</div>

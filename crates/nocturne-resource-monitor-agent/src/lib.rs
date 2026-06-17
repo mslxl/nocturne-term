@@ -13,6 +13,7 @@ pub enum ResourceMetricKind {
     Memory,
     Swap,
     Gpu,
+    Disk,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -64,16 +65,33 @@ pub struct ResourceMonitorAgentMetric {
     pub free: Option<u64>,
     pub reason: Option<String>,
     #[serde(default)]
+    pub cores: Vec<f64>,
+    #[serde(default)]
     pub gpus: Vec<ResourceMonitorAgentGpuDevice>,
+    #[serde(default)]
+    pub disks: Vec<ResourceMonitorAgentDiskMount>,
 }
 
 #[derive(Debug, PartialEq, Serialize)]
 pub struct ResourceMonitorAgentGpuDevice {
     pub id: String,
     pub label: String,
-    pub compute_percent: f64,
+    pub compute_percent: Option<f64>,
+    pub compute_unavailable_reason: Option<String>,
     pub memory_used: u64,
     pub memory_total: u64,
+}
+
+#[derive(Debug, PartialEq, Serialize)]
+pub struct ResourceMonitorAgentDiskMount {
+    pub id: String,
+    pub mount_point: String,
+    pub device_name: String,
+    pub file_system: String,
+    pub used: u64,
+    pub total: u64,
+    pub available: u64,
+    pub percent: f64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -144,6 +162,7 @@ pub fn run_agent() -> Result<(), Box<dyn std::error::Error>> {
             "resource.memory".to_string(),
             "resource.swap".to_string(),
             "resource.gpu".to_string(),
+            "resource.disk".to_string(),
         ],
     })?;
 
@@ -173,6 +192,7 @@ pub fn collect_metrics() -> Vec<ResourceMonitorAgentMetric> {
     let mut system = sysinfo::System::new_all();
     system.refresh_all();
 
+    let disks = sysinfo::Disks::new_with_refreshed_list();
     vec![
         ResourceMonitorAgentMetric {
             metric: ResourceMetricKind::Cpu,
@@ -183,7 +203,13 @@ pub fn collect_metrics() -> Vec<ResourceMonitorAgentMetric> {
             available: None,
             free: None,
             reason: None,
+            cores: system
+                .cpus()
+                .iter()
+                .map(|cpu| normalize_percent(f64::from(cpu.cpu_usage())))
+                .collect(),
             gpus: Vec::new(),
+            disks: Vec::new(),
         },
         capacity_metric(
             ResourceMetricKind::Memory,
@@ -200,6 +226,7 @@ pub fn collect_metrics() -> Vec<ResourceMonitorAgentMetric> {
             Some(system.free_swap()),
         ),
         collect_gpu_metric(),
+        collect_disk_metric(&disks),
     ]
 }
 
@@ -221,7 +248,9 @@ fn capacity_metric(
                 available,
                 free,
                 reason: None,
+                cores: Vec::new(),
                 gpus: Vec::new(),
+                disks: Vec::new(),
             };
         }
         return ResourceMonitorAgentMetric {
@@ -233,7 +262,9 @@ fn capacity_metric(
             available,
             free,
             reason: Some("capacity total is zero".to_string()),
+            cores: Vec::new(),
             gpus: Vec::new(),
+            disks: Vec::new(),
         };
     }
 
@@ -246,8 +277,41 @@ fn capacity_metric(
         available,
         free,
         reason: None,
+        cores: Vec::new(),
         gpus: Vec::new(),
+        disks: Vec::new(),
     }
+}
+
+fn collect_disk_metric(disks: &sysinfo::Disks) -> ResourceMonitorAgentMetric {
+    let mounts = disks
+        .iter()
+        .filter_map(|disk| {
+            let device_name = disk.name().to_string_lossy().to_string();
+            let file_system = disk.file_system().to_string_lossy().to_string();
+            if is_pseudo_disk_mount(&device_name, &file_system) {
+                return None;
+            }
+            let total = disk.total_space();
+            if total == 0 {
+                return None;
+            }
+            let available = disk.available_space();
+            let used = total.saturating_sub(available);
+            let mount_point = disk.mount_point().to_string_lossy().to_string();
+            Some(ResourceMonitorAgentDiskMount {
+                id: mount_point.clone(),
+                mount_point,
+                device_name,
+                file_system,
+                used,
+                total,
+                available,
+                percent: normalize_disk_percent(used, total),
+            })
+        })
+        .collect();
+    normalize_disk_mounts_metric(mounts)
 }
 
 fn collect_gpu_metric() -> ResourceMonitorAgentMetric {
@@ -312,12 +376,14 @@ fn collect_windows_gpu_pdh_metric() -> Result<ResourceMonitorAgentMetric, String
 fn collect_linux_drm_gpu_metric_from_root(sys_root: &Path) -> ResourceMonitorAgentMetric {
     collect_linux_gpu_metric_from_sources(
         collect_linux_drm_gpu_devices_from_root(sys_root),
+        collect_linux_nvidia_procfs_gpu_devices_from_root(sys_root),
         Err("Linux NVML provider was not used for this DRM/sysfs fixture".to_string()),
     )
 }
 
 fn collect_linux_gpu_metric_from_sources(
     drm_devices: Result<Vec<ResourceMonitorAgentGpuDevice>, String>,
+    procfs_devices: Result<Vec<ResourceMonitorAgentGpuDevice>, String>,
     nvml_devices: Result<Vec<LinuxNvmlDeviceSample>, String>,
 ) -> ResourceMonitorAgentMetric {
     let mut diagnostics = Vec::new();
@@ -325,6 +391,14 @@ fn collect_linux_gpu_metric_from_sources(
         Ok(devices) if !devices.is_empty() => return normalize_gpu_devices_metric(devices),
         Ok(_) => diagnostics
             .push("Linux DRM sysfs did not report VRAM metrics for any GPU devices".to_string()),
+        Err(reason) => diagnostics.push(reason),
+    }
+
+    match procfs_devices {
+        Ok(devices) if !devices.is_empty() => return normalize_gpu_devices_metric(devices),
+        Ok(_) => diagnostics.push(
+            "Linux NVIDIA procfs did not report framebuffer memory metrics".to_string(),
+        ),
         Err(reason) => diagnostics.push(reason),
     }
 
@@ -336,7 +410,8 @@ fn collect_linux_gpu_metric_from_sources(
                     .map(|device| ResourceMonitorAgentGpuDevice {
                         id: device.id,
                         label: device.label,
-                        compute_percent: device.compute_percent,
+                        compute_percent: Some(device.compute_percent),
+                        compute_unavailable_reason: None,
                         memory_used: device.memory_used,
                         memory_total: device.memory_total,
                     })
@@ -423,10 +498,102 @@ fn linux_drm_gpu_device_metric(
     Ok(Some(ResourceMonitorAgentGpuDevice {
         id: card_id.to_string(),
         label,
-        compute_percent: 0.0,
+        compute_percent: Some(0.0),
+        compute_unavailable_reason: None,
         memory_used,
         memory_total,
     }))
+}
+
+fn collect_linux_nvidia_procfs_gpu_devices_from_root(
+    sys_root: &Path,
+) -> Result<Vec<ResourceMonitorAgentGpuDevice>, String> {
+    let gpus_root = sys_root
+        .join("proc")
+        .join("driver")
+        .join("nvidia")
+        .join("gpus");
+    let entries = fs::read_dir(&gpus_root).map_err(|error| {
+        format!(
+            "Linux NVIDIA procfs GPU provider unavailable at {}: {error}",
+            gpus_root.display()
+        )
+    })?;
+    let mut devices = Vec::new();
+    let mut diagnostics = Vec::new();
+    for entry in entries {
+        let Ok(entry) = entry else {
+            continue;
+        };
+        let bus_id = entry.file_name().to_string_lossy().to_string();
+        match linux_nvidia_procfs_gpu_device_metric(&bus_id, &entry.path()) {
+            Ok(Some(device)) => devices.push(device),
+            Ok(None) => {}
+            Err(reason) => diagnostics.push(reason),
+        }
+    }
+    if devices.is_empty() && !diagnostics.is_empty() {
+        return Err(diagnostics.join("; "));
+    }
+    Ok(devices)
+}
+
+fn linux_nvidia_procfs_gpu_device_metric(
+    bus_id: &str,
+    gpu_path: &Path,
+) -> Result<Option<ResourceMonitorAgentGpuDevice>, String> {
+    let memory_path = gpu_path.join("fb_memory_usage");
+    if !memory_path.exists() {
+        return Ok(None);
+    }
+    let content = fs::read_to_string(&memory_path)
+        .map_err(|error| format!("could not read {}: {error}", memory_path.display()))?;
+    let total = parse_nvidia_procfs_mib_field(&content, "Total")?;
+    let used = parse_nvidia_procfs_mib_field(&content, "Used")?;
+    let label = read_nvidia_procfs_model(gpu_path)
+        .unwrap_or_else(|| format!("NVIDIA GPU {bus_id}"));
+    Ok(Some(ResourceMonitorAgentGpuDevice {
+        id: format!("nvidia-{bus_id}"),
+        label,
+        compute_percent: None,
+        compute_unavailable_reason: Some(
+            "NVIDIA procfs does not expose compute utilization".to_string(),
+        ),
+        memory_used: used,
+        memory_total: total,
+    }))
+}
+
+fn parse_nvidia_procfs_mib_field(content: &str, field: &str) -> Result<u64, String> {
+    for line in content.lines().map(str::trim) {
+        let Some(rest) = line.strip_prefix(field) else {
+            continue;
+        };
+        let rest = rest.trim_start_matches(':').trim();
+        let value = rest
+            .split_whitespace()
+            .next()
+            .ok_or_else(|| format!("NVIDIA procfs {field} field is missing value"))?;
+        return value
+            .parse::<u64>()
+            .map(|mib| mib.saturating_mul(1024 * 1024))
+            .map_err(|error| format!("NVIDIA procfs {field} value is invalid: {error}"));
+    }
+    Err(format!("NVIDIA procfs missing {field} field"))
+}
+
+fn read_nvidia_procfs_model(gpu_path: &Path) -> Option<String> {
+    let content = fs::read_to_string(gpu_path.join("information")).ok()?;
+    content.lines().find_map(|line| {
+        let (key, value) = line.split_once(':')?;
+        if key.trim() == "Model" {
+            let value = value.trim();
+            if !value.is_empty() {
+                return Some(value.to_string());
+            }
+        }
+        None
+    })
 }
 
 fn read_first_existing_u64_file(paths: &[PathBuf]) -> Result<Option<u64>, String> {
@@ -651,7 +818,8 @@ fn normalize_windows_gpu_pdh_samples(
             ResourceMonitorAgentGpuDevice {
                 id: adapter.id,
                 label: adapter.label,
-                compute_percent: 0.0,
+                compute_percent: Some(0.0),
+                compute_unavailable_reason: None,
                 memory_used: 0,
                 memory_total: adapter.dedicated_video_memory,
             },
@@ -671,14 +839,16 @@ fn normalize_windows_gpu_pdh_samples(
                     devices
                         .entry(id.clone())
                         .or_insert_with(|| ResourceMonitorAgentGpuDevice {
-                            id: id.clone(),
-                            label: format!("GPU {id}"),
-                            compute_percent: 0.0,
-                            memory_used: 0,
-                            memory_total: 0,
-                        });
-                entry.compute_percent =
-                    normalize_percent(entry.compute_percent + utilization_percent);
+                        id: id.clone(),
+                        label: format!("GPU {id}"),
+                        compute_percent: Some(0.0),
+                        compute_unavailable_reason: None,
+                        memory_used: 0,
+                        memory_total: 0,
+                    });
+                entry.compute_percent = Some(normalize_percent(
+                    entry.compute_percent.unwrap_or(0.0) + utilization_percent,
+                ));
             }
             WindowsGpuPdhSample::Memory { instance, bytes } => {
                 let Some((id, memory_kind)) = windows_gpu_memory_instance_parts(&instance) else {
@@ -688,12 +858,13 @@ fn normalize_windows_gpu_pdh_samples(
                     devices
                         .entry(id.clone())
                         .or_insert_with(|| ResourceMonitorAgentGpuDevice {
-                            id: id.clone(),
-                            label: format!("GPU {id}"),
-                            compute_percent: 0.0,
-                            memory_used: 0,
-                            memory_total: 0,
-                        });
+                        id: id.clone(),
+                        label: format!("GPU {id}"),
+                        compute_percent: Some(0.0),
+                        compute_unavailable_reason: None,
+                        memory_used: 0,
+                        memory_total: 0,
+                    });
                 match memory_kind {
                     WindowsGpuMemoryCounterKind::DedicatedUsage => entry.memory_used = bytes,
                     WindowsGpuMemoryCounterKind::DedicatedLimit => entry.memory_total = bytes,
@@ -705,7 +876,9 @@ fn normalize_windows_gpu_pdh_samples(
     let devices: Vec<ResourceMonitorAgentGpuDevice> = devices
         .into_values()
         .filter(|device| {
-            device.compute_percent > 0.0 || device.memory_used > 0 || device.memory_total > 0
+            device.compute_percent.unwrap_or(0.0) > 0.0
+                || device.memory_used > 0
+                || device.memory_total > 0
         })
         .collect();
     if devices.is_empty() {
@@ -979,8 +1152,15 @@ fn normalize_gpu_devices_metric(
     let total = devices
         .iter()
         .fold(0_u64, |sum, gpu| sum.saturating_add(gpu.memory_total));
-    let compute_percent =
-        devices.iter().map(|gpu| gpu.compute_percent).sum::<f64>() / devices.len() as f64;
+    let compute_values: Vec<f64> = devices
+        .iter()
+        .filter_map(|gpu| gpu.compute_percent)
+        .collect();
+    let compute_percent = if compute_values.is_empty() {
+        0.0
+    } else {
+        compute_values.iter().sum::<f64>() / compute_values.len() as f64
+    };
 
     ResourceMonitorAgentMetric {
         metric: ResourceMetricKind::Gpu,
@@ -991,7 +1171,51 @@ fn normalize_gpu_devices_metric(
         available: None,
         free: Some(total.saturating_sub(used)),
         reason: None,
+        cores: Vec::new(),
         gpus: devices,
+        disks: Vec::new(),
+    }
+}
+
+fn normalize_disk_mounts_metric(
+    mounts: Vec<ResourceMonitorAgentDiskMount>,
+) -> ResourceMonitorAgentMetric {
+    if mounts.is_empty() {
+        return ResourceMonitorAgentMetric {
+            metric: ResourceMetricKind::Disk,
+            status: ResourceMonitorAgentMetricStatus::Unavailable,
+            used: None,
+            total: None,
+            percent: None,
+            available: None,
+            free: None,
+            reason: Some("No disk capacity metrics were reported".to_string()),
+            cores: Vec::new(),
+            gpus: Vec::new(),
+            disks: Vec::new(),
+        };
+    }
+    let used = mounts
+        .iter()
+        .fold(0_u64, |sum, disk| sum.saturating_add(disk.used));
+    let total = mounts
+        .iter()
+        .fold(0_u64, |sum, disk| sum.saturating_add(disk.total));
+    let available = mounts
+        .iter()
+        .fold(0_u64, |sum, disk| sum.saturating_add(disk.available));
+    ResourceMonitorAgentMetric {
+        metric: ResourceMetricKind::Disk,
+        status: ResourceMonitorAgentMetricStatus::Available,
+        used: Some(used),
+        total: Some(total),
+        percent: Some(normalize_disk_percent(used, total)),
+        available: Some(available),
+        free: Some(available),
+        reason: None,
+        cores: Vec::new(),
+        gpus: Vec::new(),
+        disks: mounts,
     }
 }
 
@@ -1005,7 +1229,9 @@ fn unavailable_gpu_metric(reason: impl Into<String>) -> ResourceMonitorAgentMetr
         available: None,
         free: None,
         reason: Some(reason.into()),
+        cores: Vec::new(),
         gpus: Vec::new(),
+        disks: Vec::new(),
     }
 }
 
@@ -1015,6 +1241,44 @@ fn normalize_percent(value: f64) -> f64 {
     } else {
         0.0
     }
+}
+
+fn normalize_disk_percent(used: u64, total: u64) -> f64 {
+    if total == 0 {
+        return 0.0;
+    }
+    normalize_percent(((used as f64 / total as f64) * 100.0).round())
+}
+
+fn is_pseudo_disk_mount(device_name: &str, file_system: &str) -> bool {
+    let device = device_name.to_ascii_lowercase();
+    let fs = file_system.to_ascii_lowercase();
+    if device == "none" || device == "tmpfs" || device == "devtmpfs" {
+        return true;
+    }
+    matches!(
+        fs.as_str(),
+        "tmpfs"
+            | "devtmpfs"
+            | "proc"
+            | "sysfs"
+            | "devfs"
+            | "overlay"
+            | "squashfs"
+            | "cgroup"
+            | "cgroup2"
+            | "autofs"
+            | "debugfs"
+            | "tracefs"
+            | "securityfs"
+            | "fusectl"
+            | "pstore"
+            | "efivarfs"
+            | "mqueue"
+            | "hugetlbfs"
+            | "rpc_pipefs"
+            | "binfmt_misc"
+    )
 }
 
 fn current_target_os() -> Result<TargetOs, String> {
@@ -1055,6 +1319,7 @@ pub fn collect_linux_gpu_metric_from_sources_for_test(
 ) -> ResourceMonitorAgentMetric {
     collect_linux_gpu_metric_from_sources(
         collect_linux_drm_gpu_devices_from_root(sys_root),
+        collect_linux_nvidia_procfs_gpu_devices_from_root(sys_root),
         Ok(nvml_devices),
     )
 }

@@ -27,6 +27,7 @@
   import Activity from "~icons/lucide/activity";
   import ChevronRight from "~icons/lucide/chevron-right";
   import Cpu from "~icons/lucide/cpu";
+  import Database from "~icons/lucide/database";
   import HardDrive from "~icons/lucide/hard-drive";
   import MemoryStick from "~icons/lucide/memory-stick";
   import MonitorCog from "~icons/lucide/monitor-cog";
@@ -310,7 +311,7 @@
   }
 
   function isResourceMetricId(value: string): value is ResourceMetricId {
-    return value === "cpu" || value === "memory" || value === "swap" || value === "gpu";
+    return value === "cpu" || value === "memory" || value === "swap" || value === "gpu" || value === "disk";
   }
 
   function metricAtPoint(clientX: number, clientY: number): ResourceMetricId | null {
@@ -432,8 +433,10 @@
               <MemoryStick />
             {:else if row.metric === "swap"}
               <HardDrive />
-            {:else}
+            {:else if row.metric === "gpu"}
               <MonitorCog />
+            {:else}
+              <Database />
             {/if}
           </div>
 
@@ -447,6 +450,11 @@
             {/if}
             {#if row.reason}
               <div class="resource-monitor-reason">{row.reason}</div>
+            {/if}
+            {#if row.progressPercent !== undefined}
+              <div class="resource-monitor-progress" aria-hidden="true">
+                <span style={`width: ${Math.max(0, Math.min(100, row.progressPercent))}%`}></span>
+              </div>
             {/if}
           </div>
 
@@ -471,6 +479,11 @@
                   <span>{child.primary}</span>
                   {#if child.auxiliary}
                     <small>{child.auxiliary}</small>
+                  {/if}
+                  {#if child.progressPercent !== undefined}
+                    <div class="resource-monitor-progress child" aria-hidden="true">
+                      <span style={`width: ${Math.max(0, Math.min(100, child.progressPercent))}%`}></span>
+                    </div>
                   {/if}
                 </div>
                 {#if child.history}
@@ -753,6 +766,27 @@
   .resource-monitor-reason {
     line-height: 1.35;
     overflow-wrap: anywhere;
+  }
+
+  .resource-monitor-progress {
+    width: 100%;
+    height: 4px;
+    margin-top: 5px;
+    overflow: hidden;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--app-muted) 18%, transparent);
+  }
+
+  .resource-monitor-progress.child {
+    flex: 0 0 100%;
+    margin-top: 2px;
+  }
+
+  .resource-monitor-progress span {
+    display: block;
+    height: 100%;
+    border-radius: inherit;
+    background: color-mix(in srgb, var(--app-accent, #4f8cff) 72%, transparent);
   }
 
   .resource-monitor-history {

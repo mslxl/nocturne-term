@@ -53,6 +53,7 @@ pub enum LocalResourceMetricKind {
     Memory,
     Swap,
     Gpu,
+    Disk,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -75,15 +76,29 @@ pub enum LocalResourceMetricDetails {
     None,
     CpuCores(Vec<f64>),
     GpuDevices(Vec<LocalGpuDeviceMetric>),
+    DiskMounts(Vec<LocalDiskMountMetric>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct LocalGpuDeviceMetric {
     pub id: String,
     pub label: String,
-    pub compute_percent: f64,
+    pub compute_percent: Option<f64>,
+    pub compute_unavailable_reason: Option<String>,
     pub memory_used: u64,
     pub memory_total: u64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct LocalDiskMountMetric {
+    pub id: String,
+    pub mount_point: String,
+    pub device_name: String,
+    pub file_system: String,
+    pub used: u64,
+    pub total: u64,
+    pub available: u64,
+    pub percent: f64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -172,15 +187,29 @@ pub struct ResourceMonitorMetric {
     pub reason: Option<String>,
     pub cores: Vec<f64>,
     pub gpus: Vec<ResourceMonitorGpuDevice>,
+    pub disks: Vec<ResourceMonitorDiskMount>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
 pub struct ResourceMonitorGpuDevice {
     pub id: String,
     pub label: String,
-    pub compute_percent: f64,
+    pub compute_percent: Option<f64>,
+    pub compute_unavailable_reason: Option<String>,
     pub memory_used: String,
     pub memory_total: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct ResourceMonitorDiskMount {
+    pub id: String,
+    pub mount_point: String,
+    pub device_name: String,
+    pub file_system: String,
+    pub used: String,
+    pub total: String,
+    pub available: String,
+    pub percent: f64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -241,16 +270,33 @@ pub struct ResourceMonitorAgentMetric {
     pub free: Option<u64>,
     pub reason: Option<String>,
     #[serde(default)]
+    pub cores: Vec<f64>,
+    #[serde(default)]
     pub gpus: Vec<ResourceMonitorAgentGpuDevice>,
+    #[serde(default)]
+    pub disks: Vec<ResourceMonitorAgentDiskMount>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ResourceMonitorAgentGpuDevice {
     pub id: String,
     pub label: String,
-    pub compute_percent: f64,
+    pub compute_percent: Option<f64>,
+    pub compute_unavailable_reason: Option<String>,
     pub memory_used: u64,
     pub memory_total: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ResourceMonitorAgentDiskMount {
+    pub id: String,
+    pub mount_point: String,
+    pub device_name: String,
+    pub file_system: String,
+    pub used: u64,
+    pub total: u64,
+    pub available: u64,
+    pub percent: f64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -648,6 +694,10 @@ fn collect_remote_system_resource_metrics(
                 LocalResourceMetricKind::Gpu,
                 "macOS remote GPU command provider is not implemented",
             ),
+            unavailable_metric(
+                LocalResourceMetricKind::Disk,
+                "macOS remote disk command provider is not implemented",
+            ),
         ]),
         RemoteResourceTargetOs::Windows => Ok(vec![
             unavailable_metric(
@@ -665,6 +715,10 @@ fn collect_remote_system_resource_metrics(
             unavailable_metric(
                 LocalResourceMetricKind::Gpu,
                 "Windows remote GPU command provider is not implemented",
+            ),
+            unavailable_metric(
+                LocalResourceMetricKind::Disk,
+                "Windows remote disk command provider is not implemented",
             ),
         ]),
     }
@@ -716,6 +770,16 @@ fn collect_remote_linux_system_resource_metrics(
         )
     });
 
+    let disk = run_remote_command(&connection.session, "df -P -kT")?;
+    metrics.push(if disk.status == 0 {
+        parse_unix_disk_df(true, &disk.stdout)?
+    } else {
+        unavailable_metric(
+            LocalResourceMetricKind::Disk,
+            format!("Linux df command failed: {}", disk.stderr.trim()),
+        )
+    });
+
     Ok(metrics)
 }
 
@@ -725,6 +789,7 @@ fn remote_system_snapshot_has_all_metrics(snapshot: &ResourceMonitorSnapshot) ->
         LocalResourceMetricKind::Memory,
         LocalResourceMetricKind::Swap,
         LocalResourceMetricKind::Gpu,
+        LocalResourceMetricKind::Disk,
     ]
     .into_iter()
     .all(|kind| {
@@ -1055,6 +1120,7 @@ pub fn collect_local_resource_snapshot() -> LocalResourceSnapshot {
                 Some(system.free_swap()),
             ),
             collect_local_gpu_metric(),
+            collect_local_disk_metric(),
         ],
     }
 }
@@ -1077,6 +1143,7 @@ fn unavailable_snapshot_dto(reason: impl Into<String>) -> ResourceMonitorSnapsho
             LocalResourceMetricKind::Memory,
             LocalResourceMetricKind::Swap,
             LocalResourceMetricKind::Gpu,
+            LocalResourceMetricKind::Disk,
         ]
         .into_iter()
         .map(|metric| ResourceMonitorMetric {
@@ -1090,6 +1157,7 @@ fn unavailable_snapshot_dto(reason: impl Into<String>) -> ResourceMonitorSnapsho
             reason: Some(reason.clone()),
             cores: Vec::new(),
             gpus: Vec::new(),
+            disks: Vec::new(),
         })
         .collect(),
     }
@@ -1287,8 +1355,8 @@ fn metric_dto(metric: LocalResourceMetric) -> ResourceMonitorMetric {
             free,
             details,
         } => {
-            let (cores, gpus) = match details {
-                LocalResourceMetricDetails::CpuCores(cores) => (cores, Vec::new()),
+            let (cores, gpus, disks) = match details {
+                LocalResourceMetricDetails::CpuCores(cores) => (cores, Vec::new(), Vec::new()),
                 LocalResourceMetricDetails::GpuDevices(gpus) => {
                     let gpu_devices = gpus
                         .into_iter()
@@ -1296,13 +1364,30 @@ fn metric_dto(metric: LocalResourceMetric) -> ResourceMonitorMetric {
                             id: gpu.id,
                             label: gpu.label,
                             compute_percent: gpu.compute_percent,
+                            compute_unavailable_reason: gpu.compute_unavailable_reason,
                             memory_used: gpu.memory_used.to_string(),
                             memory_total: gpu.memory_total.to_string(),
                         })
                         .collect();
-                    (Vec::new(), gpu_devices)
+                    (Vec::new(), gpu_devices, Vec::new())
                 }
-                LocalResourceMetricDetails::None => (Vec::new(), Vec::new()),
+                LocalResourceMetricDetails::DiskMounts(disks) => {
+                    let disk_mounts = disks
+                        .into_iter()
+                        .map(|disk| ResourceMonitorDiskMount {
+                            id: disk.id,
+                            mount_point: disk.mount_point,
+                            device_name: disk.device_name,
+                            file_system: disk.file_system,
+                            used: disk.used.to_string(),
+                            total: disk.total.to_string(),
+                            available: disk.available.to_string(),
+                            percent: disk.percent,
+                        })
+                        .collect();
+                    (Vec::new(), Vec::new(), disk_mounts)
+                }
+                LocalResourceMetricDetails::None => (Vec::new(), Vec::new(), Vec::new()),
             };
             ResourceMonitorMetric {
                 metric: metric.kind,
@@ -1315,6 +1400,7 @@ fn metric_dto(metric: LocalResourceMetric) -> ResourceMonitorMetric {
                 reason: None,
                 cores,
                 gpus,
+                disks,
             }
         }
         LocalResourceMetricAvailability::Unavailable { reason } => ResourceMonitorMetric {
@@ -1328,6 +1414,7 @@ fn metric_dto(metric: LocalResourceMetric) -> ResourceMonitorMetric {
             reason: Some(reason),
             cores: Vec::new(),
             gpus: Vec::new(),
+            disks: Vec::new(),
         },
     }
 }
@@ -1346,17 +1433,20 @@ pub fn remote_system_command_plan(target_os: RemoteResourceTargetOs) -> RemoteSy
             "cat /proc/stat",
             "free -b",
             LINUX_NVIDIA_SMI_QUERY_COMMAND,
+            "df -P -kT",
         ],
         RemoteResourceTargetOs::Macos => vec![
             "sysctl -n hw.memsize",
             "vm_stat",
             "sysctl -n vm.swapusage",
             "top -l 1 -n 0",
+            "df -P -k",
         ],
         RemoteResourceTargetOs::Windows => vec![
             "Get-CimInstance Win32_OperatingSystem | Select-Object TotalVisibleMemorySize,FreePhysicalMemory",
             "Get-CimInstance Win32_PerfFormattedData_PerfOS_Processor",
             "Get-CimInstance Win32_PageFileUsage",
+            "Get-CimInstance Win32_LogicalDisk",
         ],
     };
     RemoteSystemCommandPlan {
@@ -1372,16 +1462,35 @@ pub fn remote_system_provider_runs_off_command_thread() -> bool {
 }
 
 pub fn parse_linux_proc_stat_cpu(output: &str) -> Result<LocalResourceMetric> {
-    let line = output
-        .lines()
-        .map(str::trim)
-        .find(|line| line.starts_with("cpu "))
-        .ok_or_else(|| {
-            invalid_error("Linux /proc/stat output did not include aggregate cpu row")
-        })?;
-    let values = line
-        .split_whitespace()
-        .skip(1)
+    let mut aggregate_percent = None;
+    let mut core_percents = Vec::new();
+
+    for line in output.lines().map(str::trim).filter(|line| !line.is_empty()) {
+        let Some((label, values)) = parse_linux_proc_stat_cpu_row(line)? else {
+            continue;
+        };
+        let percent = linux_proc_stat_cpu_percent(&values, label)?;
+        if label == "cpu" {
+            aggregate_percent = Some(percent);
+        } else {
+            core_percents.push(percent);
+        }
+    }
+
+    let aggregate_percent = aggregate_percent
+        .ok_or_else(|| invalid_error("Linux /proc/stat output did not include aggregate cpu row"))?;
+    Ok(normalize_cpu_metric(aggregate_percent, core_percents))
+}
+
+fn parse_linux_proc_stat_cpu_row(line: &str) -> Result<Option<(&str, Vec<u64>)>> {
+    let mut parts = line.split_whitespace();
+    let Some(label) = parts.next() else {
+        return Ok(None);
+    };
+    if label != "cpu" && !is_linux_proc_stat_core_label(label) {
+        return Ok(None);
+    }
+    let values = parts
         .map(|value| {
             value.parse::<u64>().map_err(|error| {
                 invalid_error(format!("Linux /proc/stat CPU field is invalid: {error}"))
@@ -1389,10 +1498,14 @@ pub fn parse_linux_proc_stat_cpu(output: &str) -> Result<LocalResourceMetric> {
         })
         .collect::<Result<Vec<_>>>()?;
     if values.len() < 4 {
-        return Err(invalid_error(
-            "Linux /proc/stat aggregate cpu row has too few fields",
-        ));
+        return Err(invalid_error(format!(
+            "Linux /proc/stat {label} row has too few fields"
+        )));
     }
+    Ok(Some((label, values)))
+}
+
+fn linux_proc_stat_cpu_percent(values: &[u64], label: &str) -> Result<f64> {
     let idle = values
         .get(3)
         .copied()
@@ -1402,16 +1515,18 @@ pub fn parse_linux_proc_stat_cpu(output: &str) -> Result<LocalResourceMetric> {
         .iter()
         .fold(0_u64, |sum, value| sum.saturating_add(*value));
     if total == 0 {
-        return Ok(unavailable_metric(
-            LocalResourceMetricKind::Cpu,
-            "Linux /proc/stat aggregate cpu total is zero",
-        ));
+        return Err(invalid_error(format!(
+            "Linux /proc/stat {label} total is zero"
+        )));
     }
     let busy = total.saturating_sub(idle);
-    Ok(normalize_cpu_metric(
-        (busy as f64 / total as f64) * 100.0,
-        Vec::new(),
-    ))
+    Ok((busy as f64 / total as f64) * 100.0)
+}
+
+fn is_linux_proc_stat_core_label(label: &str) -> bool {
+    label.strip_prefix("cpu").is_some_and(|suffix| {
+        !suffix.is_empty() && suffix.chars().all(|ch| ch.is_ascii_digit())
+    })
 }
 
 pub fn parse_linux_free_b(output: &str) -> Result<Vec<LocalResourceMetric>> {
@@ -1494,7 +1609,8 @@ pub fn parse_linux_nvidia_smi_csv(output: &str) -> Result<LocalResourceMetric> {
         devices.push(LocalGpuDeviceMetric {
             id,
             label,
-            compute_percent,
+            compute_percent: Some(compute_percent),
+            compute_unavailable_reason: None,
             memory_used: memory_used_mib.saturating_mul(1024 * 1024),
             memory_total: memory_total_mib.saturating_mul(1024 * 1024),
         });
@@ -1508,6 +1624,88 @@ pub fn parse_linux_nvidia_smi_csv(output: &str) -> Result<LocalResourceMetric> {
     }
 
     Ok(normalize_gpu_devices_metric(devices))
+}
+
+pub fn parse_unix_disk_df(has_filesystem_type: bool, output: &str) -> Result<LocalResourceMetric> {
+    let mut mounts = Vec::new();
+    for (index, line) in output
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .enumerate()
+    {
+        if index == 0 && line.to_ascii_lowercase().contains("filesystem") {
+            continue;
+        }
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        let minimum = if has_filesystem_type { 7 } else { 6 };
+        if parts.len() < minimum {
+            return Err(invalid_error(format!(
+                "df row {} has too few fields",
+                index + 1
+            )));
+        }
+        let (device_name, file_system, total_index, used_index, available_index, mount_index) =
+            if has_filesystem_type {
+                (parts[0], parts[1], 2, 3, 4, 6)
+            } else {
+                (parts[0], "unknown", 1, 2, 3, 5)
+            };
+        if is_pseudo_disk_mount(device_name, file_system) {
+            continue;
+        }
+        let total = parse_u64_field(parts.get(total_index), "df total blocks")?.saturating_mul(1024);
+        let used = parse_u64_field(parts.get(used_index), "df used blocks")?.saturating_mul(1024);
+        let available =
+            parse_u64_field(parts.get(available_index), "df available blocks")?.saturating_mul(1024);
+        if total == 0 {
+            continue;
+        }
+        let mount_point = parts[mount_index].to_string();
+        mounts.push(LocalDiskMountMetric {
+            id: mount_point.clone(),
+            mount_point,
+            device_name: device_name.to_string(),
+            file_system: file_system.to_string(),
+            used,
+            total,
+            available,
+            percent: normalize_disk_percent(used, total),
+        });
+    }
+    Ok(normalize_disk_mounts_metric(mounts))
+}
+
+pub fn parse_windows_disk(
+    disks: Vec<(String, String, Option<u64>, Option<u64>)>,
+) -> LocalResourceMetric {
+    let mounts = disks
+        .into_iter()
+        .filter_map(|(device_name, file_system, total, free)| {
+            let total = total?;
+            let available = free?;
+            if total == 0 {
+                return None;
+            }
+            let mount_point = if device_name.ends_with('\\') {
+                device_name.clone()
+            } else {
+                format!("{device_name}\\")
+            };
+            let used = total.saturating_sub(available);
+            Some(LocalDiskMountMetric {
+                id: mount_point.clone(),
+                mount_point,
+                device_name,
+                file_system,
+                used,
+                total,
+                available,
+                percent: normalize_disk_percent(used, total),
+            })
+        })
+        .collect();
+    normalize_disk_mounts_metric(mounts)
 }
 
 pub fn parse_macos_memory(
@@ -1820,13 +2018,16 @@ fn normalize_available_resource_monitor_agent_metric(
                     percent: normalize_percent(percent),
                     available: None,
                     free: None,
-                    details: LocalResourceMetricDetails::None,
+                    details: LocalResourceMetricDetails::CpuCores(
+                        metric.cores.into_iter().map(normalize_percent).collect(),
+                    ),
                 },
             })
         }
         LocalResourceMetricKind::Memory
         | LocalResourceMetricKind::Swap
-        | LocalResourceMetricKind::Gpu => {
+        | LocalResourceMetricKind::Gpu
+        | LocalResourceMetricKind::Disk => {
             if metric.metric == LocalResourceMetricKind::Gpu && !metric.gpus.is_empty() {
                 return Ok(normalize_gpu_devices_metric(
                     metric
@@ -1836,8 +2037,27 @@ fn normalize_available_resource_monitor_agent_metric(
                             id: gpu.id,
                             label: gpu.label,
                             compute_percent: gpu.compute_percent,
+                            compute_unavailable_reason: gpu.compute_unavailable_reason,
                             memory_used: gpu.memory_used,
                             memory_total: gpu.memory_total,
+                        })
+                        .collect(),
+                ));
+            }
+            if metric.metric == LocalResourceMetricKind::Disk && !metric.disks.is_empty() {
+                return Ok(normalize_disk_mounts_metric(
+                    metric
+                        .disks
+                        .into_iter()
+                        .map(|disk| LocalDiskMountMetric {
+                            id: disk.id,
+                            mount_point: disk.mount_point,
+                            device_name: disk.device_name,
+                            file_system: disk.file_system,
+                            used: disk.used,
+                            total: disk.total,
+                            available: disk.available,
+                            percent: normalize_percent(disk.percent),
                         })
                         .collect(),
                 ));
@@ -1980,6 +2200,38 @@ fn normalize_memory_metric(
     }
 }
 
+fn collect_local_disk_metric() -> LocalResourceMetric {
+    let disks = sysinfo::Disks::new_with_refreshed_list();
+    let mounts = disks
+        .iter()
+        .filter_map(|disk| {
+            let device_name = disk.name().to_string_lossy().to_string();
+            let file_system = disk.file_system().to_string_lossy().to_string();
+            if is_pseudo_disk_mount(&device_name, &file_system) {
+                return None;
+            }
+            let total = disk.total_space();
+            if total == 0 {
+                return None;
+            }
+            let available = disk.available_space();
+            let used = total.saturating_sub(available);
+            let mount_point = disk.mount_point().to_string_lossy().to_string();
+            Some(LocalDiskMountMetric {
+                id: mount_point.clone(),
+                mount_point,
+                device_name,
+                file_system,
+                used,
+                total,
+                available,
+                percent: normalize_disk_percent(used, total),
+            })
+        })
+        .collect();
+    normalize_disk_mounts_metric(mounts)
+}
+
 fn collect_local_gpu_metric() -> LocalResourceMetric {
     #[cfg(target_os = "linux")]
     {
@@ -2066,7 +2318,8 @@ fn linux_drm_gpu_device_metric(
     Ok(Some(LocalGpuDeviceMetric {
         id: card_id.to_string(),
         label,
-        compute_percent: 0.0,
+        compute_percent: Some(0.0),
+        compute_unavailable_reason: None,
         memory_used,
         memory_total,
     }))
@@ -2141,7 +2394,8 @@ fn normalize_windows_gpu_pdh_samples(
             LocalGpuDeviceMetric {
                 id: adapter.id,
                 label: adapter.label,
-                compute_percent: 0.0,
+                compute_percent: Some(0.0),
+                compute_unavailable_reason: None,
                 memory_used: 0,
                 memory_total: adapter.dedicated_video_memory,
             },
@@ -2162,12 +2416,14 @@ fn normalize_windows_gpu_pdh_samples(
                     .or_insert_with(|| LocalGpuDeviceMetric {
                         id: id.clone(),
                         label: format!("GPU {id}"),
-                        compute_percent: 0.0,
+                        compute_percent: Some(0.0),
+                        compute_unavailable_reason: None,
                         memory_used: 0,
                         memory_total: 0,
                     });
-                entry.compute_percent =
-                    normalize_percent(entry.compute_percent + utilization_percent);
+                entry.compute_percent = Some(normalize_percent(
+                    entry.compute_percent.unwrap_or(0.0) + utilization_percent,
+                ));
             }
             WindowsGpuPdhSample::Memory { instance, bytes } => {
                 let Some((id, memory_kind)) = windows_gpu_memory_instance_parts(&instance) else {
@@ -2178,7 +2434,8 @@ fn normalize_windows_gpu_pdh_samples(
                     .or_insert_with(|| LocalGpuDeviceMetric {
                         id: id.clone(),
                         label: format!("GPU {id}"),
-                        compute_percent: 0.0,
+                        compute_percent: Some(0.0),
+                        compute_unavailable_reason: None,
                         memory_used: 0,
                         memory_total: 0,
                     });
@@ -2193,7 +2450,9 @@ fn normalize_windows_gpu_pdh_samples(
     let devices: Vec<LocalGpuDeviceMetric> = devices
         .into_values()
         .filter(|device| {
-            device.compute_percent > 0.0 || device.memory_used > 0 || device.memory_total > 0
+            device.compute_percent.unwrap_or(0.0) > 0.0
+                || device.memory_used > 0
+                || device.memory_total > 0
         })
         .collect();
     if devices.is_empty() {
@@ -2464,8 +2723,15 @@ fn normalize_gpu_devices_metric(devices: Vec<LocalGpuDeviceMetric>) -> LocalReso
     let total = devices
         .iter()
         .fold(0_u64, |sum, gpu| sum.saturating_add(gpu.memory_total));
-    let compute_percent =
-        devices.iter().map(|gpu| gpu.compute_percent).sum::<f64>() / devices.len() as f64;
+    let compute_values: Vec<f64> = devices
+        .iter()
+        .filter_map(|gpu| gpu.compute_percent)
+        .collect();
+    let compute_percent = if compute_values.is_empty() {
+        0.0
+    } else {
+        compute_values.iter().sum::<f64>() / compute_values.len() as f64
+    };
 
     LocalResourceMetric {
         kind: LocalResourceMetricKind::Gpu,
@@ -2478,6 +2744,69 @@ fn normalize_gpu_devices_metric(devices: Vec<LocalGpuDeviceMetric>) -> LocalReso
             details: LocalResourceMetricDetails::GpuDevices(devices),
         },
     }
+}
+
+fn normalize_disk_mounts_metric(mounts: Vec<LocalDiskMountMetric>) -> LocalResourceMetric {
+    if mounts.is_empty() {
+        return unavailable_metric(
+            LocalResourceMetricKind::Disk,
+            "No disk capacity metrics were reported",
+        );
+    }
+    let used = mounts
+        .iter()
+        .fold(0_u64, |sum, disk| sum.saturating_add(disk.used));
+    let total = mounts
+        .iter()
+        .fold(0_u64, |sum, disk| sum.saturating_add(disk.total));
+    let available = mounts
+        .iter()
+        .fold(0_u64, |sum, disk| sum.saturating_add(disk.available));
+    if total == 0 {
+        return unavailable_metric(LocalResourceMetricKind::Disk, "disk total is zero");
+    }
+    LocalResourceMetric {
+        kind: LocalResourceMetricKind::Disk,
+        availability: LocalResourceMetricAvailability::Available {
+            used,
+            total,
+            percent: normalize_disk_percent(used, total),
+            available: Some(available),
+            free: Some(available),
+            details: LocalResourceMetricDetails::DiskMounts(mounts),
+        },
+    }
+}
+
+fn is_pseudo_disk_mount(device_name: &str, file_system: &str) -> bool {
+    let device = device_name.to_ascii_lowercase();
+    let fs = file_system.to_ascii_lowercase();
+    if device == "none" || device == "tmpfs" || device == "devtmpfs" {
+        return true;
+    }
+    matches!(
+        fs.as_str(),
+        "tmpfs"
+            | "devtmpfs"
+            | "proc"
+            | "sysfs"
+            | "devfs"
+            | "overlay"
+            | "squashfs"
+            | "cgroup"
+            | "cgroup2"
+            | "autofs"
+            | "debugfs"
+            | "tracefs"
+            | "securityfs"
+            | "fusectl"
+            | "pstore"
+            | "efivarfs"
+            | "mqueue"
+            | "hugetlbfs"
+            | "rpc_pipefs"
+            | "binfmt_misc"
+    )
 }
 
 fn gpu_unavailable_metric(reason: impl Into<String>) -> LocalResourceMetric {
@@ -2561,7 +2890,15 @@ fn metric_name(kind: LocalResourceMetricKind) -> &'static str {
         LocalResourceMetricKind::Memory => "memory",
         LocalResourceMetricKind::Swap => "swap",
         LocalResourceMetricKind::Gpu => "gpu",
+        LocalResourceMetricKind::Disk => "disk",
     }
+}
+
+fn normalize_disk_percent(used: u64, total: u64) -> f64 {
+    if total == 0 {
+        return 0.0;
+    }
+    normalize_percent(((used as f64 / total as f64) * 100.0).round())
 }
 
 pub fn local_resource_provider_descriptor_for_test() -> LocalResourceProviderDescriptor {
@@ -2665,6 +3002,17 @@ pub fn parse_linux_nvidia_smi_csv_for_test(output: &str) -> Result<LocalResource
     parse_linux_nvidia_smi_csv(output)
 }
 
+pub fn parse_unix_disk_df_for_test(
+    has_filesystem_type: bool,
+    output: &str,
+) -> Result<LocalResourceMetric> {
+    parse_unix_disk_df(has_filesystem_type, output)
+}
+
+pub fn parse_macos_disk_df_for_test(output: &str) -> Result<LocalResourceMetric> {
+    parse_unix_disk_df(false, output)
+}
+
 pub fn parse_macos_memory_for_test(
     total_memory: u64,
     available_memory: u64,
@@ -2680,6 +3028,12 @@ pub fn parse_windows_memory_for_test(
     swap: Option<(u64, u64)>,
 ) -> Vec<LocalResourceMetric> {
     parse_windows_memory(total_memory, free_memory, swap)
+}
+
+pub fn parse_windows_disk_for_test(
+    disks: Vec<(String, String, Option<u64>, Option<u64>)>,
+) -> LocalResourceMetric {
+    parse_windows_disk(disks)
 }
 
 pub fn resolve_resource_target_for_test(

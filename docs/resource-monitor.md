@@ -13,6 +13,7 @@ It monitors:
 - swap usage
 - overall GPU memory usage
 - overall GPU compute usage
+- disk capacity usage by aggregate and mount point
 
 Providers may collect per-core CPU or per-device GPU samples internally for
 normalization and drill-down details. The Resource Monitor ToolTab shows only
@@ -132,6 +133,16 @@ GPU display:
 - GPU history charts show the overall compute trend
 - GPU rows with per-device details are collapsed by default and can be expanded in place
 - unsupported providers display unavailable with a reason
+- GPU may be partially available. For example, a Linux NVIDIA procfs provider can report VRAM used / total while compute utilization is unavailable. In that case the overall GPU metric remains available, the device row shows the compute unavailable reason, and other metrics continue to render normally.
+
+Disk display:
+
+- one overall Disk row after GPU by default
+- compact auxiliary text shows aggregate used / total and available capacity
+- Disk is collapsed by default and expands to one row per real mount point
+- expanded mount rows show mount point, device name, filesystem type, used / total, available, and percent
+- Disk uses a compact progress bar rather than a history curve
+- pseudo, temporary, and virtual filesystems are filtered before aggregate totals are calculated
 
 Unavailable metrics must show an explicit reason, such as:
 
@@ -167,7 +178,7 @@ Layout:
 - refresh interval control
 - last updated state
 - inline warning area
-- sections for CPU, Memory, Swap, and GPU
+- sections for CPU, Memory, Swap, GPU, and Disk
 - small value rows and bordered sparklines
 
 The right dock group may be narrow. The Resource Monitor must stay readable in a single column:
@@ -176,7 +187,7 @@ The right dock group may be narrow. The Resource Monitor must stay readable in a
 - expanded content scrolls vertically
 - long auxiliary text may wrap
 - non-essential auxiliary columns can be hidden at narrow widths
-- CPU/GPU rows are expandable; Memory and Swap are not expandable and must not show expand controls
+- CPU, GPU, and Disk rows are expandable; Memory and Swap are not expandable and must not show expand controls
 - pointer dragging a metric row reorders metric panels without triggering a secondary row action
 
 Provider labels remain part of the backend snapshot for diagnostics and tests,
@@ -192,13 +203,13 @@ selected or while a helper upload prompt is pending.
 
 ## Provider Strategy
 
-Local Workspaces use a Rust local provider directly. Local collection must not start an external helper process. The local provider may reuse the same Rust collection modules that are compiled into `nocturne-resource-monitor-agent`; for matching OS/architecture this avoids maintaining separate metric logic for the app and the helper.
+Local Workspaces use a Rust local provider directly. Local collection must not start an external helper process. The local provider may reuse the same Rust collection modules that are compiled into `nocturne-resource-monitor-agent`; for matching OS/architecture this avoids maintaining separate metric logic for the app and the helper. Local Disk metrics come from the Rust provider and are normalized to aggregate plus per-mount details.
 
 Local GPU collection in the app must use in-process provider code or return an explicit unavailable metric. It must not shell out to vendor or system command wrappers such as `nvidia-smi` or PowerShell. Helper GPU collection follows the same rule: once Nocturne uploads `nocturne-resource-monitor-agent`, GPU information must come from provider code inside the helper process.
 
 Current `nocturne-resource-monitor-agent` GPU providers:
 
-- Linux: first reads DRM/sysfs device data under `/sys/class/drm`, including AMD/Intel-style VRAM files such as `mem_info_vram_used` / `mem_info_vram_total`, byte-suffixed variants such as `mem_info_vram_used_bytes` / `mem_info_vram_total_bytes`, visible VRAM files, and GTT memory files when VRAM-specific files are unavailable. If DRM/sysfs does not expose usable memory metrics, it tries an in-process NVML provider by dynamically loading `libnvidia-ml.so.1` / `libnvidia-ml.so` at runtime. NVML is never linked at helper build time, so the helper can still start on Linux hosts without NVIDIA libraries. This covers NVIDIA hosts without shelling out to `nvidia-smi`. If neither provider works, GPU is unavailable with the collected reasons.
+- Linux: first reads DRM/sysfs device data under `/sys/class/drm`, including AMD/Intel-style VRAM files such as `mem_info_vram_used` / `mem_info_vram_total`, byte-suffixed variants such as `mem_info_vram_used_bytes` / `mem_info_vram_total_bytes`, visible VRAM files, and GTT memory files when VRAM-specific files are unavailable. If DRM/sysfs does not expose usable memory metrics, it tries NVIDIA procfs framebuffer data under `/proc/driver/nvidia/gpus/*/fb_memory_usage`; this can report VRAM without compute utilization, so the device row carries a compute unavailable reason. If procfs also fails, it tries an in-process NVML provider by dynamically loading `libnvidia-ml.so.1` / `libnvidia-ml.so` at runtime. NVML is never linked at helper build time, so the helper can still start on Linux hosts without NVIDIA libraries. This covers NVIDIA hosts without shelling out to `nvidia-smi`. If no provider works, GPU is unavailable with the collected reasons.
 - Windows: uses Windows APIs in-process. DXGI enumerates adapters, display names, LUIDs, and dedicated video memory totals; PDH reads `GPU Engine(*)\Utilization Percentage` for compute usage and `GPU Adapter Memory(*)\Dedicated Usage` for current VRAM usage. Samples are grouped by GPU LUID. It must not call PowerShell.
 - macOS: returns GPU unavailable with an explicit reason because stable public helper APIs do not expose the desired utilization data reliably.
 
@@ -224,7 +235,7 @@ saved.
 
 Remote Workspaces use this order when the Host provider mode is `auto`:
 
-1. In `auto`, collect with existing target-host commands when they can provide reliable metrics. The command provider may cover CPU, memory, swap, and NVIDIA GPU via `nvidia-smi`, but it must not pretend a vendor-specific GPU command is universal GPU support.
+1. In `auto`, collect with existing target-host commands when they can provide reliable metrics. The command provider may cover CPU, memory, swap, Disk, and NVIDIA GPU via `nvidia-smi`, but it must not pretend a vendor-specific GPU command is universal GPU support.
 2. If existing commands cannot reliably cover key metrics such as GPU details, follow the unified remote helper policy.
 3. If permitted, upload and run `nocturne-resource-monitor-agent`.
 4. If not permitted or unsupported, keep affected metrics unavailable with reasons.
@@ -235,7 +246,7 @@ Host provider modes:
 
 - `auto`: try target-host commands first. If those commands produce all required metrics, use them. If they cannot cover key metrics, especially GPU, continue to the managed Resource Monitor agent path and apply the unified remote helper policy before any upload.
 - `agent`: use `nocturne-resource-monitor-agent` according to the unified remote helper policy.
-- `system_commands`: only run commands that already exist on the target Host. This mode never downloads, uploads, installs, or runs Nocturne's managed Resource Monitor agent. On Linux it may use `nvidia-smi` when present to report NVIDIA GPU metrics. If `nvidia-smi` is missing or the Host is not NVIDIA-backed, GPU is unavailable with an explicit reason while CPU, memory, and swap can still display from system commands.
+- `system_commands`: only run commands that already exist on the target Host. This mode never downloads, uploads, installs, or runs Nocturne's managed Resource Monitor agent. On Linux it may use `nvidia-smi` when present to report NVIDIA GPU metrics and `df -P -kT` for Disk. On macOS it may use `df -P -k` for Disk. On Windows it may use `Win32_LogicalDisk` data for Disk. If `nvidia-smi` is missing or the Host is not NVIDIA-backed, GPU is unavailable with an explicit reason while CPU, memory, swap, and Disk can still display from system commands.
 
 The remote helper policy is shared with other remote helper decisions:
 
@@ -324,7 +335,10 @@ Deployment rules:
   Nocturne remembers that pending prompt for the current Host and helper hash.
   Later refresh ticks must report that helper upload confirmation is pending
   instead of opening additional dialogs while the user has not answered the
-  first one.
+  first one. The frontend must treat that pending state as a skipped refresh:
+  it must keep the existing Resource Monitor data or loading state and must not
+  replace every metric with `Waiting for Resource Monitor helper upload
+  confirmation`.
 - Authentication never reuses credentials across Workspaces; deployment still uses the current Workspace's encrypted temporary credentials.
 - Closing a Workspace does not delete an uploaded helper.
 - If a remote helper's manifest or hash does not match the bundled helper, Nocturne validates and uploads again according to helper policy.
@@ -357,7 +371,7 @@ Rules:
 Event kinds:
 
 ```json
-{"type":"hello","version":"0.1.0","os":"linux","arch":"x86_64","capabilities":["resource.cpu","resource.memory","resource.swap","resource.gpu"]}
+{"type":"hello","version":"0.1.0","os":"linux","arch":"x86_64","capabilities":["resource.cpu","resource.memory","resource.swap","resource.gpu","resource.disk"]}
 {"type":"snapshot","timestamp":"2026-06-12T00:00:00Z","metrics":{}}
 {"type":"warning","code":"gpu_unavailable","message":"Linux DRM sysfs did not report VRAM metrics"}
 {"type":"error","code":"collection_failed","message":"Timed out while collecting metrics"}
@@ -419,6 +433,8 @@ Use Rust unit tests for:
 
 - local provider parsing and normalization
 - remote command output parsing for Linux, macOS, and Windows where command providers exist
+- disk mount filtering and aggregate capacity normalization
+- Linux helper GPU fallback order: DRM/sysfs, NVIDIA procfs, then dynamically loaded NVML
 - OS/architecture detection parsing
 - helper manifest validation
 - NDJSON event parsing and validation

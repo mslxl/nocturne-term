@@ -7,6 +7,7 @@ import { hasTauriRuntime } from "$lib/tauri/runtime";
 import { unwrapCommand } from "$lib/terminal/commands";
 import {
   createResourceMonitorStore,
+  ResourceProviderPendingError,
   type ResourceCollection,
   type ResourceAvailableMetric,
   type ResourceMetric,
@@ -95,6 +96,10 @@ function collectionFromSnapshot(
   ownerToolTabId: string,
   snapshot: ResourceMonitorSnapshot,
 ): ResourceCollection {
+  const pendingReason = resourceHelperUploadPendingReason(snapshot);
+  if (pendingReason) {
+    throw new ResourceProviderPendingError(pendingReason);
+  }
   return {
     ownerToolTabId,
     provider: snapshot.provider,
@@ -103,6 +108,19 @@ function collectionFromSnapshot(
       snapshot.metrics.map((metric) => [metric.metric, metricFromSnapshotMetric(metric)]),
     ) as ResourceCollection["metrics"],
   };
+}
+
+const RESOURCE_HELPER_UPLOAD_PENDING_REASON = "Waiting for Resource Monitor helper upload confirmation";
+
+function resourceHelperUploadPendingReason(snapshot: ResourceMonitorSnapshot): string | null {
+  if (snapshot.provider !== "unavailable resource provider" || snapshot.metrics.length === 0) {
+    return null;
+  }
+  const reasons = snapshot.metrics.map((metric) => metric.reason);
+  if (reasons.every((reason) => reason === RESOURCE_HELPER_UPLOAD_PENDING_REASON)) {
+    return RESOURCE_HELPER_UPLOAD_PENDING_REASON;
+  }
+  return null;
 }
 
 export function collectionFromSnapshotForTest(
@@ -146,6 +164,18 @@ function metricFromSnapshotMetric(metric: ResourceMonitorMetric): ResourceMetric
 }
 
 function detailsFromSnapshotMetric(metric: ResourceMonitorMetric): ResourceAvailableMetric["details"] {
+  const metricWithDisk = metric as ResourceMonitorMetric & {
+    disks?: Array<{
+      id: string;
+      mount_point: string;
+      device_name: string;
+      file_system: string;
+      used: string;
+      total: string;
+      available: string;
+      percent: number;
+    }>;
+  };
   if (metric.metric === "cpu" && metric.cores.length > 0) {
     return {
       cores: metric.cores.map((percent, index) => {
@@ -163,15 +193,39 @@ function detailsFromSnapshotMetric(metric: ResourceMonitorMetric): ResourceAvail
   if (metric.metric === "gpu" && metric.gpus.length > 0) {
     return {
       gpus: metric.gpus.map((gpu, index) => {
-        if (gpu.compute_percent === null) {
-          throw new Error(`resource metric gpu.devices[${index}].compute_percent is null`);
-        }
-        return {
+        const gpuWithReason = gpu as typeof gpu & { compute_unavailable_reason?: string | null };
+        const sample = {
           id: gpu.id,
           label: gpu.label,
           computePercent: gpu.compute_percent,
           memoryUsed: numberFromDecimalString(gpu.memory_used, `gpu.devices[${index}].memory_used`),
           memoryTotal: numberFromDecimalString(gpu.memory_total, `gpu.devices[${index}].memory_total`),
+        };
+        if (gpuWithReason.compute_unavailable_reason) {
+          return {
+            ...sample,
+            computeUnavailableReason: gpuWithReason.compute_unavailable_reason,
+          };
+        }
+        return sample;
+      }),
+    };
+  }
+  if (metric.metric === "disk" && (metricWithDisk.disks?.length ?? 0) > 0) {
+    return {
+      disks: metricWithDisk.disks!.map((disk, index) => {
+        if (disk.percent === null) {
+          throw new Error(`resource metric disk.mounts[${index}].percent is null`);
+        }
+        return {
+          id: disk.id,
+          mountPoint: disk.mount_point,
+          deviceName: disk.device_name,
+          fileSystem: disk.file_system,
+          used: numberFromDecimalString(disk.used, `disk.mounts[${index}].used`),
+          total: numberFromDecimalString(disk.total, `disk.mounts[${index}].total`),
+          available: numberFromDecimalString(disk.available, `disk.mounts[${index}].available`),
+          percent: disk.percent,
         };
       }),
     };

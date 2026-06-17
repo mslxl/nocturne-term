@@ -5,7 +5,7 @@
  * Verifies Resource Monitor metric panel ordering.
  *
  * Operation:
- * Reorders the CPU, Memory, Swap, and GPU metric order by moving one metric
+ * Reorders the CPU, Memory, Swap, GPU, and Disk metric order by moving one metric
  * before another, repeats a no-op self move, and attempts invalid reorder
  * operations with missing metric identifiers.
  *
@@ -20,13 +20,14 @@ import { defaultResourceMetricOrder, reorderResourceMetricOrder } from "../src/l
 
 describe("Resource Monitor metric panel order", () => {
   it("moves a dragged metric before the target metric", () => {
+    assert.deepEqual(defaultResourceMetricOrder, ["cpu", "memory", "swap", "gpu", "disk"]);
     assert.deepEqual(
       reorderResourceMetricOrder(defaultResourceMetricOrder, "gpu", "memory"),
-      ["cpu", "gpu", "memory", "swap"],
+      ["cpu", "gpu", "memory", "swap", "disk"],
     );
     assert.deepEqual(
-      reorderResourceMetricOrder(["cpu", "gpu", "memory", "swap"], "cpu", "swap"),
-      ["gpu", "memory", "cpu", "swap"],
+      reorderResourceMetricOrder(["cpu", "gpu", "memory", "swap", "disk"], "cpu", "swap"),
+      ["gpu", "memory", "cpu", "swap", "disk"],
     );
   });
 

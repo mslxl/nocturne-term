@@ -24,6 +24,7 @@ export type ResourceMetricRow = {
   collapsible: boolean;
   expanded: boolean;
   children: ResourceMetricChildRow[];
+  progressPercent?: number;
 };
 
 export type ResourceMetricChildRow = {
@@ -32,6 +33,7 @@ export type ResourceMetricChildRow = {
   primary: string;
   auxiliary: string;
   history: ResourceMetricHistory | null;
+  progressPercent?: number;
 };
 
 export type ResourceMetricHistory = {
@@ -96,7 +98,7 @@ function rowForMetric(input: {
     });
   }
 
-  const history = historyForSamples(input.historySamples);
+  const history = input.metric === "disk" ? null : historyForSamples(input.historySamples);
   const children = childRowsForMetric(input.metric, input.sample);
   const collapsible = children.length > 0;
   return {
@@ -111,6 +113,7 @@ function rowForMetric(input: {
     collapsible,
     expanded: collapsible && input.expanded,
     children,
+    progressPercent: input.metric === "disk" ? input.sample.percent : undefined,
   };
 }
 
@@ -153,12 +156,30 @@ function childRowsForMetric(
     return (sample.details?.gpus ?? []).map((gpu) => ({
       id: `gpu-${gpu.id}`,
       label: gpu.label,
-      primary: `${formatPercent(gpu.computePercent)}%`,
-      auxiliary: `${formatBytes(gpu.memoryUsed)} / ${formatBytes(gpu.memoryTotal)} VRAM`,
-      history: {
+      primary: gpu.computePercent === null ? "Compute unavailable" : `${formatPercent(gpu.computePercent)}%`,
+      auxiliary: [
+        `${formatBytes(gpu.memoryUsed)} / ${formatBytes(gpu.memoryTotal)} VRAM`,
+        gpu.computeUnavailableReason,
+      ].filter(Boolean).join(", "),
+      history: gpu.computePercent === null ? null : {
         points: [gpu.computePercent],
         label: "",
       },
+    }));
+  }
+  if (metric === "disk") {
+    return (sample.details?.disks ?? []).map((disk) => ({
+      id: `disk-${sanitizeId(disk.id)}`,
+      label: disk.mountPoint,
+      primary: `${formatPercent(disk.percent)}%`,
+      auxiliary: [
+        disk.deviceName,
+        disk.fileSystem,
+        `${formatBytes(disk.used)} / ${formatBytes(disk.total)}`,
+        `available ${formatBytes(disk.available)}`,
+      ].filter(Boolean).join(", "),
+      history: null,
+      progressPercent: disk.percent,
     }));
   }
   return [];
@@ -186,6 +207,9 @@ function auxiliaryText(sample: Extract<ResourceMetric, { status: "available" }>)
       ? `${gpuCount} ${gpuCount === 1 ? "GPU" : "GPUs"}, ${capacity}`
       : capacity;
   }
+  if (sample.metric === "disk") {
+    return `${formatBytes(sample.used)} / ${formatBytes(sample.total)}, available ${formatBytes(sample.available ?? sample.free ?? 0)}`;
+  }
   const secondary = sample.available !== undefined
     ? `available ${formatBytes(sample.available)}`
     : sample.free !== undefined
@@ -204,6 +228,8 @@ function metricLabel(metric: ResourceMetricId): string {
       return "Swap";
     case "gpu":
       return "GPU";
+    case "disk":
+      return "Disk";
   }
 }
 
@@ -225,4 +251,9 @@ function formatBytes(bytes: number): string {
     throw new Error(`missing byte unit for index ${unitIndex}`);
   }
   return `${formatted} ${unit}`;
+}
+
+function sanitizeId(value: string): string {
+  const sanitized = value.replace(/[^a-zA-Z0-9_-]+/g, "_");
+  return sanitized.length > 0 ? sanitized : "_";
 }

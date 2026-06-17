@@ -21,7 +21,9 @@
  * reuses the Files SSH command helpers instead of duplicating command execution
  * code. When Host `resources.remote_provider` is `system_commands`, remote
  * collection returns the system-command snapshot before helper bytes are loaded
- * or uploaded.
+ * or uploaded, and the frontend treats a pending helper upload confirmation as
+ * a skipped refresh rather than replacing all metric rows with the pending
+ * message.
  */
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
@@ -62,5 +64,11 @@ describe("Resource Monitor remote helper source", () => {
     assert.doesNotMatch(resources, /latest/);
     assert.match(files, /pub\(crate\) fn run_remote_command/);
     assert.match(files, /pub\(crate\) fn shell_quote/);
+
+    const runtime = readFileSync(resolve("src/lib/resources/runtime.ts"), "utf8");
+    const store = readFileSync(resolve("src/lib/resources/store.ts"), "utf8");
+    assert.match(runtime, /ResourceProviderPendingError/);
+    assert.match(runtime, /resourceHelperUploadPendingReason/);
+    assert.match(store, /skipped_provider_pending/);
   });
 });

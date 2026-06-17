@@ -407,7 +407,7 @@ export type LocalConnectionConfig = {
 	env: { [key in string]: string },
 };
 
-export type LocalResourceMetricKind = "cpu" | "memory" | "swap" | "gpu";
+export type LocalResourceMetricKind = "cpu" | "memory" | "swap" | "gpu" | "disk";
 
 export type MainConfigDocument = {
 	root: ConfigTable,
@@ -468,10 +468,22 @@ export type ResourceMonitorCollectInput = {
 	tool_tab_id: string,
 };
 
+export type ResourceMonitorDiskMount = {
+	id: string,
+	mount_point: string,
+	device_name: string,
+	file_system: string,
+	used: string,
+	total: string,
+	available: string,
+	percent: number | null,
+};
+
 export type ResourceMonitorGpuDevice = {
 	id: string,
 	label: string,
 	compute_percent: number | null,
+	compute_unavailable_reason: string | null,
 	memory_used: string,
 	memory_total: string,
 };
@@ -487,6 +499,7 @@ export type ResourceMonitorMetric = {
 	reason: string | null,
 	cores: (number | null)[],
 	gpus: ResourceMonitorGpuDevice[],
+	disks: ResourceMonitorDiskMount[],
 };
 
 export type ResourceMonitorSnapshot = {

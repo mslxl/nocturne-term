@@ -10,7 +10,7 @@
  *
  * Expected:
  * The local provider does not start an external agent, labels itself as the
- * local provider, and returns exactly one CPU, memory, swap, and GPU
+ * local provider, and returns exactly one CPU, memory, swap, GPU, and Disk
  * metric so the frontend can render a first local sample without waiting
  * forever.
  */
@@ -38,6 +38,7 @@ fn local_resource_provider_collects_all_metric_kinds_without_external_agent() {
             LocalResourceMetricKind::Memory,
             LocalResourceMetricKind::Swap,
             LocalResourceMetricKind::Gpu,
+            LocalResourceMetricKind::Disk,
         ],
     );
 }
