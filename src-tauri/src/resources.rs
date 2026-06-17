@@ -371,6 +371,7 @@ pub enum ResourceHelperDeploymentDecision {
 pub struct ResourceHelperDeploymentMemory {
     verified: BTreeMap<String, ResourceHelperManifest>,
     canceled_prompts: BTreeMap<String, String>,
+    pending_prompts: BTreeMap<String, String>,
 }
 
 impl ResourceHelperDeploymentMemory {
@@ -399,6 +400,37 @@ impl ResourceHelperDeploymentMemory {
 
     pub fn has_canceled_prompt(&self, host_id: &str, manifest: &ResourceHelperManifest) -> bool {
         self.canceled_prompts.get(host_id) == Some(&manifest.sha256)
+    }
+
+    pub fn record_pending_prompt(
+        &mut self,
+        host_id: impl Into<String>,
+        manifest: ResourceHelperManifest,
+    ) -> bool {
+        use std::collections::btree_map::Entry;
+
+        let host_id = host_id.into();
+        match self.pending_prompts.entry(host_id) {
+            Entry::Occupied(entry) if entry.get() == &manifest.sha256 => false,
+            Entry::Occupied(mut entry) => {
+                entry.insert(manifest.sha256);
+                true
+            }
+            Entry::Vacant(entry) => {
+                entry.insert(manifest.sha256);
+                true
+            }
+        }
+    }
+
+    pub fn clear_pending_prompt(&mut self, host_id: &str, manifest: &ResourceHelperManifest) {
+        if self.pending_prompts.get(host_id) == Some(&manifest.sha256) {
+            self.pending_prompts.remove(host_id);
+        }
+    }
+
+    pub fn has_pending_prompt(&self, host_id: &str, manifest: &ResourceHelperManifest) -> bool {
+        self.pending_prompts.get(host_id) == Some(&manifest.sha256)
     }
 }
 
@@ -780,6 +812,11 @@ fn deploy_resource_helper_if_needed(
                 reason: "Resource Monitor helper upload was canceled by the user".to_string(),
             });
         }
+        if memory_guard.has_pending_prompt(&host.id, &plan.manifest) {
+            return Ok(ResourceHelperDeploymentRuntime::Unavailable {
+                reason: "Waiting for Resource Monitor helper upload confirmation".to_string(),
+            });
+        }
     }
 
     let decision = decide_resource_helper_deployment(
@@ -796,19 +833,30 @@ fn deploy_resource_helper_if_needed(
         ResourceHelperDeploymentDecision::Unavailable { reason } => {
             return Ok(ResourceHelperDeploymentRuntime::Unavailable { reason });
         }
-        ResourceHelperDeploymentDecision::Prompt(prompt)
-            if !confirm_resource_helper_upload(app, &prompt) =>
-        {
-            memory
+        ResourceHelperDeploymentDecision::Prompt(prompt) => {
+            {
+                let mut memory_guard = memory
+                    .lock()
+                    .map_err(|_| invalid_error("resource helper deployment memory is poisoned"))?;
+                if !memory_guard.record_pending_prompt(&host.id, plan.manifest.clone()) {
+                    return Ok(ResourceHelperDeploymentRuntime::Unavailable {
+                        reason: "Waiting for Resource Monitor helper upload confirmation".to_string(),
+                    });
+                }
+            }
+            let confirmed = confirm_resource_helper_upload(app, &prompt);
+            let mut memory_guard = memory
                 .lock()
-                .map_err(|_| invalid_error("resource helper deployment memory is poisoned"))?
-                .record_canceled_prompt(&host.id, plan.manifest.clone());
-            return Ok(ResourceHelperDeploymentRuntime::Unavailable {
-                reason: "Resource Monitor helper upload was canceled by the user".to_string(),
-            });
+                .map_err(|_| invalid_error("resource helper deployment memory is poisoned"))?;
+            memory_guard.clear_pending_prompt(&host.id, &plan.manifest);
+            if !confirmed {
+                memory_guard.record_canceled_prompt(&host.id, plan.manifest.clone());
+                return Ok(ResourceHelperDeploymentRuntime::Unavailable {
+                    reason: "Resource Monitor helper upload was canceled by the user".to_string(),
+                });
+            }
         }
-        ResourceHelperDeploymentDecision::Prompt(_)
-        | ResourceHelperDeploymentDecision::Upload { .. } => {}
+        ResourceHelperDeploymentDecision::Upload { .. } => {}
     }
 
     deploy_resource_helper(connection, plan, &home)?;

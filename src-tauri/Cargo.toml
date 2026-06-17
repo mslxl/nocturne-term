@@ -98,6 +98,10 @@ path = "../tests/files-ripgrep-search.rs"
 name = "files-ripgrep-helper-deployment"
 path = "../tests/files-ripgrep-helper-deployment.rs"
 
+[[test]]
+name = "resource-monitor-helper-prompt-memory"
+path = "../tests/resource-monitor-helper-prompt-memory.rs"
+
 [profile.release]
 codegen-units = 1
 lto = "thin"

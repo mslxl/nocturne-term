@@ -14,12 +14,14 @@
  * provider, remote collection resolves a target, loads bundled helper bytes or
  * a same-tag download plan when the configured provider allows the managed
  * agent, reads remote provider mode from Host resource config, applies the
- * unified remote helper policy before deployment, deploys the helper over SFTP
- * only after policy approval, executes the helper, parses NDJSON, and reuses
- * the Files SSH command helpers instead of duplicating command execution code.
- * When Host `resources.remote_provider` is `system_commands`, remote collection
- * returns the system-command snapshot before helper bytes are loaded or
- * uploaded.
+ * unified remote helper policy before deployment, records a pending helper
+ * upload prompt before opening the blocking dialog so refresh ticks cannot open
+ * duplicate dialogs while the user has not answered, deploys the helper over
+ * SFTP only after policy approval, executes the helper, parses NDJSON, and
+ * reuses the Files SSH command helpers instead of duplicating command execution
+ * code. When Host `resources.remote_provider` is `system_commands`, remote
+ * collection returns the system-command snapshot before helper bytes are loaded
+ * or uploaded.
  */
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
@@ -45,7 +47,11 @@ describe("Resource Monitor remote helper source", () => {
     assert.match(resources, /resource_helper_policy\(&app\)\?/);
     assert.match(resources, /fn confirm_resource_helper_upload\(app: &AppHandle, prompt: &ResourceHelperPrompt\)/);
     assert.match(resources, /ResourceHelperPolicy::Ask/);
-    assert.match(resources, /if !confirm_resource_helper_upload\(app, &prompt\)/);
+    assert.match(resources, /record_pending_prompt\(&host\.id, plan\.manifest\.clone\(\)\)/);
+    assert.match(resources, /has_pending_prompt\(&host\.id, &plan\.manifest\)/);
+    assert.match(resources, /Waiting for Resource Monitor helper upload confirmation/);
+    assert.match(resources, /clear_pending_prompt\(&host\.id, &plan\.manifest\)/);
+    assert.match(resources, /let confirmed = confirm_resource_helper_upload\(app, &prompt\)/);
     assert.match(resources, /Resource Monitor helper upload was canceled by the user/);
     assert.match(resources, /deploy_resource_helper_if_needed/);
     assert.match(resources, /parse_resource_monitor_agent_ndjson/);

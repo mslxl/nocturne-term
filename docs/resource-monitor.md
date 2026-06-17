@@ -320,6 +320,11 @@ Deployment rules:
   Nocturne remembers that cancellation for the current Host and helper hash so
   visibility-driven refresh ticks do not reopen the same dialog indefinitely.
   Changing the helper hash or Host may prompt again.
+- If the remote helper policy is `Ask` and an upload prompt is already open,
+  Nocturne remembers that pending prompt for the current Host and helper hash.
+  Later refresh ticks must report that helper upload confirmation is pending
+  instead of opening additional dialogs while the user has not answered the
+  first one.
 - Authentication never reuses credentials across Workspaces; deployment still uses the current Workspace's encrypted temporary credentials.
 - Closing a Workspace does not delete an uploaded helper.
 - If a remote helper's manifest or hash does not match the bundled helper, Nocturne validates and uploads again according to helper policy.
