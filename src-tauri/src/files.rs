@@ -2,7 +2,6 @@ use std::{
     collections::{BTreeMap, HashSet},
     fs,
     io::{Cursor, Read, Write},
-    net::TcpStream,
     path::{Path, PathBuf},
     process::Command,
     sync::{Arc, Mutex, OnceLock},
@@ -28,10 +27,7 @@ use crate::{
         ResourceHelperBytesSource, ResourceHelperDownloadPlan, ResourceHelperManifest,
         ResourceHelperUploadPlan,
     },
-    terminal::{
-        authenticate_ssh_session, connect_proxy_jump_chain, default_ssh_username,
-        ssh_network_hostname, verify_ssh_host_key, SshWorkerInput,
-    },
+    terminal::{connect_authenticated_ssh_session, default_ssh_username, SshWorkerInput},
     types::{
         ConnectionHostEntry, ConnectionHostSource, ConnectionProtocol, FileChmodInput,
         FileCreateDirectoryInput, FileEntry, FileEntryKind, FileListInput, FileListResult,
@@ -39,7 +35,7 @@ use crate::{
         FileProviderCapabilities, FileProviderInfo, FileProviderKind, FileRenameInput,
         FileSearchInput, FileSearchMatch, FileSearchMatchRange, FileSearchMode, FileSearchResult,
         FileTrashInfo, FileTrashInfoInput, RemoteResourceTargetArch, RemoteResourceTargetOs,
-        RemoteSearchHelperInfo, RemoteSearchHelperInput, SshConnectionConfig,
+        RemoteSearchHelperInfo, RemoteSearchHelperInput,
     },
     workspace,
     workspace_ssh::connection_host_auth_target,
@@ -1032,84 +1028,18 @@ pub(crate) fn connect_sftp_for_host(
         update_changed_host_key,
         credential,
         save_credential,
+        verification_scope: crate::terminal::SshVerificationScope::Workspace,
     };
     connect_sftp_session(&worker_input)
 }
 
 fn connect_sftp_session(input: &SshWorkerInput) -> Result<SftpConnection> {
-    let mut jump_guards = Vec::new();
-    let tcp = if let Some(proxy_jump_chain) = input.proxy_jump_chain.as_deref() {
-        let chain = connect_proxy_jump_chain(input, proxy_jump_chain)?;
-        jump_guards = chain.guards;
-        chain.stream
-    } else if let Some(proxy_jump) = input.ssh.proxy_jump.as_deref() {
-        let jumps = parse_sftp_proxy_jump_chain(proxy_jump)?;
-        let chain = connect_proxy_jump_chain(input, &jumps)?;
-        jump_guards = chain.guards;
-        chain.stream
-    } else {
-        TcpStream::connect((ssh_network_hostname(&input.ssh.hostname), input.ssh.port))
-            .map_err(terminal_error)?
-    };
-    tcp.set_nodelay(true).map_err(terminal_error)?;
-    let mut session = Session::new().map_err(terminal_error)?;
-    session.set_tcp_stream(tcp);
-    session.handshake().map_err(terminal_error)?;
-    verify_ssh_host_key(&session, input)?;
-    authenticate_ssh_session(&session, input)?;
-    session.set_blocking(true);
+    let authenticated = connect_authenticated_ssh_session(input)?;
+    authenticated.session.set_blocking(true);
     Ok(SftpConnection {
-        session,
-        _jump_guards: jump_guards,
+        session: authenticated.session,
+        _jump_guards: authenticated.jump_guards,
     })
-}
-
-fn parse_sftp_proxy_jump_chain(value: &str) -> Result<Vec<SshConnectionConfig>> {
-    value
-        .split(',')
-        .map(str::trim)
-        .filter(|item| !item.is_empty())
-        .map(|item| {
-            let (username, host_port) = match item.rsplit_once('@') {
-                Some((user, host)) if !user.trim().is_empty() => (Some(user.to_string()), host),
-                _ => (None, item),
-            };
-            let (hostname, port) = parse_host_port(host_port, 22)?;
-            Ok(SshConnectionConfig {
-                hostname,
-                port,
-                username,
-                identity_file: None,
-                proxy_jump: None,
-                forward_agent: false,
-                server_alive_interval: None,
-            })
-        })
-        .collect()
-}
-
-fn parse_host_port(value: &str, default_port: u16) -> Result<(String, u16)> {
-    if let Some(rest) = value.strip_prefix('[') {
-        if let Some((host, port_text)) = rest.split_once("]:") {
-            let port = port_text
-                .parse::<u16>()
-                .map_err(|_| invalid_error("invalid ProxyJump port"))?;
-            return Ok((host.to_string(), port));
-        }
-        if let Some(host) = rest.strip_suffix(']').filter(|host| host.contains(':')) {
-            return Ok((host.to_string(), default_port));
-        }
-        return Err(invalid_error("invalid bracketed host:port"));
-    }
-    if let Some((host, port_text)) = value.rsplit_once(':') {
-        if !host.contains(':') {
-            let port = port_text
-                .parse::<u16>()
-                .map_err(|_| invalid_error("invalid ProxyJump port"))?;
-            return Ok((host.to_string(), port));
-        }
-    }
-    Ok((value.to_string(), default_port))
 }
 
 pub(crate) struct RemoteCommandOutput {

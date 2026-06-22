@@ -968,7 +968,7 @@ pub(crate) async fn open_host_manager_window(app: AppHandle) -> Result<()> {
     open_host_manager(&app)
 }
 
-pub(crate) fn handle_window_event<R: Runtime>(window: &Window<R>, event: &WindowEvent) {
+pub(crate) fn handle_window_event(window: &Window, event: &WindowEvent) {
     if matches!(event, WindowEvent::Focused(true)) && is_main_window_label(window.label()) {
         let state =
             LAST_FOCUSED_MAIN_WINDOW.get_or_init(|| Mutex::new(MAIN_WINDOW_LABEL.to_string()));

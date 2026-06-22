@@ -1,5 +1,6 @@
 use std::{
     collections::{HashMap, VecDeque},
+    hash::Hash,
     sync::{Arc, Condvar, Mutex, OnceLock},
 };
 
@@ -16,7 +17,7 @@ use crate::{
     error::{terminal_error, Result},
     types::{
         SshAuthTarget, SshAuthTargetKind, SshCredentialInput, SshCredentialKind,
-        SshWorkspaceChallenge, WorkspaceSshVerificationRequiredEvent,
+        SshHostScopedChallenge, SshWorkspaceChallenge, WorkspaceSshVerificationRequiredEvent,
         WorkspaceSshVerificationResponse,
     },
 };
@@ -50,39 +51,50 @@ impl WorkspaceCredentialKey {
     }
 }
 
-struct WorkspaceEncryptedCredential {
+struct EncryptedTemporaryCredential {
     nonce: [u8; 12],
     ciphertext: Vec<u8>,
 }
 
-struct WorkspaceSecretScope {
+struct EncryptedSecretScope<K> {
     key: Zeroizing<[u8; 32]>,
-    credentials: HashMap<WorkspaceCredentialKey, WorkspaceEncryptedCredential>,
+    credentials: HashMap<K, EncryptedTemporaryCredential>,
+}
+
+pub(crate) struct ScopedEncryptedCredentialStore<K> {
+    scopes: HashMap<String, EncryptedSecretScope<K>>,
+}
+
+impl<K> Default for ScopedEncryptedCredentialStore<K> {
+    fn default() -> Self {
+        Self {
+            scopes: HashMap::new(),
+        }
+    }
 }
 
 #[derive(Default)]
 pub(crate) struct WorkspaceEncryptedCredentialStore {
-    scopes: HashMap<String, WorkspaceSecretScope>,
+    inner: ScopedEncryptedCredentialStore<WorkspaceCredentialKey>,
 }
 
-impl WorkspaceEncryptedCredentialStore {
-    pub(crate) fn put(
-        &mut self,
-        key: WorkspaceCredentialKey,
-        value: Zeroizing<String>,
-    ) -> Result<()> {
+impl<K> ScopedEncryptedCredentialStore<K>
+where
+    K: Eq + Hash,
+{
+    pub(crate) fn put(&mut self, scope_id: &str, key: K, value: Zeroizing<String>) -> Result<()> {
         let scope = self
             .scopes
-            .entry(key.workspace_id.clone())
-            .or_insert_with(WorkspaceSecretScope::new);
+            .entry(scope_id.to_string())
+            .or_insert_with(EncryptedSecretScope::new);
         let cipher = scope.cipher();
         let nonce = ChaCha20Poly1305::generate_nonce(&mut OsRng);
-        let ciphertext = cipher.encrypt(&nonce, value.as_bytes()).map_err(|_| {
-            terminal_error("failed to encrypt Workspace encrypted temporary credential")
-        })?;
+        let ciphertext = cipher
+            .encrypt(&nonce, value.as_bytes())
+            .map_err(|_| terminal_error("failed to encrypt temporary SSH credential"))?;
         scope.credentials.insert(
             key,
-            WorkspaceEncryptedCredential {
+            EncryptedTemporaryCredential {
                 nonce: nonce.into(),
                 ciphertext,
             },
@@ -90,8 +102,8 @@ impl WorkspaceEncryptedCredentialStore {
         Ok(())
     }
 
-    pub(crate) fn get(&self, key: &WorkspaceCredentialKey) -> Result<Option<Zeroizing<String>>> {
-        let Some(scope) = self.scopes.get(&key.workspace_id) else {
+    pub(crate) fn get(&self, scope_id: &str, key: &K) -> Result<Option<Zeroizing<String>>> {
+        let Some(scope) = self.scopes.get(scope_id) else {
             return Ok(None);
         };
         let Some(entry) = scope.credentials.get(key) else {
@@ -100,19 +112,15 @@ impl WorkspaceEncryptedCredentialStore {
         let cipher = scope.cipher();
         let plaintext = cipher
             .decrypt(Nonce::from_slice(&entry.nonce), entry.ciphertext.as_ref())
-            .map_err(|_| {
-                terminal_error("failed to decrypt Workspace encrypted temporary credential")
-            })?;
+            .map_err(|_| terminal_error("failed to decrypt temporary SSH credential"))?;
         String::from_utf8(plaintext)
             .map(Zeroizing::new)
             .map(Some)
-            .map_err(|_| {
-                terminal_error("Workspace encrypted temporary credential is not valid UTF-8")
-            })
+            .map_err(|_| terminal_error("temporary SSH credential is not valid UTF-8"))
     }
 
-    pub(crate) fn remove(&mut self, key: &WorkspaceCredentialKey) {
-        if let Some(scope) = self.scopes.get_mut(&key.workspace_id) {
+    pub(crate) fn remove(&mut self, scope_id: &str, key: &K) {
+        if let Some(scope) = self.scopes.get_mut(scope_id) {
             if let Some(mut entry) = scope.credentials.remove(key) {
                 entry.ciphertext.zeroize();
                 entry.nonce.zeroize();
@@ -120,8 +128,8 @@ impl WorkspaceEncryptedCredentialStore {
         }
     }
 
-    pub(crate) fn remove_workspace(&mut self, workspace_id: &str) {
-        if let Some(mut scope) = self.scopes.remove(workspace_id) {
+    pub(crate) fn remove_scope(&mut self, scope_id: &str) {
+        if let Some(mut scope) = self.scopes.remove(scope_id) {
             scope.key.zeroize();
             for (_, mut entry) in scope.credentials.drain() {
                 entry.ciphertext.zeroize();
@@ -131,16 +139,44 @@ impl WorkspaceEncryptedCredentialStore {
     }
 
     #[cfg(test)]
-    fn raw_ciphertext_for_test(&self, key: &WorkspaceCredentialKey) -> Option<&[u8]> {
+    pub(crate) fn raw_ciphertext_for_test(&self, scope_id: &str, key: &K) -> Option<&[u8]> {
         self.scopes
-            .get(&key.workspace_id)?
+            .get(scope_id)?
             .credentials
             .get(key)
             .map(|entry| entry.ciphertext.as_slice())
     }
 }
 
-impl WorkspaceSecretScope {
+impl WorkspaceEncryptedCredentialStore {
+    pub(crate) fn put(
+        &mut self,
+        key: WorkspaceCredentialKey,
+        value: Zeroizing<String>,
+    ) -> Result<()> {
+        let scope_id = key.workspace_id.clone();
+        self.inner.put(&scope_id, key, value)
+    }
+
+    pub(crate) fn get(&self, key: &WorkspaceCredentialKey) -> Result<Option<Zeroizing<String>>> {
+        self.inner.get(&key.workspace_id, key)
+    }
+
+    pub(crate) fn remove(&mut self, key: &WorkspaceCredentialKey) {
+        self.inner.remove(&key.workspace_id, key);
+    }
+
+    pub(crate) fn remove_workspace(&mut self, workspace_id: &str) {
+        self.inner.remove_scope(workspace_id);
+    }
+
+    #[cfg(test)]
+    fn raw_ciphertext_for_test(&self, key: &WorkspaceCredentialKey) -> Option<&[u8]> {
+        self.inner.raw_ciphertext_for_test(&key.workspace_id, key)
+    }
+}
+
+impl<K> EncryptedSecretScope<K> {
     fn new() -> Self {
         let mut key = [0u8; 32];
         let generated = ChaCha20Poly1305::generate_key(&mut OsRng);
@@ -163,6 +199,11 @@ pub(crate) struct WorkspaceSshCoordinator {
 }
 
 #[derive(Default)]
+pub(crate) struct HostScopedSshCoordinator {
+    verifications: Mutex<HostVerificationStore>,
+}
+
+#[derive(Default)]
 struct WorkspaceVerificationStore {
     next_id: u64,
     by_workspace: HashMap<String, WorkspaceVerificationQueue>,
@@ -182,6 +223,26 @@ struct WorkspaceVerificationRequest {
     cv: Condvar,
 }
 
+#[derive(Default)]
+struct HostVerificationStore {
+    next_id: u64,
+    by_host: HashMap<String, HostVerificationQueue>,
+}
+
+#[derive(Default)]
+struct HostVerificationQueue {
+    active: Option<Arc<HostVerificationRequest>>,
+    queued: VecDeque<Arc<HostVerificationRequest>>,
+}
+
+struct HostVerificationRequest {
+    id: String,
+    host_id: String,
+    challenge: SshHostScopedChallenge,
+    state: Mutex<WorkspaceVerificationState>,
+    cv: Condvar,
+}
+
 struct WorkspaceVerificationState {
     emitted: bool,
     response: Option<WorkspaceSshVerificationResponse>,
@@ -195,10 +256,17 @@ impl WorkspaceVerificationStore {
 }
 
 static WORKSPACE_SSH_COORDINATOR: OnceLock<Arc<WorkspaceSshCoordinator>> = OnceLock::new();
+static HOST_SCOPED_SSH_COORDINATOR: OnceLock<Arc<HostScopedSshCoordinator>> = OnceLock::new();
 
 pub(crate) fn workspace_ssh_coordinator() -> Arc<WorkspaceSshCoordinator> {
     WORKSPACE_SSH_COORDINATOR
         .get_or_init(|| Arc::new(WorkspaceSshCoordinator::default()))
+        .clone()
+}
+
+pub(crate) fn host_scoped_ssh_coordinator() -> Arc<HostScopedSshCoordinator> {
+    HOST_SCOPED_SSH_COORDINATOR
+        .get_or_init(|| Arc::new(HostScopedSshCoordinator::default()))
         .clone()
 }
 
@@ -450,11 +518,189 @@ impl WorkspaceSshCoordinator {
     }
 }
 
+impl HostScopedSshCoordinator {
+    pub(crate) fn request_verification(
+        &self,
+        app: Option<&AppHandle>,
+        host_id: &str,
+        challenge: SshHostScopedChallenge,
+        emit: fn(&AppHandle, String, String, SshHostScopedChallenge) -> Result<()>,
+    ) -> Result<WorkspaceSshVerificationResponse> {
+        let request = {
+            let mut store = self
+                .verifications
+                .lock()
+                .map_err(|_| terminal_error("Host SSH verification lock poisoned"))?;
+            if let Some(existing) = store
+                .by_host
+                .get(host_id)
+                .and_then(|queue| queue.find_identical(&challenge))
+            {
+                existing
+            } else {
+                let next_id = store
+                    .next_verification_id()
+                    .ok_or_else(|| terminal_error("Host SSH verification id overflow"))?;
+                let queue = store.by_host.entry(host_id.to_string()).or_default();
+                let request = Arc::new(HostVerificationRequest::new(
+                    next_id,
+                    host_id.to_string(),
+                    challenge,
+                ));
+                if queue.active.is_none() {
+                    queue.active = Some(request.clone());
+                } else {
+                    queue.queued.push_back(request.clone());
+                }
+                request
+            }
+        };
+
+        self.emit_verification_if_active(app, host_id, &request, emit)?;
+        let response = request.wait()?;
+        self.finish_verification(app, host_id, &request, emit)?;
+        Ok(response)
+    }
+
+    pub(crate) fn submit_verification(
+        &self,
+        host_id: &str,
+        verification_id: &str,
+        response: WorkspaceSshVerificationResponse,
+    ) -> Result<()> {
+        let request = {
+            let store = self
+                .verifications
+                .lock()
+                .map_err(|_| terminal_error("Host SSH verification lock poisoned"))?;
+            let Some(queue) = store.by_host.get(host_id) else {
+                return Err(terminal_error(format!(
+                    "Host SSH verification {verification_id} not found"
+                )));
+            };
+            let Some(active) = queue.active.as_ref() else {
+                return Err(terminal_error(format!(
+                    "Host SSH verification {verification_id} is not active"
+                )));
+            };
+            if active.id != verification_id {
+                return Err(terminal_error(format!(
+                    "Host SSH verification {verification_id} is not the active verification"
+                )));
+            }
+            active.clone()
+        };
+        request.complete(response)
+    }
+
+    pub(crate) fn cancel_host(&self, host_id: &str) -> Result<()> {
+        let mut store = self
+            .verifications
+            .lock()
+            .map_err(|_| terminal_error("Host SSH verification lock poisoned"))?;
+        if let Some(queue) = store.by_host.remove(host_id) {
+            if let Some(active) = queue.active {
+                active.cancel();
+            }
+            for request in queue.queued {
+                request.cancel();
+            }
+        }
+        Ok(())
+    }
+
+    fn emit_verification_if_active(
+        &self,
+        app: Option<&AppHandle>,
+        host_id: &str,
+        request: &Arc<HostVerificationRequest>,
+        emit: fn(&AppHandle, String, String, SshHostScopedChallenge) -> Result<()>,
+    ) -> Result<()> {
+        let should_emit = {
+            let store = self
+                .verifications
+                .lock()
+                .map_err(|_| terminal_error("Host SSH verification lock poisoned"))?;
+            store
+                .by_host
+                .get(host_id)
+                .and_then(|queue| queue.active.as_ref())
+                .is_some_and(|active| Arc::ptr_eq(active, request))
+        };
+        if !should_emit || !request.mark_emitted()? {
+            return Ok(());
+        }
+        if let Some(app) = app {
+            emit(
+                app,
+                request.host_id.clone(),
+                request.id.clone(),
+                request.challenge.clone(),
+            )?;
+        }
+        Ok(())
+    }
+
+    fn finish_verification(
+        &self,
+        app: Option<&AppHandle>,
+        host_id: &str,
+        request: &Arc<HostVerificationRequest>,
+        emit: fn(&AppHandle, String, String, SshHostScopedChallenge) -> Result<()>,
+    ) -> Result<()> {
+        let next = {
+            let mut store = self
+                .verifications
+                .lock()
+                .map_err(|_| terminal_error("Host SSH verification lock poisoned"))?;
+            let Some(queue) = store.by_host.get_mut(host_id) else {
+                return Ok(());
+            };
+            if queue
+                .active
+                .as_ref()
+                .is_some_and(|active| Arc::ptr_eq(active, request))
+            {
+                queue.active = queue.queued.pop_front();
+            }
+            let next = queue.active.clone();
+            if queue.active.is_none() && queue.queued.is_empty() {
+                store.by_host.remove(host_id);
+            }
+            next
+        };
+        if let Some(next) = next {
+            self.emit_verification_if_active(app, host_id, &next, emit)?;
+        }
+        Ok(())
+    }
+}
+
 impl WorkspaceVerificationQueue {
     fn find_identical(
         &self,
         challenge: &SshWorkspaceChallenge,
     ) -> Option<Arc<WorkspaceVerificationRequest>> {
+        self.active
+            .iter()
+            .chain(self.queued.iter())
+            .find(|request| request.challenge.same_verification(challenge))
+            .cloned()
+    }
+}
+
+impl HostVerificationStore {
+    fn next_verification_id(&mut self) -> Option<String> {
+        self.next_id = self.next_id.checked_add(1)?;
+        Some(format!("host-ssh-verify-{}", self.next_id))
+    }
+}
+
+impl HostVerificationQueue {
+    fn find_identical(
+        &self,
+        challenge: &SshHostScopedChallenge,
+    ) -> Option<Arc<HostVerificationRequest>> {
         self.active
             .iter()
             .chain(self.queued.iter())
@@ -531,6 +777,72 @@ impl WorkspaceVerificationRequest {
     }
 }
 
+impl HostVerificationRequest {
+    fn new(id: String, host_id: String, challenge: SshHostScopedChallenge) -> Self {
+        Self {
+            id,
+            host_id,
+            challenge,
+            state: Mutex::new(WorkspaceVerificationState {
+                emitted: false,
+                response: None,
+            }),
+            cv: Condvar::new(),
+        }
+    }
+
+    fn mark_emitted(&self) -> Result<bool> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| terminal_error("Host SSH verification lock poisoned"))?;
+        if state.emitted {
+            return Ok(false);
+        }
+        state.emitted = true;
+        Ok(true)
+    }
+
+    fn complete(&self, response: WorkspaceSshVerificationResponse) -> Result<()> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| terminal_error("Host SSH verification lock poisoned"))?;
+        if state.response.is_some() {
+            return Err(terminal_error("Host SSH verification already completed"));
+        }
+        state.response = Some(response);
+        self.cv.notify_all();
+        Ok(())
+    }
+
+    fn cancel(&self) {
+        if let Ok(mut state) = self.state.lock() {
+            if state.response.is_none() {
+                state.response = Some(WorkspaceSshVerificationResponse::Cancel);
+            }
+            self.cv.notify_all();
+        }
+    }
+
+    fn wait(&self) -> Result<WorkspaceSshVerificationResponse> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| terminal_error("Host SSH verification lock poisoned"))?;
+        while state.response.is_none() {
+            state = self
+                .cv
+                .wait(state)
+                .map_err(|_| terminal_error("Host SSH verification lock poisoned"))?;
+        }
+        Ok(state
+            .response
+            .clone()
+            .ok_or_else(|| terminal_error("Host SSH verification response missing"))?)
+    }
+}
+
 impl SshWorkspaceChallenge {
     pub(crate) fn workspace_id(&self) -> &str {
         match self {
@@ -556,6 +868,32 @@ impl SshWorkspaceChallenge {
             ) => {
                 left.workspace_id == right.workspace_id
                     && left.auth_target == right.auth_target
+                    && left.challenge_kind == right.challenge_kind
+                    && left.target == right.target
+                    && left.algorithm == right.algorithm
+                    && left.fingerprint == right.fingerprint
+            }
+            _ => false,
+        }
+    }
+}
+
+impl SshHostScopedChallenge {
+    fn same_verification(&self, other: &Self) -> bool {
+        match (self, other) {
+            (
+                SshHostScopedChallenge::Credential { challenge: left },
+                SshHostScopedChallenge::Credential { challenge: right },
+            ) => {
+                left.auth_target == right.auth_target
+                    && left.credential_kind == right.credential_kind
+                    && left.identity_file == right.identity_file
+            }
+            (
+                SshHostScopedChallenge::HostKey { challenge: left },
+                SshHostScopedChallenge::HostKey { challenge: right },
+            ) => {
+                left.auth_target == right.auth_target
                     && left.challenge_kind == right.challenge_kind
                     && left.target == right.target
                     && left.algorithm == right.algorithm
@@ -733,6 +1071,18 @@ mod tests {
         }
     }
 
+    fn host_credential_challenge(host_id: &str) -> SshHostScopedChallenge {
+        SshHostScopedChallenge::Credential {
+            challenge: SshCredentialChallenge {
+                workspace_id: format!("host-port-forward:{host_id}"),
+                source_tool_tab_id: None,
+                auth_target: target(&format!("connection-host:{host_id}")),
+                credential_kind: SshCredentialKind::Password,
+                identity_file: None,
+            },
+        }
+    }
+
     #[test]
     fn coordinator_deduplicates_identical_workspace_challenges() {
         let coordinator = WorkspaceSshCoordinator::default();
@@ -885,6 +1235,58 @@ mod tests {
         );
     }
 
+    #[test]
+    fn host_scoped_coordinator_deduplicates_by_host_without_workspace_scope() {
+        let coordinator = Arc::new(HostScopedSshCoordinator::default());
+        let first_coordinator = Arc::clone(&coordinator);
+        let second_coordinator = Arc::clone(&coordinator);
+        let first_challenge = host_credential_challenge("host-a");
+        let second_challenge = host_credential_challenge("host-a");
+
+        let first = std::thread::spawn(move || {
+            first_coordinator
+                .request_verification(None, "host-a", first_challenge, no_emit_host_verification)
+                .expect("first Host verification response")
+        });
+        let second = std::thread::spawn(move || {
+            second_coordinator
+                .request_verification(None, "host-a", second_challenge, no_emit_host_verification)
+                .expect("second Host verification response")
+        });
+
+        let verification_id = wait_for_active_host_verification_id(&coordinator, "host-a");
+        coordinator
+            .submit_verification(
+                "host-a",
+                &verification_id,
+                WorkspaceSshVerificationResponse::Credential {
+                    credential: SshCredentialInput {
+                        kind: SshCredentialKind::Password,
+                        value: "host-secret".to_string(),
+                    },
+                    save_credential: false,
+                },
+            )
+            .unwrap();
+
+        let first_response = first.join().expect("first waiter");
+        let second_response = second.join().expect("second waiter");
+        assert!(matches!(
+            first_response,
+            WorkspaceSshVerificationResponse::Credential {
+                credential: SshCredentialInput { value, .. },
+                save_credential: false,
+            } if value == "host-secret"
+        ));
+        assert!(matches!(
+            second_response,
+            WorkspaceSshVerificationResponse::Credential {
+                credential: SshCredentialInput { value, .. },
+                save_credential: false,
+            } if value == "host-secret"
+        ));
+    }
+
     fn wait_for_active_verification_id(
         coordinator: &WorkspaceSshCoordinator,
         workspace_id: &str,
@@ -908,5 +1310,39 @@ mod tests {
             );
             std::thread::sleep(Duration::from_millis(10));
         }
+    }
+
+    fn wait_for_active_host_verification_id(
+        coordinator: &HostScopedSshCoordinator,
+        host_id: &str,
+    ) -> String {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            {
+                let store = coordinator.verifications.lock().unwrap();
+                if let Some(id) = store
+                    .by_host
+                    .get(host_id)
+                    .and_then(|queue| queue.active.as_ref())
+                    .map(|request| request.id.clone())
+                {
+                    return id;
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "Host verification did not become active"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn no_emit_host_verification(
+        _app: &AppHandle,
+        _host_id: String,
+        _verification_id: String,
+        _challenge: SshHostScopedChallenge,
+    ) -> Result<()> {
+        Ok(())
     }
 }

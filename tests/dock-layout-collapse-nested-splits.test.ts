@@ -65,14 +65,14 @@ function workspaceLayoutSnapshot(): WorkspaceLayoutSnapshot {
           direction: "row",
           ratios: [0.28, 0.72],
           children: [
-            createDockGroup("group-files", "sidebar", [createOwnedSlot("slot-files", "tool-files")], "slot-files"),
+            createDockGroup("group-files", "side_panel", [createOwnedSlot("slot-files", "tool-files")], "slot-files"),
             {
               kind: "split",
               direction: "column",
               ratios: [0.78, 0.22],
               children: [
                 createDockGroup("group-terminal", "content", [createOwnedSlot("slot-terminal", "tool-terminal")], "slot-terminal"),
-                createDockGroup("group-transfers", "panel", [createOwnedSlot("slot-transfers", "tool-transfers")], "slot-transfers"),
+                createDockGroup("group-transfers", "side_panel", [createOwnedSlot("slot-transfers", "tool-transfers")], "slot-transfers"),
               ],
             },
           ],

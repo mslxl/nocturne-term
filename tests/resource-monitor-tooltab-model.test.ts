@@ -73,7 +73,7 @@ function createSnapshot(): WorkspaceLayoutSnapshot {
           ratios: [0.72, 0.28],
           children: [
             createDockGroup("group-content", "content", [createOwnedSlot("slot-terminal-a", "terminal-a")], "slot-terminal-a"),
-            createDockGroup("group-tools", "sidebar", [createOwnedSlot("slot-transfers-a", "transfers-a")], "slot-transfers-a"),
+            createDockGroup("group-tools", "side_panel", [createOwnedSlot("slot-transfers-a", "transfers-a")], "slot-transfers-a"),
           ],
         },
       },

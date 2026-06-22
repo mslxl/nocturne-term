@@ -13,6 +13,7 @@
     type AppConfigSnapshot,
     type ConnectionHostIcon,
     type PaneMenuEvent,
+    type PortForwardSshVerificationRequiredEvent,
     type TabBarOrientation,
     type TerminalSessionInfo,
     type TerminalSettings,
@@ -37,8 +38,10 @@
   import { mountDecorumTitlebarHost } from "$lib/window/decorum-titlebar";
   import { createWorkspaceStore } from "$lib/workspace/state.svelte";
   import { unwrapCommand } from "$lib/terminal/commands";
+  import { addNonLoopbackConfirmation } from "$lib/ports/editing";
   import FilesToolTab from "$lib/files/FilesToolTab.svelte";
   import { FILES_WORKSPACE_SSH_VERIFICATION_SUBMITTED_EVENT } from "$lib/files/workspace-verification";
+  import PortsToolTab from "$lib/ports/PortsToolTab.svelte";
   import ResourceMonitorToolTab from "$lib/resources/ResourceMonitorToolTab.svelte";
   import { DEFAULT_FILES_TOOLBAR_ACTION_IDS, normalizeFilesToolbarActionIds, type FilesToolbarActionId } from "$lib/files/toolbar-actions";
   import TransfersToolTab from "$lib/transfers/TransfersToolTab.svelte";
@@ -177,8 +180,10 @@
     updateChangedHostKey?: boolean;
   };
   type PendingSshCredential = {
+    scope: "workspace" | "port_forward";
     verificationId: string;
-    workspaceId: string;
+    workspaceId?: string;
+    hostId?: string;
     toolTabId: string | null;
     authTargetLabel: string;
     kind: SshCredentialKind;
@@ -302,6 +307,7 @@
   let transportStateUnlisten: undefined | (() => void);
   let configUnlisten: undefined | (() => void);
   let workspaceSshVerificationUnlisten: undefined | (() => void);
+  let portForwardSshVerificationUnlisten: undefined | (() => void);
   let paneMenuUnlisten: undefined | (() => void);
   let terminalMenuUnlisten: undefined | (() => void);
   let terminalMeasureContainer: HTMLDivElement;
@@ -388,6 +394,7 @@
   } | null>(null);
   const isHotModuleReplacement = import.meta.hot !== undefined;
   const workspaceStore = createWorkspaceStore();
+  const confirmedAutoOpenPortRules = new Set<string>();
 
   let activeTab = $derived(tabs.find((tab) => tab.id === activeId));
   let workspaceSnapshot = $derived(workspaceStore.snapshot);
@@ -632,13 +639,12 @@
 
   function firstToolGroupId(workspace: WorkspaceTabState): string | null {
     return (
-      firstGroupIdByRole(workspace.layout, "sidebar") ??
-      firstGroupIdByRole(workspace.layout, "panel") ??
+      firstGroupIdByRole(workspace.layout, "side_panel") ??
       firstContentGroupId(workspace)
     );
   }
 
-  function firstGroupIdByRole(layout: WorkspaceDockLayout, role: "content" | "panel" | "sidebar"): string | null {
+  function firstGroupIdByRole(layout: WorkspaceDockLayout, role: "content" | "side_panel"): string | null {
     if (layout.kind === "group") return dockGroupRole(layout) === role ? layout.id : null;
     return layout.children.map((child) => firstGroupIdByRole(child, role)).find((id): id is string => id !== null) ?? null;
   }
@@ -1049,6 +1055,10 @@
     return new Map((snapshot?.hosts ?? []).map((host) => [host.id, resolveHostIcon(host)]));
   }
 
+  function connectionHostForToolTab(tool: WorkspaceToolTab) {
+    return lastConfigSnapshot?.hosts.find((host) => host.id === tool.host_id) ?? null;
+  }
+
   function measureNewTerminal(cwd: string | null = null) {
     if (!settings) throw new Error("Terminal settings are not loaded");
     const measuredSize = measureTerminalFit(terminalMeasureContainer, settings, { cols: initialCols, rows: initialRows });
@@ -1279,6 +1289,8 @@
   async function closeWorkspace(id: string) {
     const canClose = await confirmWorkspaceTransferClose(id);
     if (!canClose) return;
+    const canClosePorts = await confirmWorkspacePortForwardClose(id);
+    if (!canClosePorts) return;
     await workspaceStore.dispatch({ kind: "close_workspace", workspace_id: id });
     await disposeTerminalRuntimesForWorkspace(id);
     const nextWorkspaceId = workspaceStore.snapshot?.active_workspace_id;
@@ -1287,9 +1299,12 @@
 
   async function closeOtherWorkspaces(id: string) {
     const ids = workspaceSnapshot?.workspaces.map((workspace) => workspace.id).filter((workspaceId) => workspaceId !== id) ?? [];
+    const confirmedPortHosts = new Set<string>();
     for (const workspaceId of ids) {
       const canClose = await confirmWorkspaceTransferClose(workspaceId);
       if (!canClose) return;
+      const canClosePorts = await confirmWorkspacePortForwardClose(workspaceId, ids, confirmedPortHosts);
+      if (!canClosePorts) return;
     }
     await workspaceStore.dispatch({ kind: "close_other_workspaces", workspace_id: id });
     for (const workspaceId of ids) {
@@ -1303,9 +1318,12 @@
     const index = workspaces.findIndex((workspace) => workspace.id === id);
     if (index < 0) return;
     const ids = workspaces.slice(index + 1).map((workspace) => workspace.id);
+    const confirmedPortHosts = new Set<string>();
     for (const workspaceId of ids) {
       const canClose = await confirmWorkspaceTransferClose(workspaceId);
       if (!canClose) return;
+      const canClosePorts = await confirmWorkspacePortForwardClose(workspaceId, ids, confirmedPortHosts);
+      if (!canClosePorts) return;
     }
     await workspaceStore.dispatch({ kind: "close_workspaces_to_right", workspace_id: id });
     for (const workspaceId of ids) {
@@ -1338,6 +1356,78 @@
       await unwrapCommand(commands.cancelTransferTask({ task_id: task.id }));
     }
     return true;
+  }
+
+  async function confirmWorkspacePortForwardClose(
+    workspaceId: string,
+    closingWorkspaceIds: string[] = [workspaceId],
+    confirmedHostIds = new Set<string>(),
+  ) {
+    if (!hasTauriRuntime()) return true;
+    const snapshot = workspaceSnapshot;
+    const workspace = snapshot?.workspaces.find((item) => item.id === workspaceId);
+    if (!snapshot || !workspace) return true;
+    if (confirmedHostIds.has(workspace.host_id)) return true;
+    const remainingSameHost = snapshot.workspaces.some(
+      (item) => item.host_id === workspace.host_id && !closingWorkspaceIds.includes(item.id),
+    );
+    if (remainingSameHost) return true;
+    const ports = await unwrapCommand(commands.getPortForwardSnapshot(workspace.host_id));
+    const active = ports.rules.filter((item) =>
+      item.runtime.status === "starting" ||
+      item.runtime.status === "running" ||
+      item.runtime.status === "reconnecting",
+    );
+    if (active.length === 0) return true;
+    const confirmed = await ask(
+      active.length === 1
+        ? "Close this workspace and stop 1 active port forward?"
+        : `Close this workspace and stop ${active.length} active port forwards?`,
+      {
+        title: "Close Workspace",
+        kind: "warning",
+      },
+    );
+    if (confirmed) confirmedHostIds.add(workspace.host_id);
+    return confirmed;
+  }
+
+  async function confirmAutoOpenPortForwardRisks(snapshot: WorkspaceLayoutSnapshot | null = workspaceSnapshot) {
+    if (!snapshot || floatingWindowId || !hasTauriRuntime()) return;
+    const hostIds = Array.from(new Set(snapshot.workspaces.map((workspace) => workspace.host_id)));
+    for (const hostId of hostIds) {
+      const ports = await unwrapCommand(commands.getPortForwardSnapshot(hostId));
+      for (const row of ports.rules) {
+        if (row.runtime.status !== "needs_confirmation" || row.runtime.persistence !== "saved" || !row.rule.connect_on_host_open) continue;
+        const key = [
+          hostId,
+          row.rule.id,
+          row.rule.direction,
+          row.rule.local_address,
+          row.rule.local_port,
+          row.rule.remote_address,
+          row.rule.remote_port,
+        ].join("|");
+        if (confirmedAutoOpenPortRules.has(key)) continue;
+        confirmedAutoOpenPortRules.add(key);
+        const risk = await unwrapCommand(commands.checkPortForwardNonLoopbackRisk({ rule: row.rule }));
+        if (!risk.requires_confirmation) continue;
+        const confirmed = await ask(`Listen on ${risk.listen_address}? This saved port forward starts when the Host opens and can expose the forwarded port beyond loopback.\n\n${risk.reasons.join("\n")}`, {
+          title: "Confirm Port Listen Address",
+          kind: "warning",
+        });
+        if (!confirmed) continue;
+        await unwrapCommand(commands.createOrUpdatePortForwardRule({
+          host_id: hostId,
+          persistence: row.runtime.persistence,
+          rule: addNonLoopbackConfirmation(row.rule, String(Date.now())),
+        }));
+        await unwrapCommand(commands.startPortForwardRule({
+          host_id: hostId,
+          rule_id: row.rule.id,
+        }));
+      }
+    }
   }
 
   async function newSession({ recordHistory = true }: { recordHistory?: boolean } = {}) {
@@ -3650,6 +3740,7 @@
     const { challenge, verification_id: verificationId, workspace_id: workspaceId } = event;
     if (challenge.kind === "credential") {
       pendingSshCredential = {
+        scope: "workspace",
         verificationId,
         workspaceId,
         toolTabId: challenge.challenge.source_tool_tab_id,
@@ -3690,6 +3781,48 @@
     notifyFilesWorkspaceVerificationSubmitted(workspaceId);
   }
 
+  async function handlePortForwardSshVerificationRequired(event: PortForwardSshVerificationRequiredEvent) {
+    const { challenge, verification_id: verificationId, host_id: hostId } = event;
+    if (challenge.kind === "credential") {
+      pendingSshCredential = {
+        scope: "port_forward",
+        verificationId,
+        hostId,
+        toolTabId: null,
+        authTargetLabel: challenge.challenge.auth_target.label,
+        kind: challenge.challenge.credential_kind,
+        value: "",
+        save: false,
+      };
+      return;
+    }
+
+    const hostKey = challenge.challenge;
+    const changed = hostKey.challenge_kind === "changed";
+    const allow = await ask(
+      changed
+        ? `SSH host key changed for ${hostKey.auth_target.label} (${hostKey.target}).\n\nOnly continue if you expected this host key to change.\n\n${hostKey.algorithm} ${hostKey.fingerprint}`
+        : `Trust SSH host key for ${hostKey.auth_target.label} (${hostKey.target})?\n\n${hostKey.algorithm} ${hostKey.fingerprint}`,
+      {
+        title: changed ? "SSH Host Key Changed" : "SSH Host Key",
+        kind: "warning",
+        okLabel: changed ? "Update Trust Record" : "Trust Host Key",
+        cancelLabel: "Cancel",
+      },
+    );
+    await unwrapCommand(commands.submitPortForwardSshVerification({
+      host_id: hostId,
+      verification_id: verificationId,
+      response: allow
+        ? {
+            kind: "host_key",
+            accept_new_host_key: !changed,
+            update_changed_host_key: changed,
+          }
+        : { kind: "cancel" },
+    }));
+  }
+
   function terminalPaneIdForToolTab(toolTabId: string | null) {
     if (!toolTabId) return null;
     const runtime = terminalRuntimeForToolTab(toolTabId);
@@ -3700,27 +3833,49 @@
     if (!pendingSshCredential) return;
     const pending = pendingSshCredential;
     pendingSshCredential = null;
-    await unwrapCommand(commands.submitWorkspaceSshVerification({
-      workspace_id: pending.workspaceId,
-      verification_id: pending.verificationId,
-      response: {
-        kind: "credential",
-        credential: { kind: pending.kind, value: pending.value },
-        save_credential: pending.save,
-      },
-    }));
-    notifyFilesWorkspaceVerificationSubmitted(pending.workspaceId);
+    const response = {
+      kind: "credential" as const,
+      credential: { kind: pending.kind, value: pending.value },
+      save_credential: pending.save,
+    };
+    if (pending.scope === "workspace") {
+      if (!pending.workspaceId) throw new Error("Workspace SSH credential is missing Workspace id");
+      await unwrapCommand(commands.submitWorkspaceSshVerification({
+        workspace_id: pending.workspaceId,
+        verification_id: pending.verificationId,
+        response,
+      }));
+      notifyFilesWorkspaceVerificationSubmitted(pending.workspaceId);
+    } else {
+      if (!pending.hostId) throw new Error("Port Forwarding SSH credential is missing Host id");
+      await unwrapCommand(commands.submitPortForwardSshVerification({
+        host_id: pending.hostId,
+        verification_id: pending.verificationId,
+        response,
+      }));
+    }
   }
 
   function cancelSshCredential() {
     const pending = pendingSshCredential;
     pendingSshCredential = null;
     if (!pending) return;
-    void unwrapCommand(commands.submitWorkspaceSshVerification({
-      workspace_id: pending.workspaceId,
-      verification_id: pending.verificationId,
-      response: { kind: "cancel" },
-    })).finally(() => notifyFilesWorkspaceVerificationSubmitted(pending.workspaceId));
+    if (pending.scope === "workspace") {
+      const workspaceId = pending.workspaceId;
+      if (!workspaceId) return;
+      void unwrapCommand(commands.submitWorkspaceSshVerification({
+        workspace_id: workspaceId,
+        verification_id: pending.verificationId,
+        response: { kind: "cancel" },
+      })).finally(() => notifyFilesWorkspaceVerificationSubmitted(workspaceId));
+    } else {
+      if (!pending.hostId) return;
+      void unwrapCommand(commands.submitPortForwardSshVerification({
+        host_id: pending.hostId,
+        verification_id: pending.verificationId,
+        response: { kind: "cancel" },
+      }));
+    }
   }
 
   function notifyFilesWorkspaceVerificationSubmitted(workspaceId: string) {
@@ -3929,7 +4084,7 @@
     floatingWindowId = currentFloatingWindowId();
     void (async () => {
       if (hasTauriRuntime()) {
-        const [outputDispose, exitDispose, transportStateDispose, configDispose, verificationDispose, paneMenuDispose, terminalMenuDispose] = await Promise.all([
+        const [outputDispose, exitDispose, transportStateDispose, configDispose, verificationDispose, portForwardVerificationDispose, paneMenuDispose, terminalMenuDispose] = await Promise.all([
           listen<TerminalOutputEvent>("terminal://output", (event) => enqueueTerminalOutput(event.payload)),
           listen<TerminalExitEvent>("terminal://exit", (event) => {
             void handleTerminalExit(event.payload).catch((error) => {
@@ -3949,6 +4104,11 @@
               settingsError = error instanceof Error ? error.message : String(error);
             });
           }),
+          listen<PortForwardSshVerificationRequiredEvent>("port-forwarding://ssh-verification-required", (event) => {
+            void handlePortForwardSshVerificationRequired(event.payload).catch((error) => {
+              settingsError = error instanceof Error ? error.message : String(error);
+            });
+          }),
           listen<PaneMenuEvent>("terminal://pane-menu", (event) => handlePaneMenu(event.payload)),
           listen<TerminalMenuEvent>("terminal://menu-command", (event) => {
             void runTerminalMenuCommand(event.payload.command).catch((error) => {
@@ -3962,6 +4122,7 @@
           transportStateDispose();
           configDispose();
           verificationDispose();
+          portForwardVerificationDispose();
           paneMenuDispose();
           terminalMenuDispose();
           return;
@@ -3971,12 +4132,14 @@
         transportStateUnlisten = transportStateDispose;
         configUnlisten = configDispose;
         workspaceSshVerificationUnlisten = verificationDispose;
+        portForwardSshVerificationUnlisten = portForwardVerificationDispose;
         paneMenuUnlisten = paneMenuDispose;
         terminalMenuUnlisten = terminalMenuDispose;
       }
       await workspaceStore.subscribe();
       await loadSettings();
       await workspaceStore.load();
+      await confirmAutoOpenPortForwardRisks(workspaceStore.snapshot);
       if (!floatingWindowId && workspaceStore.snapshot?.active_workspace_id) {
         await restoreTerminalRuntimeForWorkspace(workspaceStore.snapshot.active_workspace_id);
       }
@@ -4025,6 +4188,7 @@
       transportStateUnlisten?.();
       configUnlisten?.();
       workspaceSshVerificationUnlisten?.();
+      portForwardSshVerificationUnlisten?.();
       paneMenuUnlisten?.();
       terminalMenuUnlisten?.();
       workspaceStore.dispose();
@@ -4597,6 +4761,8 @@
     <TransfersToolTab workspace={effectiveWorkspace} />
   {:else if tool.kind === "resources"}
     <ResourceMonitorToolTab toolTab={tool} workspaceId={effectiveWorkspace.id} viewId={slot.id} />
+  {:else if tool.kind === "ports"}
+    <PortsToolTab toolTab={tool} host={connectionHostForToolTab(tool)} />
   {:else}
     {@const terminalMode = terminalRenderMode(workspace, effectiveWorkspace)}
     {@const runtime = terminalRuntimeForToolTab(tool.id)}
@@ -5075,6 +5241,7 @@
     color: color-mix(in srgb, var(--app-fg) 72%, transparent);
     font: inherit;
     font-size: 12px;
+    line-height: 1;
     user-select: none;
     -webkit-user-select: none;
   }

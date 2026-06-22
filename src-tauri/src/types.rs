@@ -39,6 +39,8 @@ pub struct ConnectionHostDocument {
     pub icon: Option<ConnectionHostIcon>,
     pub files: Option<HostFilesConfig>,
     pub resources: Option<HostResourceConfig>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub port_forwards: Vec<PortForwardRule>,
     pub protocol: ConnectionProtocol,
     pub local: Option<LocalConnectionConfig>,
     pub ssh: Option<SshConnectionConfig>,
@@ -55,6 +57,7 @@ impl Default for ConnectionHostDocument {
             icon: None,
             files: None,
             resources: None,
+            port_forwards: Vec::new(),
             protocol: ConnectionProtocol::Local,
             local: None,
             ssh: None,
@@ -138,6 +141,154 @@ pub struct HostResourceConfig {
     pub target_os: Option<RemoteResourceTargetOs>,
     pub target_arch: Option<RemoteResourceTargetArch>,
     pub remote_provider: Option<ResourceRemoteProviderMode>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum PortForwardDirection {
+    LocalToRemote,
+    RemoteToLocal,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum PortForwardPersistence {
+    JustThisTime,
+    Saved,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Type)]
+pub struct PortForwardSemanticKey {
+    pub direction: PortForwardDirection,
+    pub local_address: String,
+    pub local_port: u16,
+    pub remote_address: String,
+    pub remote_port: u16,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct PortForwardNonLoopbackConfirmation {
+    pub semantic_key: PortForwardSemanticKey,
+    pub confirmed_at_unix_ms: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct PortForwardRule {
+    pub id: String,
+    pub name: String,
+    pub direction: PortForwardDirection,
+    pub local_address: String,
+    pub local_port: u16,
+    pub remote_address: String,
+    pub remote_port: u16,
+    #[serde(default = "default_connect_on_host_open")]
+    pub connect_on_host_open: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub non_loopback_confirmations: Vec<PortForwardNonLoopbackConfirmation>,
+}
+
+fn default_connect_on_host_open() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum PortForwardRuleStatus {
+    Stopped,
+    Starting,
+    Running,
+    Reconnecting,
+    Failed,
+    NeedsConfirmation,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct PortForwardEvent {
+    pub sequence: String,
+    pub occurred_at_unix_ms: String,
+    pub level: PortForwardEventLevel,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum PortForwardEventLevel {
+    Debug,
+    Info,
+    Warn,
+    Error,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct PortForwardRuntimeRule {
+    pub rule_id: String,
+    pub persistence: PortForwardPersistence,
+    pub status: PortForwardRuleStatus,
+    pub intended_running: bool,
+    pub active_connections: u32,
+    pub effective_local_port: Option<u16>,
+    pub effective_remote_port: Option<u16>,
+    pub warning: Option<String>,
+    pub error: Option<String>,
+    pub events: Vec<PortForwardEvent>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct PortForwardDraft {
+    pub name: String,
+    pub direction: PortForwardDirection,
+    pub local_address: String,
+    pub local_port: String,
+    pub remote_address: String,
+    pub remote_port: String,
+    pub persistence: PortForwardPersistence,
+    pub connect_on_host_open: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct PortForwardRuleSnapshot {
+    pub rule: PortForwardRule,
+    pub runtime: PortForwardRuntimeRule,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct PortForwardSnapshot {
+    pub host_id: String,
+    pub supported: bool,
+    pub unsupported_reason: Option<String>,
+    pub rules: Vec<PortForwardRuleSnapshot>,
+    pub draft: Option<PortForwardDraft>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct PortForwardRuleInput {
+    pub host_id: String,
+    pub rule: PortForwardRule,
+    pub persistence: PortForwardPersistence,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct PortForwardRuleIdInput {
+    pub host_id: String,
+    pub rule_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct PortForwardDraftInput {
+    pub host_id: String,
+    pub draft: PortForwardDraft,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct PortForwardNonLoopbackRiskInput {
+    pub rule: PortForwardRule,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct PortForwardNonLoopbackRisk {
+    pub requires_confirmation: bool,
+    pub listen_address: String,
+    pub reasons: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
@@ -294,6 +445,7 @@ pub enum WorkspaceToolKind {
     Terminal,
     Transfers,
     Resources,
+    Ports,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
@@ -316,8 +468,8 @@ pub enum WorkspaceDockSide {
 #[serde(rename_all = "snake_case")]
 pub enum WorkspaceDockGroupRole {
     Content,
-    Sidebar,
-    Panel,
+    #[serde(alias = "sidebar", alias = "panel")]
+    SidePanel,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
@@ -1134,6 +1286,13 @@ pub enum SshWorkspaceChallenge {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SshHostScopedChallenge {
+    Credential { challenge: SshCredentialChallenge },
+    HostKey { challenge: SshHostKeyChallenge },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
 pub struct WorkspaceSshVerificationRequiredEvent {
     pub workspace_id: String,
     pub verification_id: String,
@@ -1141,8 +1300,22 @@ pub struct WorkspaceSshVerificationRequiredEvent {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct PortForwardSshVerificationRequiredEvent {
+    pub host_id: String,
+    pub verification_id: String,
+    pub challenge: SshHostScopedChallenge,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
 pub struct WorkspaceSshVerificationSubmitInput {
     pub workspace_id: String,
+    pub verification_id: String,
+    pub response: WorkspaceSshVerificationResponse,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct PortForwardSshVerificationSubmitInput {
+    pub host_id: String,
     pub verification_id: String,
     pub response: WorkspaceSshVerificationResponse,
 }

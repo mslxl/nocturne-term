@@ -47,14 +47,35 @@ describe("Remote file command async dispatch", () => {
     );
 
     for (const command of fileCommands) {
-      const commandBodyPattern = new RegExp(
-        String.raw`#\[tauri::command\]\s*#\[specta::specta\]\s*pub\(crate\)\s+async\s+fn\s+${command}\s*\([\s\S]*?\)\s*->\s*Result<[\s\S]*?>\s*\{([\s\S]*?)\n\}\n\nfn\s+${command}_blocking`,
+      const signaturePattern = new RegExp(
+        String.raw`#\[tauri::command\]\s*#\[specta::specta\]\s*pub\(crate\)\s+async\s+fn\s+${command}\s*\(`,
       );
-      const match = source.match(commandBodyPattern);
-      assert.ok(match, `${command} must be an async command followed by ${command}_blocking.`);
-      const body = match[1];
+      assert.match(source, signaturePattern, `${command} must be an async Tauri command.`);
+
+      const body = extractFunctionBody(source, command);
       assert.match(body, new RegExp(String.raw`run_file_command\("${command}",`));
-      assert.match(body, new RegExp(String.raw`${command}_blocking\(app,\s*input\)`));
+      assert.match(body, new RegExp(String.raw`${command}_blocking\(`));
+      assert.match(source, new RegExp(String.raw`fn\s+${command}_blocking\s*\(`));
     }
   });
 });
+
+function extractFunctionBody(source: string, functionName: string): string {
+  const signature = new RegExp(String.raw`pub\(crate\)\s+async\s+fn\s+${functionName}\s*\(`);
+  const signatureMatch = signature.exec(source);
+  assert.ok(signatureMatch, `${functionName} signature missing`);
+  const openBrace = source.indexOf("{", signatureMatch.index);
+  assert.notEqual(openBrace, -1, `${functionName} body missing`);
+  let depth = 0;
+  for (let index = openBrace; index < source.length; index += 1) {
+    const char = source[index];
+    if (char === "{") depth += 1;
+    if (char === "}") {
+      depth -= 1;
+      if (depth === 0) {
+        return source.slice(openBrace + 1, index);
+      }
+    }
+  }
+  throw new Error(`${functionName} body did not close`);
+}

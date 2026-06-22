@@ -134,26 +134,20 @@ describe("dock workspace operations", () => {
     assert.throws(() => normalizeDockRatios([1, Number.NaN]), /positive finite/);
   });
 
-  it("rejects a workspace without a content dock group", () => {
-    const snapshot = createSnapshot();
-    snapshot.workspaces[1] = {
-      ...snapshot.workspaces[1],
-      layout: createDockGroup("group-b", "sidebar", [createOwnedSlot("slot-files-b", "files-b")], "slot-files-b"),
-    };
-
-    assert.throws(() => validateWorkspaceSnapshot(snapshot), /workspace workspace-b must contain at least one content dock group/);
+  it("rejects an empty side panel dock group", () => {
+    assert.throws(() => createDockGroup("group-b", "side_panel", [], ""), /dock group group-b must contain at least one slot/);
   });
 
   it("rejects floating window groups that are not content", () => {
     const snapshot = createSnapshot();
     snapshot.floatingWindows.push({
-      id: "float-sidebar",
-      layout: createDockGroup("group-float-sidebar", "sidebar", [
+      id: "float-side-panel",
+      layout: createDockGroup("group-float-side-panel", "side_panel", [
         { kind: "mirror", id: "slot-float-sidebar", toolTabId: "files-a", ownerWorkspaceId: "workspace-a" },
       ], "slot-float-sidebar"),
     });
 
-    assert.throws(() => validateWorkspaceSnapshot(snapshot), /floating window float-sidebar group group-float-sidebar must use content role/);
+    assert.throws(() => validateWorkspaceSnapshot(snapshot), /floating window float-side-panel group group-float-side-panel must use content role/);
   });
 });
 

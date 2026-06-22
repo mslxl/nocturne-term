@@ -52,7 +52,10 @@ fn compile_windows_test_manifest() {
     .expect("failed to write Windows test manifest");
     fs::write(
         &rc_path,
-        format!("1 24 \"{}\"\n", manifest_path.display().to_string().replace('\\', "\\\\")),
+        format!(
+            "1 24 \"{}\"\n",
+            manifest_path.display().to_string().replace('\\', "\\\\")
+        ),
     )
     .expect("failed to write Windows test resource file");
 

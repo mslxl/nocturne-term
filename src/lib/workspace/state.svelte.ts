@@ -152,7 +152,7 @@ function applyDemoWorkspaceIntent(
           {
             kind: "group",
             id: `group-files-demo-${next.version + 1}`,
-            role: "sidebar",
+            role: "side_panel",
             active_slot_id: filesSlotId,
             slots: [{ kind: "owned", id: filesSlotId, tool_tab_id: filesToolId }],
           },
@@ -166,7 +166,7 @@ function applyDemoWorkspaceIntent(
           {
             kind: "group",
             id: `group-resources-transfers-demo-${next.version + 1}`,
-            role: "sidebar",
+            role: "side_panel",
             active_slot_id: resourcesSlotId,
             slots: [
               { kind: "owned", id: resourcesSlotId, tool_tab_id: resourcesToolId },
@@ -401,8 +401,66 @@ function toBindingLayout(layout: import("$lib/workspace/dock/model").DockLayout)
 }
 
 function bumpDemoVersion(snapshot: WorkspaceLayoutSnapshot): WorkspaceLayoutSnapshot {
+  normalizeDemoSnapshotGroupRoles(snapshot);
   snapshot.version += 1;
   return snapshot;
+}
+
+type DemoRoleBounds = {
+  left: boolean;
+  right: boolean;
+  top: boolean;
+  bottom: boolean;
+};
+
+function normalizeDemoSnapshotGroupRoles(snapshot: WorkspaceLayoutSnapshot) {
+  for (const workspace of snapshot.workspaces) {
+    normalizeDemoLayoutGroupRoles(workspace.layout, { left: true, right: true, top: true, bottom: true });
+  }
+  for (const window of snapshot.floating_windows) {
+    setAllDemoGroupRoles(window.layout, "content");
+  }
+}
+
+function normalizeDemoLayoutGroupRoles(layout: DemoLayout, bounds: DemoRoleBounds) {
+  if (layout.kind === "group") {
+    layout.role = layout.slots.length === 0 ? "content" : demoRoleForBounds(bounds);
+    return;
+  }
+  const last = layout.children.length - 1;
+  layout.children.forEach((child, index) => {
+    normalizeDemoLayoutGroupRoles(
+      child,
+      layout.direction === "row"
+        ? {
+            left: bounds.left && index === 0,
+            right: bounds.right && index === last,
+            top: bounds.top,
+            bottom: bounds.bottom,
+          }
+        : {
+            left: bounds.left,
+            right: bounds.right,
+            top: bounds.top && index === 0,
+            bottom: bounds.bottom && index === last,
+          },
+    );
+  });
+}
+
+function demoRoleForBounds(bounds: DemoRoleBounds) {
+  if (bounds.bottom && !bounds.top) return "side_panel";
+  if (bounds.left && !bounds.right) return "side_panel";
+  if (bounds.right && !bounds.left) return "side_panel";
+  return "content";
+}
+
+function setAllDemoGroupRoles(layout: DemoLayout, role: "content" | "side_panel") {
+  if (layout.kind === "group") {
+    layout.role = role;
+    return;
+  }
+  for (const child of layout.children) setAllDemoGroupRoles(child, role);
 }
 
 function cloneDemoSnapshot(snapshot: WorkspaceLayoutSnapshot): WorkspaceLayoutSnapshot {
@@ -429,6 +487,11 @@ function requireDemoWorkspace(snapshot: WorkspaceLayoutSnapshot, workspaceId: st
 function listDemoSlots(layout: DemoLayout): DemoSlot[] {
   if (layout.kind === "group") return [...layout.slots];
   return layout.children.flatMap(listDemoSlots);
+}
+
+function listDemoGroups(layout: DemoLayout): Extract<DemoLayout, { kind: "group" }>[] {
+  if (layout.kind === "group") return [layout];
+  return layout.children.flatMap(listDemoGroups);
 }
 
 function findDemoSlot(layout: DemoLayout, slotId: string): DemoSlot | null {
@@ -514,12 +577,11 @@ function firstDemoTerminalGroupId(layout: DemoLayout): string | null {
 }
 
 function firstDemoToolGroupId(layout: DemoLayout): string | null {
-  return firstDemoGroupIdByRole(layout, "sidebar")
-    ?? firstDemoGroupIdByRole(layout, "panel")
+  return firstDemoGroupIdByRole(layout, "side_panel")
     ?? firstDemoGroupIdByRole(layout, "content");
 }
 
-function firstDemoGroupIdByRole(layout: DemoLayout, role: "content" | "panel" | "sidebar"): string | null {
+function firstDemoGroupIdByRole(layout: DemoLayout, role: "content" | "side_panel"): string | null {
   if (layout.kind === "group") {
     return layout.role === role ? layout.id : null;
   }
@@ -547,7 +609,7 @@ function splitDemoSlot(layout: DemoLayout, targetSlotId: string, slot: DemoSlot,
 }
 
 function splitDemoWorkspaceEdge(layout: DemoLayout, slot: DemoSlot, side: "left" | "right" | "up" | "down"): DemoLayout {
-  const inserted: DemoLayout = { kind: "group", id: `group-${slot.id}`, role: "sidebar", slots: [slot], active_slot_id: slot.id };
+  const inserted: DemoLayout = { kind: "group", id: `group-${slot.id}`, role: "side_panel", slots: [slot], active_slot_id: slot.id };
   const direction = side === "left" || side === "right" ? "row" : "column";
   const before = side === "left" || side === "up";
   return {

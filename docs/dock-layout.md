@@ -58,7 +58,7 @@ The dock layout is a tree:
 ```ts
 type DockLayout =
   | { kind: "split"; direction: "row" | "column"; children: DockLayout[]; ratios: number[] }
-  | { kind: "group"; id: string; role: "content" | "sidebar" | "panel"; slots: ToolSlot[]; activeSlotId: string };
+  | { kind: "group"; id: string; role: "content" | "side_panel"; slots: ToolSlot[]; activeSlotId: string };
 
 type ToolSlot =
   | { kind: "owned"; id: string; toolTabId: string }
@@ -71,11 +71,10 @@ Ratios are positive finite values normalized per split node. Persist ratios, not
 
 Every dock group has an explicit role. The role is spatial layout state, not a value inferred from the ToolTabs inside the group:
 
-- `content`: primary editor/terminal/content area. A workspace must always keep at least one content group. A content group may be empty and show an empty content surface.
-- `sidebar`: edge/sidebar area created by workspace-edge docking.
-- `panel`: bottom or auxiliary panel area. Transfers and Resource Monitor default to a right-side group in the current Workspace template, but users may move them to panel groups.
+- `content`: primary editor/terminal/content area. A content group may be empty and show an empty content surface.
+- `side_panel`: auxiliary dock area on the left, right, or bottom edge. Files, Resources, Transfers, Ports, and future auxiliary tools may live here.
 
-Do not infer group role from a terminal, files, transfers, mirror, or closed-source slot. A Files ToolTab inside a content group remains content; a Terminal ToolTab inside a sidebar remains sidebar. Rust must create and return layouts with explicit roles, and frontend/tests should fail on role-less layouts instead of migrating them.
+Do not infer group role from a terminal, files, transfers, mirror, or closed-source slot. Role follows the group's current dock position: groups whose ToolTab bar is on top are `content`, while groups whose ToolTab bar is on the left, right, or bottom edge are `side_panel`. Bottom placement wins over left/right when a group touches multiple edges. Rust must create and return layouts with explicit roles, and frontend/tests should fail on role-less layouts instead of migrating them. Rust accepts old `sidebar` and `panel` snapshot values as `side_panel` for migration only.
 
 ## Split Resizing
 
@@ -90,7 +89,7 @@ Supported drop targets:
 - group tab bar: add to that group
 - group center: add to or activate within that group
 - group left/right/top/bottom: split around the target group and inherit the target group's role
-- workspace edge left/right/top/bottom: create an edge dock area with `sidebar` role
+- workspace edge left/right/top/bottom: create an edge dock area with `side_panel` role when the resulting ToolTab bar is left, right, or bottom; top-edge groups become `content`
 - another workspace: create a mirror slot
 - floating window: add to that floating window's dock layout
 - outside any window: create a floating window
@@ -128,6 +127,8 @@ Tool tab bar:
 - shows tool kind icons and titles
 - shows mirror badges and mirror border styling
 - does not use subtitles
+- sits on the bottom edge for bottom groups, on the left or right edge for side groups, and at the top for content groups
+- uses vertical title text when placed on the left or right edge
 
 Do not use `cursor: pointer` on rows or tabs. Use native-feeling hover and pressed states appropriate to the control kind.
 
