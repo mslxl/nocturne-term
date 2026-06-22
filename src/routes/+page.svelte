@@ -276,6 +276,13 @@
     side: "" | "left" | "right" | "up" | "down";
     style: string;
   };
+  type DockGroupBounds = {
+    left: boolean;
+    right: boolean;
+    top: boolean;
+    bottom: boolean;
+  };
+  type ToolTabbarPlacement = "top" | "left" | "right" | "bottom";
   type AppMenuRootId = "file" | "edit" | "view" | "window";
 
   let settings = $state<TerminalSettings | null>(null);
@@ -580,6 +587,43 @@
 
   function dockGroupRole(group: Extract<WorkspaceDockLayout, { kind: "group" }>) {
     return group.role;
+  }
+
+  function rootDockGroupBounds(): DockGroupBounds {
+    return { left: true, right: true, top: true, bottom: true };
+  }
+
+  function childDockGroupBounds(
+    parent: DockGroupBounds,
+    direction: "row" | "column",
+    index: number,
+    count: number,
+  ): DockGroupBounds {
+    const last = count - 1;
+    return direction === "row"
+      ? {
+          left: parent.left && index === 0,
+          right: parent.right && index === last,
+          top: parent.top,
+          bottom: parent.bottom,
+        }
+      : {
+          left: parent.left,
+          right: parent.right,
+          top: parent.top && index === 0,
+          bottom: parent.bottom && index === last,
+        };
+  }
+
+  function toolTabbarPlacement(bounds: DockGroupBounds): ToolTabbarPlacement {
+    if (bounds.bottom && !bounds.top) return "bottom";
+    if (bounds.left && !bounds.right) return "left";
+    if (bounds.right && !bounds.left) return "right";
+    return "top";
+  }
+
+  function visualDockGroupRole(bounds: DockGroupBounds) {
+    return toolTabbarPlacement(bounds) === "top" ? "content" : "side_panel";
   }
 
   function firstContentGroupId(workspace: WorkspaceTabState): string | null {
@@ -4134,7 +4178,7 @@
             <span>The floating ToolTab source is no longer available.</span>
           </div>
         {:else if activeWorkspace}
-          {@render dockLayout(activeWorkspace.layout, activeWorkspace, null, [])}
+          {@render dockLayout(activeWorkspace.layout, activeWorkspace, null, [], rootDockGroupBounds())}
         {:else}
           <div class="dock-empty">Workspace</div>
         {/if}
@@ -4398,11 +4442,11 @@
     <header>
       <span>Floating ToolTabs</span>
     </header>
-    {@render dockLayout(floatingWindow.layout, null, floatingWindow.id, [])}
+    {@render dockLayout(floatingWindow.layout, null, floatingWindow.id, [], rootDockGroupBounds())}
   </section>
 {/snippet}
 
-{#snippet dockLayout(layout: WorkspaceDockLayout, workspace: WorkspaceTabState | null, floatingWindowId: string | null, splitPath: number[])}
+{#snippet dockLayout(layout: WorkspaceDockLayout, workspace: WorkspaceTabState | null, floatingWindowId: string | null, splitPath: number[], bounds: DockGroupBounds)}
   {#if layout.kind === "split"}
     <section
       class:column={layout.direction === "column"}
@@ -4411,7 +4455,7 @@
       style={splitStyle(layout)}
     >
       {#each layout.children as child, index (`${layout.kind}-${index}-${child.kind}`)}
-        {@render dockLayout(child, workspace, floatingWindowId, [...splitPath, index])}
+        {@render dockLayout(child, workspace, floatingWindowId, [...splitPath, index], childDockGroupBounds(bounds, layout.direction, index, layout.children.length))}
         {#if index < layout.children.length - 1}
           <button
             class:column={layout.direction === "column"}
@@ -4435,9 +4479,15 @@
     <section
       class:drop-target={toolTabDropTarget?.kind === "group" && toolTabDropTarget.groupId === layout.id}
       class="workspace-dock-group"
+      class:tabbar-bottom={toolTabbarPlacement(bounds) === "bottom"}
+      class:tabbar-left={toolTabbarPlacement(bounds) === "left"}
+      class:tabbar-right={toolTabbarPlacement(bounds) === "right"}
+      class:tabbar-top={toolTabbarPlacement(bounds) === "top"}
       aria-label="Tool tabs"
       data-dock-group-id={layout.id}
-      data-dock-group-role={dockGroupRole(layout)}
+      data-dock-group-role={visualDockGroupRole(bounds)}
+      data-dock-group-model-role={dockGroupRole(layout)}
+      data-tool-tabbar-placement={toolTabbarPlacement(bounds)}
       data-active-tool-slot-id={layout.active_slot_id}
       data-testid={`dock-group-${layout.id}`}
       data-workspace-id={workspace?.id ?? ""}
@@ -4899,6 +4949,20 @@
     background: color-mix(in srgb, var(--app-bg) 96%, var(--app-control));
   }
 
+  .workspace-dock-group.tabbar-bottom {
+    grid-template-rows: minmax(0, 1fr) 31px;
+  }
+
+  .workspace-dock-group.tabbar-left,
+  .workspace-dock-group.tabbar-right {
+    grid-template-rows: minmax(0, 1fr);
+    grid-template-columns: 32px minmax(0, 1fr);
+  }
+
+  .workspace-dock-group.tabbar-right {
+    grid-template-columns: minmax(0, 1fr) 32px;
+  }
+
   .workspace-dock-group.drop-target {
     outline: 2px solid color-mix(in srgb, var(--app-accent) 62%, transparent);
     outline-offset: -3px;
@@ -4964,7 +5028,39 @@
     padding: 3px 5px 0;
   }
 
+  .workspace-dock-group.tabbar-bottom .tool-tabbar {
+    grid-row: 2;
+    border-top: 1px solid var(--app-border);
+    border-bottom: 0;
+    padding: 0 5px 3px;
+    align-items: start;
+  }
+
+  .workspace-dock-group.tabbar-left .tool-tabbar,
+  .workspace-dock-group.tabbar-right .tool-tabbar {
+    min-height: 0;
+    flex-direction: column;
+    align-items: stretch;
+    overflow-x: hidden;
+    overflow-y: auto;
+    border-bottom: 0;
+    padding: 5px 0;
+  }
+
+  .workspace-dock-group.tabbar-left .tool-tabbar {
+    grid-column: 1;
+    border-right: 1px solid var(--app-border);
+  }
+
+  .workspace-dock-group.tabbar-right .tool-tabbar {
+    grid-column: 2;
+    border-left: 1px solid var(--app-border);
+  }
+
   .tool-tab {
+    position: relative;
+    box-sizing: border-box;
+    flex: 0 0 auto;
     min-width: 0;
     max-width: 180px;
     height: 28px;
@@ -4981,6 +5077,43 @@
     font-size: 12px;
     user-select: none;
     -webkit-user-select: none;
+  }
+
+  .workspace-dock-group.tabbar-bottom .tool-tab {
+    border-top: 0;
+    border-bottom: 1px solid transparent;
+    border-radius: 0 0 6px 6px;
+  }
+
+  .workspace-dock-group.tabbar-left .tool-tab,
+  .workspace-dock-group.tabbar-right .tool-tab {
+    width: 31px;
+    max-width: none;
+    height: 120px;
+    min-height: 72px;
+    justify-content: center;
+    border: 1px solid transparent;
+    padding: 8px 0;
+    writing-mode: vertical-rl;
+    text-orientation: mixed;
+  }
+
+  .workspace-dock-group.tabbar-left .tool-tab {
+    border-left: 0;
+    border-radius: 0 6px 6px 0;
+  }
+
+  .workspace-dock-group.tabbar-right .tool-tab {
+    border-right: 0;
+    border-radius: 6px 0 0 6px;
+  }
+
+  .workspace-dock-group.tabbar-left .tool-close,
+  .workspace-dock-group.tabbar-right .tool-close {
+    width: 22px;
+    height: 22px;
+    max-width: 22px;
+    writing-mode: horizontal-tb;
   }
 
   .tool-close {
@@ -5006,9 +5139,44 @@
   }
 
   .tool-tab.active {
-    border-color: var(--app-border);
-    background: color-mix(in srgb, var(--app-bg) 88%, var(--app-control));
-    color: var(--app-fg);
+    background: color-mix(in srgb, var(--app-control) 58%, transparent);
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--app-fg) 7%, transparent);
+  }
+
+  .tool-tab.active::after {
+    content: "";
+    position: absolute;
+    pointer-events: none;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--app-accent) 52%, transparent);
+  }
+
+  .workspace-dock-group.tabbar-top .tool-tab.active::after {
+    left: 8px;
+    right: 8px;
+    bottom: 2px;
+    height: 1px;
+  }
+
+  .workspace-dock-group.tabbar-bottom .tool-tab.active::after {
+    left: 8px;
+    right: 8px;
+    top: 2px;
+    height: 1px;
+  }
+
+  .workspace-dock-group.tabbar-left .tool-tab.active::after {
+    top: 8px;
+    bottom: 8px;
+    right: 2px;
+    width: 1px;
+  }
+
+  .workspace-dock-group.tabbar-right .tool-tab.active::after {
+    top: 8px;
+    bottom: 8px;
+    left: 2px;
+    width: 1px;
   }
 
   .tool-tab:focus-visible {
@@ -5035,8 +5203,10 @@
   }
 
   .tool-tab .tool-title {
+    display: block;
     min-width: 0;
     overflow: hidden;
+    line-height: 1;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
@@ -5057,6 +5227,20 @@
     display: grid;
     grid-template-rows: minmax(0, 1fr);
     overflow: hidden;
+  }
+
+  .workspace-dock-group.tabbar-bottom .tool-surface {
+    grid-row: 1;
+  }
+
+  .workspace-dock-group.tabbar-left .tool-surface {
+    grid-column: 2;
+    grid-row: 1;
+  }
+
+  .workspace-dock-group.tabbar-right .tool-surface {
+    grid-column: 1;
+    grid-row: 1;
   }
 
   .tooltab-context-menu {
