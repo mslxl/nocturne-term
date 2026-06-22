@@ -5,13 +5,14 @@
  * Files context menu actions for selection-scoped file operations.
  *
  * Operation:
- * Builds context menu action models for empty, single-item, and multi-item
- * selections with and without chmod provider capability.
+ * Builds context menu models for empty, single-item, and multi-item selections
+ * with and without chmod provider capability.
  *
  * Expected:
  * Rename is available only for a single selected item, Permissions supports
- * multi-selection when chmod is available, and Delete, Copy, Cut, and Download
- * support every non-empty selection while remaining out of the toolbar model.
+ * multi-selection when chmod is available, Copy Path is available for every
+ * non-empty selection, Delete is marked dangerous, and the shared action order
+ * is Download, Rename, Copy, Cut, Permissions, Copy Path, Delete.
  */
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
@@ -21,16 +22,24 @@ import {
 } from "../src/lib/files/context-menu";
 
 describe("Files context menu actions", () => {
+  it("uses the shared Finder-style selection action order", () => {
+    const actions = filesSelectionContextMenuActions(1, { canChmod: true });
+
+    assert.deepEqual(actions.map((action) => action.id), ["download", "rename", "copy", "cut", "permissions", "copy_path", "delete"]);
+    assert.equal(actions.at(-1)?.dangerous, true);
+  });
+
   it("disables every selection action when no file entry is selected", () => {
     const actions = filesSelectionContextMenuActions(0, { canChmod: true });
 
     assert.deepEqual(actionDisabledMap(actions), {
+      download: true,
       rename: true,
-      permissions: true,
-      delete: true,
       copy: true,
       cut: true,
-      download: true,
+      permissions: true,
+      copy_path: true,
+      delete: true,
     });
   });
 
@@ -38,12 +47,13 @@ describe("Files context menu actions", () => {
     const actions = filesSelectionContextMenuActions(1, { canChmod: true });
 
     assert.deepEqual(actionDisabledMap(actions), {
+      download: false,
       rename: false,
-      permissions: false,
-      delete: false,
       copy: false,
       cut: false,
-      download: false,
+      permissions: false,
+      copy_path: false,
+      delete: false,
     });
   });
 
@@ -51,12 +61,13 @@ describe("Files context menu actions", () => {
     const actions = filesSelectionContextMenuActions(3, { canChmod: true });
 
     assert.deepEqual(actionDisabledMap(actions), {
+      download: false,
       rename: true,
-      permissions: false,
-      delete: false,
       copy: false,
       cut: false,
-      download: false,
+      permissions: false,
+      copy_path: false,
+      delete: false,
     });
   });
 

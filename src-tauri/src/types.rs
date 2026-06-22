@@ -791,6 +791,12 @@ pub struct TransferQueueSnapshot {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct TransferQueueChangedEvent {
+    pub version: u32,
+    pub snapshot: TransferQueueSnapshot,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
 pub struct TransferCreateInput {
     pub source: TransferEndpoint,
     pub destination: TransferEndpoint,

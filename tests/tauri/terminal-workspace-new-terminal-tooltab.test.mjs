@@ -34,11 +34,15 @@ test("terminal workspace new terminal tooltab", { timeout: 180_000 }, async () =
   const appPath = requiredEnvPath("TAURI_TEST_APPLICATION");
   const isolatedAppConfig = await createIsolatedAppConfigEnv("new-terminal-tooltab");
   const nativeDriverPath = optionalEnvPath("TAURI_TEST_NATIVE_DRIVER");
+  const nativeDriverPort = process.env.TAURI_TEST_NATIVE_DRIVER_PORT ?? "";
   const driverPort = Number(process.env.TAURI_TEST_DRIVER_PORT ?? "4444");
   const driverUrl = `http://127.0.0.1:${driverPort}`;
   const devUrl = process.env.TAURI_TEST_DEV_URL ?? "http://localhost:1420/";
   const devPort = Number(new URL(devUrl).port);
-  const nativeDriverArgs = nativeDriverPath ? ["--native-driver", nativeDriverPath] : [];
+  const nativeDriverArgs = [
+    ...(nativeDriverPath ? ["--native-driver", nativeDriverPath] : []),
+    ...(nativeDriverPort ? ["--native-port", nativeDriverPort] : []),
+  ];
 
   process.chdir(repoRoot);
   process.env.NOCTURNE_DEV_PORT = String(devPort);
@@ -136,10 +140,12 @@ test("terminal workspace new terminal tooltab", { timeout: 180_000 }, async () =
           ...init,
         });
         window.dispatchEvent(event);
-        document.dispatchEvent(event);
       };
-      press({ ctrlKey: true, shiftKey: true });
-      press({ metaKey: true });
+      if (navigator.platform.toLowerCase().includes('mac')) {
+        press({ metaKey: true });
+      } else {
+        press({ ctrlKey: true, shiftKey: true });
+      }
     `);
   }
 

@@ -1,5 +1,7 @@
 <script lang="ts">
-  import { onMount, tick } from "svelte";
+  import { flushSync, onMount, tick } from "svelte";
+  import { listen } from "@tauri-apps/api/event";
+  import { writeText } from "@tauri-apps/plugin-clipboard-manager";
   import { ask, message, open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
   import { getCurrentWebview } from "@tauri-apps/api/webview";
   import { createQuery, useQueryClient } from "@tanstack/svelte-query";
@@ -8,14 +10,25 @@
   import FileIcon from "~icons/lucide/file";
   import FileSymlinkIcon from "~icons/lucide/file-symlink";
   import FolderIcon from "~icons/lucide/folder";
-  import { commands, type FileEntry, type FileListResult, type FilePreviewResult, type FileProviderKind, type FileSearchResult, type TransferEndpoint, type WorkspaceToolTab } from "$lib/bindings";
-  import { clearFilesClipboard, filesClipboardSnapshot, setFilesClipboard } from "$lib/files/clipboard.svelte";
-  import { basename, buildFilesColumnsView, columnsForVisiblePane, type FilesColumnView } from "$lib/files/columns";
+  import { commands, type FileEntry, type FileListResult, type FilePreviewResult, type FileProviderKind, type FileSearchResult, type TransferEndpoint, type TransferQueueSnapshot, type TransferTask, type WorkspaceToolTab } from "$lib/bindings";
+  import { setFilesClipboard } from "$lib/files/clipboard.svelte";
+  import { basename, buildFilesColumnsView, columnsForPath, columnsForVisiblePane, type FilesColumnView } from "$lib/files/columns";
   import { filesSelectionContextMenuActions, type FilesContextMenuAction, type FilesContextMenuActionId } from "$lib/files/context-menu";
   import { filesToolSelection, resetFilesToolSelection } from "$lib/files/selection.svelte";
   import { selectFilesContextTarget, selectFilesEntry, selectFilesMarquee } from "$lib/files/selection";
   import { DEFAULT_FILES_TOOLBAR_ACTION_IDS, normalizeFilesToolbarActionIds, type FilesToolbarActionId } from "$lib/files/toolbar-actions";
-  import { buildFileTreeRows, fileTreeClickAction, fileTreeDoubleClickAction, isRenderableFilePreview, shouldShowFilePreviewRegion } from "$lib/files/tree";
+  import { resolveFilesUploadTarget } from "$lib/files/upload-target";
+  import {
+    buildFileTreeRootModel,
+    buildFileTreeRows,
+    fileTreeClickAction,
+    fileTreeDoubleClickAction,
+    filesTreeInitialFocusPlan,
+    filesTreeStickyAncestors,
+    isRenderableFilePreview,
+    normalizeFilesTreeStickySettings,
+    shouldShowFilePreviewRegion,
+  } from "$lib/files/tree";
   import {
     FILES_WORKSPACE_SSH_VERIFICATION_SUBMITTED_EVENT,
     isFilesWorkspaceVerificationPendingError,
@@ -33,6 +46,13 @@
     textPreviewLimitBytes?: number;
     imagePreviewLimitBytes?: number;
     toolbarActionIds?: readonly string[];
+    treeStickyEnabled?: boolean;
+    treeStickyMaxLevels?: number;
+  };
+
+  type TransferQueueChangedEvent = {
+    version: number;
+    snapshot: TransferQueueSnapshot;
   };
 
   let {
@@ -44,6 +64,8 @@
     textPreviewLimitBytes = 1_048_576,
     imagePreviewLimitBytes = 10_485_760,
     toolbarActionIds = DEFAULT_FILES_TOOLBAR_ACTION_IDS,
+    treeStickyEnabled = true,
+    treeStickyMaxLevels = 3,
   }: Props = $props();
   let path = $state<string | null>(null);
   // This component is keyed by ToolTab id by the workspace renderer, so the initial id is stable for this instance.
@@ -81,9 +103,11 @@
     height: number;
   } | null>(null);
   let expandedTreePaths = $state<Record<string, boolean>>({});
+  let userCollapsedTreePaths = $state<Record<string, boolean>>({});
   let treeChildrenByPath = $state<Record<string, FileEntry[]>>({});
   let treeLoadingByPath = $state<Record<string, boolean>>({});
   let treeErrorByPath = $state<Record<string, string>>({});
+  const directoryChildrenLoadPromises = new Map<string, Promise<void>>();
   let filesRoot: HTMLElement | null = null;
   let columnsPanes = $state<ColumnsPane[]>([]);
   let columnsMotion = $state<ColumnsMotion>("idle");
@@ -92,27 +116,50 @@
   let columnsMotionSettling = $state(false);
   let columnsResizeColumnCount = $state<number | null>(null);
   let nameDialog = $state<{
-    action: "create_directory" | "rename" | "chmod";
+    action: "create_directory" | "rename" | "chmod" | "upload_target";
     title: string;
     label: string;
     value: string;
   } | null>(null);
+  let pendingUploadSource = $state<"dialog" | "drop" | null>(null);
+  let pendingDroppedPaths = $state<string[]>([]);
+  let firstVisibleTreePath = $state("");
+  let externalDropTargetPath = $state<string | null>(null);
   type FilesColumn = FilesColumnView<FileEntry>;
   type ColumnsMotion = "idle" | "forward" | "backward" | "resize";
   type ColumnsMotionHint = "forward" | "backward" | "none";
   type ColumnsPane = {
     id: string;
     columns: FilesColumn[];
+    renderColumns?: FilesColumn[];
     current: boolean;
+  };
+
+  type ColumnsSlideMotionWindow = {
+    previous: FilesColumn[];
+    current: FilesColumn[];
+    distance: string;
   };
   let lastColumnsSignature = "";
   let pendingColumnsMotionHint = $state<ColumnsMotionHint | null>(null);
   let columnsMotionGeneration = 0;
-  let columnsMotionCleanup: number | null = null;
+  let columnsMotionFinishTimer: number | null = null;
+  let columnsMotionDistance = $state("100%");
+  let columnsMotionTranslate = $state("0px");
+  let columnsMotionTransition = $state("none");
+  let pendingColumnsScrollOffsets: ReadonlyMap<string, { scrollTop: number; anchorPath: string | null }> | null = null;
+  let pendingColumnsFocusWindowPath: string | null = null;
+  let pendingColumnsReplaceWithoutMotionPath: string | null = null;
   let filesResult = $state<FileListResult | undefined>(undefined);
   let filesLoading = $state(false);
   let filesError = $state<unknown>(null);
   let filesLoadGeneration = 0;
+  let initialDirectoryFocusPath = "";
+  let columnsAncestorPreloadKey = "";
+  let treeAncestorPreloadKey = "";
+  let treeInitialFocusScrollKey = "";
+  let handledCompletedTransferIds = new Set<string>();
+  let treeVisibleFrame: number | null = null;
   const queryClient = useQueryClient();
   const overlayVerticalOptions = {
     overflow: {
@@ -158,14 +205,16 @@
       theme: "os-theme-nocturne",
     },
   } as const;
-  const columnsMotionDurationMs = 180;
-  const columnsMotionEasing = "cubic-bezier(0.22, 1, 0.36, 1)";
+  const columnsMotionDurationMs = 480;
+  const columnsMotionEasing = "cubic-bezier(0.33, 0, 0.2, 1)";
 
   onMount(() => {
     const removeNativeMarqueeListeners = installNativeMarqueeListeners();
+    const removeTreeScrollListener = installTreeVisibleScrollListener();
     if (!hasTauriRuntime()) {
       return () => {
         removeNativeMarqueeListeners();
+        removeTreeScrollListener();
         clearColumnsMotionCleanup();
       };
     }
@@ -176,14 +225,18 @@
       .onDragDropEvent((event) => {
         if (event.payload.type === "enter" || event.payload.type === "over") {
           dragHover = true;
+          externalDropTargetPath = directoryDropTargetFromPosition(event.payload.position?.x, event.payload.position?.y);
           return;
         }
         if (event.payload.type === "leave") {
           dragHover = false;
+          externalDropTargetPath = null;
           return;
         }
         dragHover = false;
-        void uploadDroppedPaths(event.payload.paths).catch((error) => {
+        const explicitDirectoryPath = directoryDropTargetFromPosition(event.payload.position?.x, event.payload.position?.y);
+        externalDropTargetPath = null;
+        void uploadDroppedPaths(event.payload.paths, explicitDirectoryPath).catch((error) => {
           operationError = error instanceof Error ? error.message : String(error);
         });
       })
@@ -200,8 +253,10 @@
     return () => {
       disposed = true;
       removeNativeMarqueeListeners();
+      removeTreeScrollListener();
       removeMarqueeWindowListeners();
       clearColumnsMotionCleanup();
+      clearTreeVisibleFrame();
       unlisten?.();
     };
   });
@@ -223,14 +278,49 @@
     };
   });
 
+  onMount(() => {
+    if (!hasTauriRuntime()) return;
+    let disposed = false;
+    let unlisten: (() => void) | null = null;
+    void listen<TransferQueueChangedEvent>("transfer://changed", (event) => {
+      if (disposed) return;
+      void refreshForCompletedUploads(event.payload.snapshot).catch((error) => {
+        operationError = error instanceof Error ? error.message : String(error);
+      });
+    })
+      .then((dispose) => {
+        if (disposed) {
+          dispose();
+          return;
+        }
+        unlisten = dispose;
+      })
+      .catch((error) => {
+        operationError = error instanceof Error ? error.message : String(error);
+      });
+
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  });
+
   const result = $derived(filesResult);
   const currentPath = $derived(result?.provider.current_path ?? toolTab.title);
   const entries = $derived((result?.entries ?? []).filter((entry) => showHidden || !entry.name.startsWith(".")));
   const visibleTreeChildrenByPath = $derived(filterEntriesByVisibility(treeChildrenByPath));
+  const treeRootModel = $derived(
+    buildFileTreeRootModel({
+      rootPath: result?.provider.root_path ?? currentPath,
+      currentPath,
+      currentEntries: entries,
+      childrenByPath: visibleTreeChildrenByPath,
+    }),
+  );
   const treeRows = $derived(
     buildFileTreeRows({
-      rootEntries: entries,
-      childrenByPath: visibleTreeChildrenByPath,
+      rootEntries: treeRootModel.rootEntries,
+      childrenByPath: treeRootModel.childrenByPath,
       expandedPaths: recordKeySet(expandedTreePaths),
       loadingPaths: recordKeySet(treeLoadingByPath),
       errorByPath: recordStringMap(treeErrorByPath),
@@ -245,13 +335,30 @@
     selectionRevision;
     return selection.selectedPaths.map((selected) => findEntryByPath(selected)).filter((entry): entry is FileEntry => entry !== null);
   });
-  const fileColumns = $derived(buildFilesColumnsView({ currentPath, selectedPath, activeEntries: entries, childrenByPath: visibleTreeChildrenByPath }));
-  const filesClipboard = $derived(filesClipboardSnapshot());
-  const canPaste = $derived(Boolean(filesClipboard && result?.provider.capabilities.can_write));
+  const fileColumns = $derived(
+    buildFilesColumnsView({
+      rootPath: result?.provider.root_path ?? currentPath,
+      currentPath,
+      selectedPath,
+      activeEntries: entries,
+      childrenByPath: visibleTreeChildrenByPath,
+    }),
+  );
   const visibleToolbarActionIds = $derived(normalizeFilesToolbarActionIds(toolbarActionIds));
+  const focusedDirectoryPath = $derived(focusedFilesDirectoryPath());
+  const selectionSummary = $derived(selectedEntries.length === 0 ? "" : `${selectedEntries.length} ${selectedEntries.length === 1 ? "item" : "items"} selected`);
+  const treeStickySettings = $derived(normalizeFilesTreeStickySettings({ enabled: treeStickyEnabled, maxLevels: treeStickyMaxLevels }));
+  const treeStickyRows = $derived(
+    filesTreeStickyAncestors({
+      rows: treeRows,
+      firstVisiblePath: firstVisibleTreePath || selectedPath || treeRows[0]?.entry.path || "",
+      maxLevels: treeStickySettings.maxLevels,
+      enabled: treeStickySettings.enabled,
+    }),
+  );
 
   const previewQuery = createQuery(() => ({
-    queryKey: ["files", "preview", toolTab.id, toolTab.host_id, previewPath, textPreviewLimitBytes, imagePreviewLimitBytes],
+    queryKey: ["files", "preview", workspaceId, toolTab.id, toolTab.host_id, previewPath, textPreviewLimitBytes, imagePreviewLimitBytes],
     enabled: Boolean(previewPath),
     queryFn: () =>
       unwrapCommand(
@@ -268,7 +375,7 @@
   const previewResult = $derived(previewQuery.data as FilePreviewResult | undefined);
   const previewVisible = $derived(
     shouldShowFilePreviewRegion({
-      selectedPath: selectedEntry?.path ?? "",
+      selectedPath,
       previewPath,
       preview: previewResult,
     }),
@@ -287,6 +394,38 @@
     if (!path && result?.provider.current_path) {
       path = result.provider.current_path;
     }
+    if (!initialDirectoryFocusPath && result?.provider.current_path) {
+      initialDirectoryFocusPath = normalizeFilePath(result.provider.current_path);
+    }
+  });
+
+  $effect(() => {
+    if (!result?.provider.root_path || !result.provider.current_path) return;
+    const plan = filesTreeInitialFocusPlan({
+      rootPath: result.provider.root_path,
+      focusPath: result.provider.current_path,
+      collapsedPaths: recordKeySet(userCollapsedTreePaths),
+    });
+    if (plan.expandPaths.every((directoryPath) => expandedTreePaths[directoryPath])) return;
+    expandedTreePaths = {
+      ...Object.fromEntries(plan.expandPaths.map((directoryPath) => [directoryPath, true])),
+      ...expandedTreePaths,
+    };
+  });
+
+  $effect(() => {
+    if (viewMode !== "tree" || !result?.provider.root_path || !result.provider.current_path) return;
+    const plan = filesTreeInitialFocusPlan({
+      rootPath: result.provider.root_path,
+      focusPath: result.provider.current_path,
+      collapsedPaths: recordKeySet(userCollapsedTreePaths),
+    });
+    const preloadKey = `${result.provider.root_path}\u001f${result.provider.current_path}\u001f${plan.expandPaths.join("\u001e")}`;
+    if (treeAncestorPreloadKey === preloadKey) return;
+    treeAncestorPreloadKey = preloadKey;
+    void preloadTreeFocusedAncestorDirectories(plan.expandPaths).catch((error) => {
+      operationError = error instanceof Error ? error.message : String(error);
+    });
   });
 
   $effect(() => {
@@ -296,7 +435,29 @@
   });
 
   $effect(() => {
+    if (viewMode !== "columns") return;
     syncColumnsPanes(fileColumns);
+  });
+
+  $effect(() => {
+    if (viewMode !== "columns" || !result?.provider.root_path || !result.provider.current_path) return;
+    const preloadKey = `${result.provider.root_path}\u001f${result.provider.current_path}`;
+    if (columnsAncestorPreloadKey === preloadKey) return;
+    columnsAncestorPreloadKey = preloadKey;
+    void preloadColumnsAncestorDirectories(result.provider.root_path, result.provider.current_path).catch((error) => {
+      operationError = error instanceof Error ? error.message : String(error);
+    });
+  });
+
+  $effect(() => {
+    treeRows;
+    if (viewMode !== "tree") return;
+    scheduleFirstVisibleTreePathUpdate();
+    scheduleTreeInitialFocusScroll();
+  });
+
+  $effect(() => {
+    if (viewMode === "columns" && previewVisible) scheduleColumnsScrollToActiveWindow();
   });
 
   async function refresh() {
@@ -305,6 +466,28 @@
       .map(([directoryPath]) => directoryPath);
     await queryClient.invalidateQueries({ queryKey: ["files", "list", toolTab.id] });
     await loadFilesForPath(path ?? result?.provider.current_path ?? null, { hostId: toolTab.host_id, toolTabId: toolTab.id, force: true });
+    await Promise.all(expandedDirectories.map((directoryPath) => reloadDirectoryChildren(directoryPath)));
+  }
+
+  async function refreshForCompletedUploads(snapshot: TransferQueueSnapshot) {
+    const completedUploads = snapshot.tasks.filter((task) => isCompletedUploadForThisFilesTool(task));
+    const freshTasks = completedUploads.filter((task) => !handledCompletedTransferIds.has(task.id));
+    if (freshTasks.length === 0) return;
+    handledCompletedTransferIds = new Set([...handledCompletedTransferIds, ...freshTasks.map((task) => task.id)]);
+    const changedDirectories = new Set(freshTasks.map((task) => parentPathOf(task.destination.path)));
+    await refreshVisibleDirectoriesPreservingState(changedDirectories);
+  }
+
+  async function refreshVisibleDirectoriesPreservingState(changedDirectories: ReadonlySet<string>) {
+    const expandedDirectories = Object.entries(expandedTreePaths)
+      .filter(([, expanded]) => expanded)
+      .map(([directoryPath]) => directoryPath)
+      .filter((directoryPath) => changedDirectories.has(directoryPath) || hasChangedAncestor(directoryPath, changedDirectories));
+    const currentDirectory = path ?? result?.provider.current_path ?? null;
+    if (currentDirectory && (changedDirectories.has(currentDirectory) || hasChangedAncestor(currentDirectory, changedDirectories))) {
+      await queryClient.invalidateQueries({ queryKey: ["files", "list", toolTab.id, toolTab.host_id, currentDirectory] });
+      await loadFilesForPath(currentDirectory, { hostId: toolTab.host_id, toolTabId: toolTab.id, force: true, preserveLoadingState: true });
+    }
     await Promise.all(expandedDirectories.map((directoryPath) => reloadDirectoryChildren(directoryPath)));
   }
 
@@ -322,10 +505,10 @@
 
   async function loadFilesForPath(
     targetPath: string | null,
-    options: { hostId: string; toolTabId: string; force?: boolean },
+    options: { hostId: string; toolTabId: string; force?: boolean; preserveLoadingState?: boolean },
   ) {
     const generation = ++filesLoadGeneration;
-    filesLoading = true;
+    if (!options.preserveLoadingState) filesLoading = true;
     filesError = null;
     try {
       const next = await queryClient.fetchQuery({
@@ -429,16 +612,23 @@
 
   async function clickTreeEntry(entry: FileEntry, event?: MouseEvent) {
     applyEntrySelection(entry, treeRows.map((row) => row.entry.path), event);
-    if (fileTreeClickAction(entry) === "toggle-directory") {
+    if (fileTreeClickAction(entry, event?.detail ?? 1) === "toggle-directory") {
       await toggleTreeDirectory(entry);
     }
   }
 
   async function toggleTreeDirectory(entry: FileEntry) {
     if (entry.kind !== "directory") return;
-    const willExpand = !expandedTreePaths[entry.path];
-    expandedTreePaths = { ...expandedTreePaths, [entry.path]: willExpand };
-    if (!willExpand || treeChildrenByPath[entry.path] || treeLoadingByPath[entry.path]) {
+    const normalizedPath = normalizeFilePath(entry.path);
+    const willExpand = !expandedTreePaths[normalizedPath];
+    expandedTreePaths = { ...expandedTreePaths, [normalizedPath]: willExpand };
+    if (willExpand) {
+      const { [normalizedPath]: _expandedAgain, ...remainingCollapsedPaths } = userCollapsedTreePaths;
+      userCollapsedTreePaths = remainingCollapsedPaths;
+    } else {
+      userCollapsedTreePaths = { ...userCollapsedTreePaths, [normalizedPath]: true };
+    }
+    if (!willExpand || treeChildrenByPath[normalizedPath] || treeLoadingByPath[normalizedPath]) {
       return;
     }
 
@@ -447,14 +637,35 @@
 
   async function loadDirectoryChildren(entry: FileEntry) {
     if (entry.kind !== "directory") return;
-    if (treeChildrenByPath[entry.path] || treeLoadingByPath[entry.path]) return;
+    const normalizedPath = normalizeFilePath(entry.path);
+    if (treeChildrenByPath[normalizedPath]) return;
+    const existingLoad = directoryChildrenLoadPromises.get(normalizedPath);
+    if (existingLoad) {
+      await existingLoad;
+      return;
+    }
     await reloadDirectoryChildren(entry.path);
   }
 
   async function reloadDirectoryChildren(directoryPath: string) {
-    if (treeLoadingByPath[directoryPath]) return;
-    treeLoadingByPath = { ...treeLoadingByPath, [directoryPath]: true };
-    const { [directoryPath]: _previousError, ...remainingErrors } = treeErrorByPath;
+    const normalizedDirectoryPath = normalizeFilePath(directoryPath);
+    const existingLoad = directoryChildrenLoadPromises.get(normalizedDirectoryPath);
+    if (existingLoad) {
+      await existingLoad;
+      return;
+    }
+    const loadPromise = doReloadDirectoryChildren(directoryPath, normalizedDirectoryPath);
+    directoryChildrenLoadPromises.set(normalizedDirectoryPath, loadPromise);
+    try {
+      await loadPromise;
+    } finally {
+      directoryChildrenLoadPromises.delete(normalizedDirectoryPath);
+    }
+  }
+
+  async function doReloadDirectoryChildren(directoryPath: string, normalizedDirectoryPath: string) {
+    treeLoadingByPath = { ...treeLoadingByPath, [normalizedDirectoryPath]: true };
+    const { [normalizedDirectoryPath]: _previousError, ...remainingErrors } = treeErrorByPath;
     treeErrorByPath = remainingErrors;
     try {
       const childResult = await unwrapCommand(
@@ -465,16 +676,33 @@
       );
       treeChildrenByPath = {
         ...treeChildrenByPath,
-        [directoryPath]: childResult.entries,
+        [normalizedDirectoryPath]: childResult.entries,
       };
     } catch (error) {
       treeErrorByPath = {
         ...treeErrorByPath,
-        [directoryPath]: error instanceof Error ? error.message : String(error),
+        [normalizedDirectoryPath]: error instanceof Error ? error.message : String(error),
       };
     } finally {
-      const { [directoryPath]: _completed, ...remainingLoading } = treeLoadingByPath;
+      const { [normalizedDirectoryPath]: _completed, ...remainingLoading } = treeLoadingByPath;
       treeLoadingByPath = remainingLoading;
+    }
+  }
+
+  async function preloadColumnsAncestorDirectories(rootPath: string, currentDirectoryPath: string) {
+    const ancestorDirectories = columnAncestorDirectoryPaths(rootPath, currentDirectoryPath);
+    for (const directoryPath of ancestorDirectories) {
+      const normalizedDirectoryPath = normalizeFilePath(directoryPath);
+      if (treeChildrenByPath[normalizedDirectoryPath] || treeLoadingByPath[normalizedDirectoryPath]) continue;
+      await reloadDirectoryChildren(directoryPath);
+    }
+  }
+
+  async function preloadTreeFocusedAncestorDirectories(directoryPaths: readonly string[]) {
+    for (const directoryPath of directoryPaths) {
+      const normalizedDirectoryPath = normalizeFilePath(directoryPath);
+      if (treeChildrenByPath[normalizedDirectoryPath] || treeLoadingByPath[normalizedDirectoryPath]) continue;
+      await reloadDirectoryChildren(providerDirectoryRequestPath(directoryPath));
     }
   }
 
@@ -491,12 +719,50 @@
   }
 
   async function selectEntry(entry: FileEntry, visiblePaths: readonly string[], event?: MouseEvent) {
-    pendingColumnsMotionHint = classifyColumnsSelectionMotion(entry);
-    applyEntrySelection(entry, visiblePaths, event);
-    if (viewMode === "columns" && entry.kind === "directory") {
-      searchResult = null;
-      previewPath = "";
-      await loadDirectoryChildren(entry);
+    blurFilesRowAfterClick(event);
+    let selectionScrollOffsets: ReadonlyMap<string, { scrollTop: number; anchorPath: string | null }> | null = null;
+    if (viewMode === "columns") {
+      const capturedScrollOffsets = captureColumnsScrollOffsets();
+      if (hasMeaningfulColumnsScrollOffsets(capturedScrollOffsets)) {
+        selectionScrollOffsets = capturedScrollOffsets;
+        pendingColumnsScrollOffsets = selectionScrollOffsets;
+      }
+    }
+    const columnsMotionHint = classifyColumnsSelectionMotion(entry);
+    pendingColumnsMotionHint = columnsMotionHint;
+    pendingColumnsReplaceWithoutMotionPath = columnsMotionHint === "none" && entry.kind === "directory" ? normalizeFilePath(entry.path) : null;
+    pendingColumnsFocusWindowPath = columnsSelectionFocusWindowPath(entry, event);
+    try {
+      const shouldLoadBeforeSelection = shouldLoadColumnsDirectoryBeforeSelection(entry, columnsMotionHint);
+      if (shouldLoadBeforeSelection) {
+        searchResult = null;
+        previewPath = "";
+        applyEntrySelection(entry, visiblePaths, event);
+        path = entry.path;
+        await loadDirectoryChildren(entry);
+      } else {
+        applyEntrySelection(entry, visiblePaths, event);
+        if (viewMode === "columns" && entry.kind === "directory") {
+          path = entry.path;
+        }
+      }
+      if (viewMode === "columns" && entry.kind === "directory" && !shouldLoadBeforeSelection) {
+        searchResult = null;
+        previewPath = "";
+        await loadDirectoryChildren(entry);
+      }
+    } finally {
+      if (selectionScrollOffsets && pendingColumnsScrollOffsets === selectionScrollOffsets) {
+        await tick();
+        scheduleColumnsScrollRestore(selectionScrollOffsets);
+        requestAnimationFrame(() => {
+          requestAnimationFrame(() => {
+            if (pendingColumnsScrollOffsets === selectionScrollOffsets) {
+              pendingColumnsScrollOffsets = null;
+            }
+          });
+        });
+      }
     }
   }
 
@@ -530,6 +796,26 @@
     selectionRevision += 1;
   }
 
+  function shouldLoadColumnsDirectoryBeforeSelection(entry: FileEntry, columnsMotionHint: ColumnsMotionHint | null) {
+    if (viewMode !== "columns" || entry.kind !== "directory") return false;
+    if (columnsMotionHint === "forward" || columnsMotionHint === "backward") return true;
+    return !treeChildrenByPath[normalizeFilePath(entry.path)];
+  }
+
+  function handleFilesRowPointerDown(event: PointerEvent | MouseEvent) {
+    event.stopPropagation();
+    event.preventDefault();
+  }
+
+  function blurFilesRowAfterClick(event?: MouseEvent) {
+    const currentTarget = event?.currentTarget;
+    if (currentTarget instanceof HTMLElement) currentTarget.blur();
+    const activeElement = document.activeElement;
+    if (activeElement instanceof HTMLElement && (activeElement.matches(".column-row") || activeElement.matches(".files-row"))) {
+      activeElement.blur();
+    }
+  }
+
   function isPathSelected(path: string) {
     selectionRevision;
     return selection.selectedPaths.includes(path);
@@ -548,6 +834,7 @@
       columnsResizeColumnCount = null;
       columnsPanes = [currentColumnsPane(nextColumns)];
       lastColumnsSignature = nextSignature;
+      scheduleColumnsScrollToActiveWindow();
       return;
     }
 
@@ -555,19 +842,22 @@
     const previousColumns = previousPane?.columns ?? [];
     if (columnsPathSignature(previousColumns) === columnsPathSignature(nextColumns)) {
       if (columnsMotionInFlight()) {
+        const scrollOffsets = consumePendingColumnsScrollOffsets();
         columnsPanes = columnsPanes.map((pane) =>
           pane.current
             ? {
                 ...pane,
                 columns: nextColumns,
-                id: currentColumnsPaneId(),
+                renderColumns: pane.renderColumns ? columnsForMotionWindow(nextColumns) : undefined,
               }
             : pane,
         );
         lastColumnsSignature = nextSignature;
+        scheduleColumnsScrollRestore(scrollOffsets);
+        scheduleColumnsScrollToSelectedDirectoryWindow(nextColumns);
         return;
       }
-      const scrollOffsets = captureColumnsScrollOffsets();
+      const scrollOffsets = consumePendingColumnsScrollOffsets();
       clearColumnsMotionCleanup();
       columnsMotion = "idle";
       columnsMotionPreparing = false;
@@ -577,14 +867,15 @@
       columnsPanes = [currentColumnsPane(nextColumns)];
       lastColumnsSignature = nextSignature;
       scheduleColumnsScrollRestore(scrollOffsets);
+      scheduleColumnsScrollToSelectedDirectoryWindow(nextColumns);
       return;
     }
     if (shouldReplaceColumnsWithoutMotion(previousColumns, nextColumns)) {
-      if (previousColumns.length !== nextColumns.length) {
+      if (visibleColumnsWindowCount(previousColumns) !== visibleColumnsWindowCount(nextColumns)) {
         startColumnsResizeMotion(previousColumns, nextColumns, nextSignature);
         return;
       }
-      const scrollOffsets = captureColumnsScrollOffsets();
+      const scrollOffsets = consumePendingColumnsScrollOffsets();
       clearColumnsMotionCleanup();
       columnsMotion = "idle";
       columnsMotionPreparing = false;
@@ -597,7 +888,7 @@
       scheduleColumnsScrollRestore(scrollOffsets);
       return;
     }
-    if (previousColumns.length !== nextColumns.length) {
+    if (visibleColumnsWindowCount(previousColumns) !== visibleColumnsWindowCount(nextColumns)) {
       startColumnsResizeMotion(previousColumns, nextColumns, nextSignature);
       return;
     }
@@ -606,47 +897,133 @@
     const direction = pendingColumnsMotionHint === "forward" || pendingColumnsMotionHint === "backward" ? pendingColumnsMotionHint : inferColumnsMotion(previousColumns, nextColumns);
     pendingColumnsMotionHint = null;
     const generation = ++columnsMotionGeneration;
-    const previous = { id: `previous:${generation}:${previousSignature}`, columns: previousColumns, current: false };
-    const current = { id: `current:${generation}:${nextSignature}`, columns: nextColumns, current: true };
+    const motionWindow = columnsForSlideMotionWindow(previousColumns, nextColumns, direction);
+    const previousRenderColumns = motionWindow?.previous ?? columnsForMotionWindow(previousColumns);
+    const currentRenderColumns = motionWindow?.current ?? columnsForMotionWindow(nextColumns);
+    const previous = {
+      id: `previous:${generation}:${previousSignature}`,
+      columns: previousColumns,
+      renderColumns: previousRenderColumns,
+      current: false,
+    };
+    const current = {
+      id: `current:${generation}:${nextSignature}`,
+      columns: nextColumns,
+      renderColumns: currentRenderColumns,
+      current: true,
+    };
 
     clearColumnsMotionCleanup();
     columnsMotionSettling = false;
     columnsMotion = direction;
+    columnsMotionDistance = motionWindow?.distance ?? "100%";
+    columnsMotionTranslate = direction === "backward" ? negativeColumnsMotionDistance(columnsMotionDistance) : "0px";
     columnsResizeColumnCount = null;
     columnsMotionPreparing = true;
     columnsMotionActive = false;
     columnsPanes = direction === "backward" ? [current, previous] : [previous, current];
     lastColumnsSignature = nextSignature;
 
-    requestAnimationFrame(() => {
+    flushSync();
+    resetColumnsHorizontalScroll();
+    forceColumnsMotionLayout();
+    startColumnsSlideMotionFrame(generation, direction, nextColumns);
+  }
+
+  function startColumnsSlideMotionFrame(generation: number, direction: Exclude<ColumnsMotion, "idle" | "resize">, nextColumns: FilesColumn[]) {
+    clearColumnsMotionFinishTimer();
+    const distance = columnsMotionDistancePixels();
+    const from = direction === "forward" ? 0 : -distance;
+    const to = direction === "forward" ? -distance : 0;
+    columnsMotionTransition = "none";
+    columnsMotionTranslate = `${from}px`;
+    columnsMotionPreparing = true;
+    columnsMotionActive = false;
+    flushSync();
+    const content = applyColumnsMotionElementStyle(`${from}px`, "none");
+    if (content) void content.offsetWidth;
+    columnsMotionTranslate = `${to}px`;
+    columnsMotionPreparing = false;
+    columnsMotionActive = true;
+    flushSync();
+    const activeContent = applyColumnsMotionElementStyle(`${to}px`, "none");
+    if (activeContent) void activeContent.offsetWidth;
+    columnsMotionFinishTimer = window.setTimeout(() => {
+      finishColumnsSlideMotion(generation, nextColumns);
+    }, columnsMotionDurationMs + 120);
+  }
+
+  function finishColumnsSlideMotion(generation: number, nextColumns: FilesColumn[]) {
+    if (columnsMotionGeneration !== generation) return;
+    clearColumnsMotionFinishTimer();
+    const finalPane = columnsPanes.find((pane) => pane.current);
+    const finalColumns = finalPane?.columns ?? nextColumns;
+    columnsMotionSettling = true;
+    columnsPanes = [{ ...currentColumnsPane(finalColumns), renderColumns: columnsForMotionWindow(finalColumns) }];
+    columnsMotion = "idle";
+    columnsMotionDistance = "100%";
+    columnsMotionTranslate = "0px";
+    columnsMotionTransition = "none";
+    applyColumnsMotionElementStyle("0px", "none");
+    columnsResizeColumnCount = null;
+    columnsMotionPreparing = false;
+    columnsMotionActive = false;
+    void tick().then(() => {
       if (columnsMotionGeneration !== generation) return;
-      columnsMotionPreparing = false;
-      columnsMotionActive = true;
-      columnsMotionCleanup = window.setTimeout(() => {
+      columnsPanes = [currentColumnsPane(finalColumns)];
+      return tick();
+    }).then(() => {
+      if (columnsMotionGeneration !== generation) return;
+      scrollColumnsViewToActiveWindow();
+      requestAnimationFrame(() => {
         if (columnsMotionGeneration !== generation) return;
-        const finalPane = columnsPanes.find((pane) => pane.current);
-        const finalColumns = finalPane?.columns ?? nextColumns;
-        columnsMotionSettling = true;
-        columnsPanes = [currentColumnsPane(finalColumns)];
-        columnsMotion = "idle";
-        columnsResizeColumnCount = null;
-        columnsMotionPreparing = false;
-        columnsMotionActive = false;
-        columnsMotionCleanup = null;
-        requestAnimationFrame(() => {
-          if (columnsMotionGeneration !== generation) return;
-          columnsMotionSettling = false;
-        });
-      }, columnsMotionDurationMs + 40);
+        columnsMotionSettling = false;
+        scheduleColumnsScrollToActiveWindow();
+      });
     });
+  }
+
+  function columnsMotionDistancePixels() {
+    const view = filesRoot?.querySelector<HTMLElement>(".columns-view");
+    const width = view?.getBoundingClientRect().width ?? 0;
+    if (columnsMotionDistance === "calc(100% / 3)") return width / 3;
+    if (columnsMotionDistance === "calc(100% / 6)") return width / 6;
+    return width;
+  }
+
+  function negativeColumnsMotionDistance(distance: string) {
+    if (distance === "100%") return "-100%";
+    if (distance === "calc(100% / 3)") return "calc(-100% / 3)";
+    if (distance === "calc(100% / 6)") return "calc(-100% / 6)";
+    return `calc(-1 * ${distance})`;
+  }
+
+  function columnsMotionDistanceClass(distance: string) {
+    if (distance === "calc(100% / 3)") return "third";
+    if (distance === "calc(100% / 6)") return "sixth";
+    return "full";
+  }
+
+  function columnsMotionContentElement() {
+    return filesRoot?.querySelector<HTMLElement>(".columns-view .columns-content") ?? null;
+  }
+
+  function applyColumnsMotionElementStyle(translate: string, transition: string) {
+    const content = columnsMotionContentElement();
+    if (!content) return null;
+    content.style.setProperty("transition", transition);
+    content.style.setProperty("transform", `translateX(${translate})`);
+    void content.offsetWidth;
+    return content;
   }
 
   function startColumnsResizeMotion(previousColumns: FilesColumn[], nextColumns: FilesColumn[], nextSignature: string) {
     const generation = ++columnsMotionGeneration;
-    const scrollOffsets = captureColumnsScrollOffsets();
+    const scrollOffsets = consumePendingColumnsScrollOffsets();
     clearColumnsMotionCleanup();
     columnsMotionSettling = false;
     columnsMotion = "resize";
+    columnsMotionDistance = "100%";
     columnsMotionPreparing = true;
     columnsMotionActive = false;
     columnsResizeColumnCount = Math.max(1, previousColumns.length);
@@ -665,13 +1042,16 @@
           if (columnsMotionGeneration !== generation) return;
           restoreColumnsScrollOffsets(scrollOffsets);
           scheduleColumnsScrollRestore(scrollOffsets);
-          columnsMotionCleanup = window.setTimeout(() => {
+          clearColumnsMotionFinishTimer();
+          columnsMotionFinishTimer = window.setTimeout(() => {
             if (columnsMotionGeneration !== generation) return;
+            columnsMotionFinishTimer = null;
             columnsMotion = "idle";
+            columnsMotionDistance = "100%";
             columnsMotionPreparing = false;
             columnsMotionActive = false;
             columnsResizeColumnCount = null;
-            columnsMotionCleanup = null;
+            scheduleColumnsScrollToActiveWindow();
           }, columnsMotionDurationMs + 40);
         });
       });
@@ -679,12 +1059,18 @@
   }
 
   function columnsMotionInFlight() {
-    return columnsMotionPreparing || columnsMotionActive || columnsMotionCleanup !== null;
+    return columnsMotionPreparing || columnsMotionActive || columnsMotionFinishTimer !== null;
   }
 
   function shouldReplaceColumnsWithoutMotion(previous: readonly FilesColumn[], next: readonly FilesColumn[]) {
     if (pendingColumnsMotionHint === "none") return true;
     if (pendingColumnsMotionHint === "forward" || pendingColumnsMotionHint === "backward") return false;
+    if (
+      pendingColumnsReplaceWithoutMotionPath &&
+      next.some((column) => sameFilePath(column.path, pendingColumnsReplaceWithoutMotionPath ?? ""))
+    ) {
+      return true;
+    }
     const columnsSelectedEntry = selectedEntryForColumnsMotion();
     if (!previous.length || !next.length || !columnsSelectedEntry) return false;
     if (columnsSelectedEntry.kind !== "directory") return true;
@@ -709,8 +1095,19 @@
     if (pathDescendsFrom(previousLastPath, entry.path)) return "backward";
 
     const entryColumnIndex = currentColumns.findIndex((column) => column.entries.some((columnEntry) => sameFilePath(columnEntry.path, entry.path)));
+    const visibleColumnCount = visibleColumnsWindowCount(currentColumns);
+    const visibleStartIndex = Math.max(0, currentColumns.length - visibleColumnCount);
+    const entryColumnPath = currentColumns[entryColumnIndex]?.path ?? "";
+    if (
+      visibleColumnCount === 3 &&
+      entryColumnIndex === visibleStartIndex &&
+      !sameFilePath(entryColumnPath, currentPath) &&
+      !sameFilePath(entryColumnPath, initialDirectoryFocusPath)
+    ) {
+      return "backward";
+    }
     if (entryColumnIndex >= 0 && entryColumnIndex < currentColumns.length - 1) {
-      return currentColumns.length > 2 && entryColumnIndex === 0 ? "backward" : "none";
+      return "none";
     }
     return entryColumnIndex === currentColumns.length - 1 ? "forward" : "none";
   }
@@ -719,11 +1116,41 @@
     return columnsPanes.find((pane) => pane.current)?.columns ?? fileColumns;
   }
 
+  function columnsSelectionFocusWindowPath(entry: FileEntry, event?: MouseEvent) {
+    if (viewMode !== "columns" || entry.kind !== "directory") return null;
+    const clickedColumn = event?.currentTarget instanceof HTMLElement ? event.currentTarget.closest<HTMLElement>(".file-column") : null;
+    const columnsView = clickedColumn?.closest<HTMLElement>(".columns-view");
+    const currentPane = columnsView?.querySelector<HTMLElement>(".columns-pane.current") ?? columnsView;
+    if (clickedColumn && columnsView && currentPane) {
+      const viewRect = columnsView.getBoundingClientRect();
+      const visibleColumns = [...currentPane.querySelectorAll<HTMLElement>(".file-column")].filter((column) => {
+        const rect = column.getBoundingClientRect();
+        return Math.max(0, Math.min(rect.right, viewRect.right) - Math.max(rect.left, viewRect.left)) >= 40;
+      });
+      if (visibleColumns.length >= 3 && visibleColumns[0] === clickedColumn) {
+        const clickedColumnPath = clickedColumn.getAttribute("aria-label");
+        if (!clickedColumnPath) throw new Error("Columns view column is missing its path label");
+        return clickedColumnPath;
+      }
+    }
+
+    const currentColumns = columnsForMotionBasis();
+    const visibleColumnCount = visibleColumnsWindowCount(currentColumns);
+    if (visibleColumnCount < 3) return null;
+    const visibleStartIndex = Math.max(0, currentColumns.length - visibleColumnCount);
+    const entryColumnIndex = currentColumns.findIndex((column) => column.entries.some((columnEntry) => sameFilePath(columnEntry.path, entry.path)));
+    return entryColumnIndex === visibleStartIndex ? currentColumns[entryColumnIndex].path : null;
+  }
+
   function clearPendingColumnsMotionHintIfSettled(columns: readonly FilesColumn[]) {
     if (!pendingColumnsMotionHint) return;
     const columnsSelectedEntry = selectedEntryForColumnsMotion();
     if (!columnsSelectedEntry || columnsSelectedEntry.kind !== "directory" || columns.some((column) => sameFilePath(column.path, columnsSelectedEntry.path))) {
       pendingColumnsMotionHint = null;
+      pendingColumnsFocusWindowPath = null;
+      if (pendingColumnsReplaceWithoutMotionPath && sameFilePath(currentPath, pendingColumnsReplaceWithoutMotionPath)) {
+        pendingColumnsReplaceWithoutMotionPath = null;
+      }
     }
   }
 
@@ -759,8 +1186,52 @@
     return columnsForRenderedPane(pane).length + (previewVisible && pane.current ? 1 : 0);
   }
 
+  function visibleColumnsWindowCount(columns: readonly FilesColumn[]) {
+    return Math.min(columns.length, 3);
+  }
+
   function columnsForRenderedPane(pane: ColumnsPane) {
-    return columnsForVisiblePane(pane.columns, { previewVisible: previewVisible && pane.current });
+    return columnsForVisiblePane(pane.renderColumns ?? pane.columns, { previewVisible: previewVisible && pane.current });
+  }
+
+  function columnsForMotionWindow(columns: readonly FilesColumn[]) {
+    const count = visibleColumnsWindowCount(columns);
+    const start = preferredColumnsWindowStart(columns, count);
+    return columns.slice(start, start + count);
+  }
+
+  function preferredColumnsWindowStart(columns: readonly FilesColumn[], count = visibleColumnsWindowCount(columns)) {
+    const fallback = Math.max(0, columns.length - count);
+    if (!pendingColumnsFocusWindowPath) return fallback;
+    const selectedColumnIndex = columns.findIndex((column) => sameFilePath(column.path, pendingColumnsFocusWindowPath ?? ""));
+    if (selectedColumnIndex < 0) return fallback;
+    const maxStart = Math.max(0, columns.length - count);
+    return Math.min(Math.max(0, selectedColumnIndex - 1), maxStart);
+  }
+
+  function columnsForSlideMotionWindow(previous: readonly FilesColumn[], next: readonly FilesColumn[], direction: ColumnsMotion): ColumnsSlideMotionWindow | null {
+    if (direction !== "backward") return null;
+    const previousPaths = previous.map((column) => normalizeFilePath(column.path));
+    const nextPaths = next.map((column) => normalizeFilePath(column.path));
+    if (previousPaths.length < 3 || nextPaths.length < 3) return null;
+
+    if (sameStringArray(previousPaths.slice(-3, -1), nextPaths.slice(-2))) {
+      return {
+        previous: previous.slice(-1),
+        current: next.slice(-3),
+        distance: "calc(100% / 3)",
+      };
+    }
+
+    if (sameFilePath(previousPaths[previousPaths.length - 3] ?? "", nextPaths[nextPaths.length - 2] ?? "")) {
+      return {
+        previous: previous.slice(-3),
+        current: next.slice(-3),
+        distance: "calc(100% / 6)",
+      };
+    }
+
+    return null;
   }
 
   function columnsSignature(columns: readonly FilesColumn[]) {
@@ -773,7 +1244,7 @@
     return columns.map((column) => column.path).join("\u001f");
   }
 
-  function inferColumnsMotion(previous: readonly FilesColumn[], next: readonly FilesColumn[]): ColumnsMotion {
+  function inferColumnsMotion(previous: readonly FilesColumn[], next: readonly FilesColumn[]): Exclude<ColumnsMotion, "idle" | "resize"> {
     const previousPaths = previous.map((column) => column.path);
     const nextPaths = next.map((column) => column.path);
     if (sameStringArray(previousPaths.slice(1), nextPaths.slice(0, -1))) return "forward";
@@ -793,23 +1264,44 @@
     const path = normalizeFilePath(pathValue);
     const parent = normalizeFilePath(parentValue);
     if (!path || !parent || path === parent) return false;
-    if (parent === "/") return path.startsWith("/");
-    return path.startsWith(`${parent}/`);
+    if (parent === "/") return path.startsWith("/") || /^[A-Za-z]:(?:\/|$)/.test(path);
+    const parentPrefix = parent.endsWith("/") ? parent : `${parent}/`;
+    return path.startsWith(parentPrefix);
   }
 
   function normalizeFilePath(value: string) {
-    return value.replace(/\\/g, "/").replace(/\/+$/, "");
+    const withForwardSlashes = value.replace(/\\/g, "/");
+    if (/^[A-Za-z]:\/?$/.test(withForwardSlashes)) return `${withForwardSlashes.slice(0, 2)}/`;
+    return withForwardSlashes.replace(/\/+$/, "") || "/";
+  }
+
+  function columnAncestorDirectoryPaths(rootPath: string, currentDirectoryPath: string) {
+    const root = normalizeFilePath(rootPath) || "/";
+    const current = normalizeFilePath(currentDirectoryPath);
+    const chain = columnsForPath(current).map(normalizeFilePath);
+    const fullChain = root === "/" && /^[A-Za-z]:(?:\/|$)/.test(current) ? [root, ...chain] : chain;
+    return fullChain.slice(0, -1).map(providerDirectoryRequestPath);
+  }
+
+  function providerDirectoryRequestPath(pathValue: string) {
+    return /^[A-Za-z]:$/.test(pathValue) ? `${pathValue}/` : pathValue;
   }
 
   function clearColumnsMotionCleanup() {
-    if (columnsMotionCleanup !== null) {
-      window.clearTimeout(columnsMotionCleanup);
-      columnsMotionCleanup = null;
-    }
+    clearColumnsMotionFinishTimer();
     columnsMotionPreparing = false;
     columnsMotionActive = false;
     columnsMotionSettling = false;
     columnsResizeColumnCount = null;
+    columnsMotionTranslate = "0px";
+    columnsMotionTransition = "none";
+  }
+
+  function clearColumnsMotionFinishTimer() {
+    if (columnsMotionFinishTimer !== null) {
+      window.clearTimeout(columnsMotionFinishTimer);
+      columnsMotionFinishTimer = null;
+    }
   }
 
   function captureColumnsScrollOffsets() {
@@ -828,15 +1320,118 @@
     return offsets;
   }
 
+  function consumePendingColumnsScrollOffsets() {
+    const offsets = pendingColumnsScrollOffsets ?? captureMeaningfulColumnsScrollOffsets();
+    return offsets;
+  }
+
+  function captureMeaningfulColumnsScrollOffsets() {
+    const offsets = captureColumnsScrollOffsets();
+    return hasMeaningfulColumnsScrollOffsets(offsets) ? offsets : new Map<string, { scrollTop: number; anchorPath: string | null }>();
+  }
+
+  function hasMeaningfulColumnsScrollOffsets(offsets: ReadonlyMap<string, { scrollTop: number; anchorPath: string | null }>) {
+    for (const offset of offsets.values()) {
+      if (Math.abs(offset.scrollTop) > 1) return true;
+    }
+    return false;
+  }
+
   function scheduleColumnsScrollRestore(offsets: ReadonlyMap<string, { scrollTop: number; anchorPath: string | null }>) {
     if (!offsets.size) return;
-    let remainingFrames = 5;
+    let remainingFrames = 4;
     const restore = () => {
       restoreColumnsScrollOffsets(offsets);
       remainingFrames -= 1;
-      if (remainingFrames > 0) requestAnimationFrame(restore);
+      if (remainingFrames > 0) {
+        requestAnimationFrame(restore);
+        return;
+      }
     };
     requestAnimationFrame(restore);
+  }
+
+  function scheduleColumnsScrollToActiveWindow() {
+    let waitFrames = 60;
+    let remainingFrames = 24;
+    const scroll = () => {
+      if (columnsMotion === "resize" || columnsMotionPreparing || columnsMotionActive) {
+        waitFrames -= 1;
+        if (waitFrames > 0) requestAnimationFrame(scroll);
+        return;
+      }
+      scrollColumnsViewToActiveWindow();
+      remainingFrames -= 1;
+      if (remainingFrames > 0) requestAnimationFrame(scroll);
+    };
+    requestAnimationFrame(scroll);
+  }
+
+  function scheduleColumnsScrollToSelectedDirectoryWindow(columns: readonly FilesColumn[]) {
+    const focusPath = pendingColumnsFocusWindowPath;
+    if (!focusPath || !columns.some((column) => sameFilePath(column.path, focusPath))) return;
+    let remainingFrames = 30;
+    const waitForMotion = () => {
+      if (columnsMotionInFlight()) {
+        remainingFrames -= 1;
+        if (remainingFrames > 0) requestAnimationFrame(waitForMotion);
+        return;
+      }
+      scheduleColumnsScrollToActiveWindow();
+    };
+    requestAnimationFrame(waitForMotion);
+  }
+
+  function scrollColumnsViewToActiveWindow() {
+    const view = filesRoot?.querySelector<HTMLElement>(".columns-view");
+    if (!view) return;
+    const scrollTarget = columnsHorizontalScrollTarget(view);
+    if (!scrollTarget) return;
+    const columns = [...(filesRoot?.querySelectorAll<HTMLElement>(".columns-view .columns-pane.current .file-column") ?? [])];
+    const activeColumn = columns.at(-1);
+    if (!activeColumn) return;
+    const visibleColumnCount = Math.min(columns.length, 3);
+    const columnWidth = activeColumn.getBoundingClientRect().width || activeColumn.offsetWidth;
+    const renderedPaths = columns.map((column) => column.getAttribute("aria-label") ?? "");
+    const selectedColumnIndex = pendingColumnsFocusWindowPath
+      ? renderedPaths.findIndex((path) => sameFilePath(path, pendingColumnsFocusWindowPath ?? ""))
+      : -1;
+    const maxStart = Math.max(0, columns.length - visibleColumnCount);
+    const targetStart = selectedColumnIndex >= 0 ? Math.min(Math.max(0, selectedColumnIndex - 1), maxStart) : maxStart;
+    const targetScrollLeft = Math.max(0, targetStart * columnWidth);
+    scrollTarget.scrollLeft = Math.min(targetScrollLeft, scrollTarget.scrollWidth - scrollTarget.clientWidth);
+  }
+
+  function resetColumnsHorizontalScroll() {
+    const view = filesRoot?.querySelector<HTMLElement>(".columns-view");
+    if (!view) return;
+    const scrollTarget = columnsHorizontalScrollTarget(view);
+    if (scrollTarget && scrollTarget.scrollLeft !== 0) scrollTarget.scrollLeft = 0;
+    if (view.scrollLeft !== 0) view.scrollLeft = 0;
+  }
+
+  function forceColumnsMotionLayout() {
+    const content = filesRoot?.querySelector<HTMLElement>(".columns-view .columns-content");
+    if (!content) return;
+    void content.getBoundingClientRect();
+  }
+
+  function canWriteScrollLeft(element: HTMLElement) {
+    if (element.scrollWidth <= element.clientWidth + 4) return false;
+    const original = element.scrollLeft;
+    element.scrollLeft = Math.min(32, element.scrollWidth - element.clientWidth);
+    const writable = element.scrollLeft > 0;
+    element.scrollLeft = original;
+    return writable;
+  }
+
+  function columnsHorizontalScrollTarget(view: HTMLElement) {
+    const candidates = [
+      view,
+      ...(view.matches("[data-overlayscrollbars-viewport]") ? [] : Array.from(view.querySelectorAll<HTMLElement>("[data-overlayscrollbars-viewport]"))),
+      ...Array.from(view.querySelectorAll<HTMLElement>("*")).filter((element) => element.scrollWidth > element.clientWidth + 4),
+    ];
+    return candidates.find(canWriteScrollLeft) ?? null;
   }
 
   function restoreColumnsScrollOffsets(offsets: ReadonlyMap<string, { scrollTop: number; anchorPath: string | null }>) {
@@ -890,15 +1485,6 @@
     const writable = element.scrollTop > 0;
     element.scrollTop = original;
     return writable;
-  }
-
-  function goUp() {
-    if (!currentPath || currentPath === "/" || currentPath === "~") return;
-    const trimmed = currentPath.replace(/\/+$/, "");
-    const index = trimmed.lastIndexOf("/");
-    path = index <= 0 ? "/" : trimmed.slice(0, index);
-    searchResult = null;
-    previewPath = "";
   }
 
   function formatSize(entry: FileEntry) {
@@ -981,14 +1567,85 @@
 
   function findEntryByPath(value: string) {
     if (!value) return null;
+    for (const entry of treeRootModel.rootEntries) {
+      if (entry.path === value) return entry;
+    }
     for (const entry of entries) {
       if (entry.path === value) return entry;
     }
-    for (const children of Object.values(visibleTreeChildrenByPath)) {
+    for (const children of Object.values(treeRootModel.childrenByPath)) {
       const entry = children.find((child) => child.path === value);
       if (entry) return entry;
     }
     return null;
+  }
+
+  function updateFirstVisibleTreePath() {
+    const table = filesRoot?.querySelector<HTMLElement>(".files-table");
+    if (!table) return;
+    const viewport = table.matches("[data-overlayscrollbars-viewport]")
+      ? table
+      : table.querySelector<HTMLElement>("[data-overlayscrollbars-viewport]");
+    const root = viewport ?? table;
+    const rootRect = root.getBoundingClientRect();
+    const rows = filesRoot?.querySelectorAll<HTMLElement>(".files-table .files-row[data-file-entry='true']:not(.sticky-row)") ?? [];
+    for (const row of rows) {
+      const rect = row.getBoundingClientRect();
+      if (rect.bottom > rootRect.top + 2 && rect.top < rootRect.bottom - 2) {
+        firstVisibleTreePath = row.getAttribute("data-entry-path") ?? "";
+        return;
+      }
+    }
+  }
+
+  function scheduleFirstVisibleTreePathUpdate() {
+    if (treeVisibleFrame !== null) return;
+    treeVisibleFrame = requestAnimationFrame(() => {
+      treeVisibleFrame = null;
+      updateFirstVisibleTreePath();
+    });
+  }
+
+  function scheduleTreeInitialFocusScroll() {
+    if (!result?.provider.current_path) return;
+    const focusPath = normalizeFilePath(result.provider.current_path);
+    if (!treeRows.some((row) => sameFilePath(row.entry.path, focusPath))) return;
+    const scrollKey = `${toolTab.id}\u001f${focusPath}\u001f${treeRows.length}`;
+    if (treeInitialFocusScrollKey === scrollKey) return;
+    treeInitialFocusScrollKey = scrollKey;
+    requestAnimationFrame(() => {
+      const rows = filesRoot?.querySelectorAll<HTMLElement>(".files-table .files-row[data-file-entry='true']:not(.sticky-row)") ?? [];
+      const focusRow = [...rows].find((row) => sameFilePath(row.getAttribute("data-entry-path") ?? "", focusPath));
+      focusRow?.scrollIntoView({ block: "center", inline: "nearest" });
+      scheduleFirstVisibleTreePathUpdate();
+    });
+  }
+
+  function clearTreeVisibleFrame() {
+    if (treeVisibleFrame === null) return;
+    cancelAnimationFrame(treeVisibleFrame);
+    treeVisibleFrame = null;
+  }
+
+  function installTreeVisibleScrollListener() {
+    const handleScroll = (event: Event) => {
+      const target = event.target;
+      if (!(target instanceof HTMLElement)) return;
+      if (!target.closest(".files-table")) return;
+      scheduleFirstVisibleTreePathUpdate();
+    };
+    document.addEventListener("scroll", handleScroll, true);
+    return () => {
+      document.removeEventListener("scroll", handleScroll, true);
+      clearTreeVisibleFrame();
+    };
+  }
+
+  function focusedFilesDirectoryPath() {
+    if (selectedEntry) {
+      return selectedEntry.kind === "directory" ? selectedEntry.path : parentPathOf(selectedEntry.path);
+    }
+    return currentPath;
   }
 
   function parentPathOf(value: string) {
@@ -998,6 +1655,29 @@
     if (index < 0) return currentPath;
     if (index === 0) return value[0];
     return value.slice(0, index);
+  }
+
+  function isCompletedUploadForThisFilesTool(task: TransferTask) {
+    if (task.status !== "completed") return false;
+    if (task.destination.kind !== "provider") return false;
+    if (task.destination.host_id !== toolTab.host_id) return false;
+    if (!result?.provider.kind || task.destination.provider_kind !== result.provider.kind) return false;
+    if (!task.related_workspace_ids.includes(workspaceId) && task.initiator_workspace_id !== workspaceId) return false;
+    return true;
+  }
+
+  function hasChangedAncestor(directoryPath: string, changedDirectories: ReadonlySet<string>) {
+    const normalizedDirectory = normalizePathForComparison(directoryPath);
+    for (const changed of changedDirectories) {
+      const normalizedChanged = normalizePathForComparison(changed);
+      if (normalizedDirectory === normalizedChanged) return true;
+      if (normalizedDirectory.startsWith(`${normalizedChanged}/`)) return true;
+    }
+    return false;
+  }
+
+  function normalizePathForComparison(value: string) {
+    return value.replace(/\\/g, "/").replace(/\/+$/, "");
   }
 
   function joinPath(parent: string, name: string) {
@@ -1030,10 +1710,6 @@
     };
   }
 
-  function sameProviderEndpoint(first: TransferEndpoint, second: TransferEndpoint) {
-    return first.kind === second.kind && first.provider_kind === second.provider_kind && first.host_id === second.host_id;
-  }
-
   function localEndpoint(filePath: string): TransferEndpoint {
     return {
       kind: "local",
@@ -1041,6 +1717,15 @@
       host_id: null,
       path: filePath,
     };
+  }
+
+  function directoryDropTargetFromPosition(x: number | undefined, y: number | undefined) {
+    if (typeof x !== "number" || typeof y !== "number") return null;
+    const element = document.elementFromPoint(x, y);
+    if (!(element instanceof HTMLElement)) return null;
+    const row = element.closest<HTMLElement>("[data-file-entry='true']");
+    if (!row || row.getAttribute("data-entry-kind") !== "directory") return null;
+    return row.getAttribute("data-entry-path");
   }
 
   function openCreateDirectoryDialog() {
@@ -1088,6 +1773,19 @@
       return;
     }
     operationError = "";
+    if (nameDialog.action === "upload_target") {
+      const source = pendingUploadSource;
+      const dropped = pendingDroppedPaths;
+      closeNameDialog();
+      pendingUploadSource = null;
+      pendingDroppedPaths = [];
+      if (source === "drop") {
+        await uploadLocalPaths(dropped, value);
+      } else {
+        await chooseUploadSourcesAndUpload(value);
+      }
+      return;
+    }
     if (nameDialog.action === "create_directory") {
       await unwrapCommand(
         commands.createDirectory({
@@ -1107,7 +1805,7 @@
           ...providerCommandAuth(),
         }),
       );
-    } else {
+    } else if (nameDialog.action === "chmod") {
       if (selectedEntries.length === 0) throw new Error("No files are selected for chmod");
       for (const entry of selectedEntries) {
         await unwrapCommand(
@@ -1118,6 +1816,8 @@
           }),
         );
       }
+    } else {
+      throw new Error(`Unsupported Files name dialog action: ${nameDialog.action}`);
     }
     closeNameDialog();
     await refreshAfterMutation();
@@ -1192,103 +1892,86 @@
     });
   }
 
-  async function pasteClipboard() {
-    const snapshot = filesClipboardSnapshot();
-    if (!snapshot || !result) return;
+  async function startUpload() {
     operationError = "";
-    const destinationDirectory = providerEndpoint(currentPath);
-    for (const item of snapshot.items) {
-      const destinationPath = joinPath(currentPath, item.name);
-      const destination = providerEndpoint(destinationPath);
-      if (snapshot.mode === "cut" && sameProviderEndpoint(item.endpoint, destinationDirectory)) {
-        await unwrapCommand(
-          commands.renameFile({
-            source_path: item.endpoint.path,
-            destination_path: destinationPath,
-            ...providerCommandAuth(),
-          }),
-        );
-      } else if (snapshot.mode === "cut") {
-        operationError = "Move across hosts or providers is not available yet. Use Copy, then delete the source after the transfer completes.";
-        return;
-      } else {
-        await unwrapCommand(
-          commands.createTransferTask({
-            source: item.endpoint,
-            destination,
-            initiator_workspace_id: workspaceId,
-            related_workspace_ids: Array.from(new Set([workspaceId, item.workspaceId])),
-          }),
-        );
-      }
+    const target = resolveCurrentUploadTarget();
+    if (target.kind === "needs_target_sheet") {
+      openUploadTargetDialog(target.initialPath);
+      return;
     }
-    if (snapshot.mode === "cut") clearFilesClipboard();
-    await refreshAfterMutation();
-    await refreshTransfers();
+    await chooseUploadSourcesAndUpload(target.path);
   }
 
-  async function uploadFiles() {
+  function openUploadTargetDialog(initialPath: string | null) {
+    pendingUploadSource = pendingUploadSource ?? "dialog";
+    nameDialog = {
+      action: "upload_target",
+      title: "Upload Target",
+      label: "Target folder",
+      value: initialPath || focusedDirectoryPath || currentPath,
+    };
+  }
+
+  function resolveCurrentUploadTarget(explicitDirectoryPath?: string | null) {
+    return resolveFilesUploadTarget({
+      viewMode,
+      focusedDirectoryPath,
+      selectedEntries,
+      explicitDirectoryPath,
+      hostDefaultPath: result?.provider.current_path ?? toolTab.title,
+    });
+  }
+
+  async function copySelectedPaths() {
+    if (selectedEntries.length === 0) return;
     operationError = "";
+    const text = selectedEntries.map((entry) => entry.path).join("\n");
+    if (hasTauriRuntime()) {
+      await writeText(text);
+    } else {
+      await navigator.clipboard.writeText(text);
+    }
+  }
+
+  async function chooseUploadSourcesAndUpload(destinationDirectory: string) {
     const selected = await openDialog({
       multiple: true,
-      directory: false,
-      title: "Upload Files",
+      title: "Upload",
     });
     if (!selected) return;
     const paths = Array.isArray(selected) ? selected : [selected];
-    for (const localPath of paths) {
-      const name = basename(localPath);
-      if (!name) throw new Error(`Cannot upload path without a file name: ${localPath}`);
-      await unwrapCommand(
-        commands.createTransferTask({
-          source: localEndpoint(localPath),
-          destination: providerEndpoint(joinPath(currentPath, name)),
-          initiator_workspace_id: workspaceId,
-          related_workspace_ids: [workspaceId],
-        }),
-      );
-    }
-    await refreshTransfers();
+    await uploadLocalPaths(paths, destinationDirectory);
   }
 
-  async function uploadFolder() {
-    operationError = "";
-    const selected = await openDialog({
-      multiple: false,
-      directory: true,
-      recursive: true,
-      title: "Upload Folder",
-    });
-    if (!selected) return;
-    const name = basename(selected);
-    if (!name) throw new Error(`Cannot upload path without a folder name: ${selected}`);
-    await unwrapCommand(
-      commands.createTransferTask({
-        source: localEndpoint(selected),
-        destination: providerEndpoint(joinPath(currentPath, name)),
-        initiator_workspace_id: workspaceId,
-        related_workspace_ids: [workspaceId],
-      }),
-    );
-    await refreshTransfers();
-  }
-
-  async function uploadDroppedPaths(paths: string[]) {
+  async function uploadLocalPaths(paths: string[], destinationDirectory: string) {
     if (paths.length === 0) return;
     operationError = "";
     for (const localPath of paths) {
       const name = basename(localPath);
-      if (!name) throw new Error(`Cannot upload path without a file name: ${localPath}`);
+      if (!name) throw new Error(`Cannot upload path without a name: ${localPath}`);
       await unwrapCommand(
         commands.createTransferTask({
           source: localEndpoint(localPath),
-          destination: providerEndpoint(joinPath(currentPath, name)),
+          destination: providerEndpoint(joinPath(destinationDirectory, name)),
           initiator_workspace_id: workspaceId,
           related_workspace_ids: [workspaceId],
         }),
       );
     }
     await refreshTransfers();
+  }
+
+  async function uploadDroppedPaths(paths: string[], explicitDirectoryPath?: string | null) {
+    if (paths.length === 0) return;
+    operationError = "";
+    const target = resolveCurrentUploadTarget(explicitDirectoryPath);
+    if (target.kind === "needs_target_sheet") {
+      pendingUploadSource = "drop";
+      pendingDroppedPaths = [...paths];
+      openUploadTargetDialog(target.initialPath);
+      return;
+    }
+    await uploadLocalPaths(paths, target.path);
   }
 
   async function downloadSelected() {
@@ -1332,61 +2015,38 @@
   }
 
   function toolbarActionLabel(id: FilesToolbarActionId) {
-    if (id === "up") return "Up";
-    if (id === "refresh") return "Refresh";
+    if (id === "upload") return "Upload";
     if (id === "new_folder") return "New folder";
-    if (id === "paste") return "Paste";
-    if (id === "upload_files") return "Upload files";
-    if (id === "upload_folder") return "Upload folder";
-    if (id === "search") return "Search";
+    if (id === "refresh") return "Refresh";
     if (id === "view_mode") return "View mode";
-    if (id === "path") return "Path";
     throw new Error(`Unsupported Files toolbar action id: ${id}`);
   }
 
   function toolbarActionIcon(id: FilesToolbarActionId) {
-    if (id === "up") return "↑";
-    if (id === "refresh") return "↻";
+    if (id === "upload") return "⇧";
     if (id === "new_folder") return "＋";
-    if (id === "paste") return "▣";
-    if (id === "upload_files") return "⇧";
-    if (id === "upload_folder") return "⇪";
-    if (id === "search") return "⌕";
+    if (id === "refresh") return "↻";
     throw new Error(`Files toolbar action ${id} does not have an icon button`);
   }
 
   function toolbarActionDisabled(id: FilesToolbarActionId) {
-    if (id === "paste") return !canPaste;
     return false;
   }
 
   async function runToolbarAction(id: FilesToolbarActionId) {
-    if (id === "up") {
-      goUp();
-      return;
-    }
-    if (id === "refresh") {
-      await refresh();
+    if (id === "upload") {
+      await startUpload();
       return;
     }
     if (id === "new_folder") {
       openCreateDirectoryDialog();
       return;
     }
-    if (id === "paste") {
-      await pasteClipboard();
+    if (id === "refresh") {
+      await refresh();
       return;
     }
-    if (id === "upload_files") {
-      await uploadFiles();
-      return;
-    }
-    if (id === "upload_folder") {
-      await uploadFolder();
-      return;
-    }
-    if (id === "search") {
-      searchOpen = !searchOpen;
+    if (id === "view_mode") {
       return;
     }
     throw new Error(`Unsupported executable Files toolbar action id: ${id}`);
@@ -1411,6 +2071,7 @@
     if (event.button !== 0) return;
     if (marquee?.active) return;
     if (!(event.currentTarget instanceof HTMLElement)) return;
+    if (event.target instanceof HTMLElement && event.target.closest("[data-file-entry='true']")) return;
     event.preventDefault();
     const root = event.currentTarget.closest<HTMLElement>(".files-selection-surface") ?? event.currentTarget;
     const inputKind = "pointerId" in event ? "pointer" : "mouse";
@@ -1455,6 +2116,7 @@
   function beginNativeMarqueeSelection(event: MarqueePointerEvent) {
     if (event.button !== 0) return;
     if (!(event.target instanceof HTMLElement)) return;
+    if (event.target.closest("[data-file-entry='true']")) return;
     const target = event.target.closest<HTMLElement>("[data-file-entry='true'], .files-selection-surface");
     if (!target || !filesRoot?.contains(target)) return;
     const root = target.closest<HTMLElement>(".files-selection-surface");
@@ -1606,6 +2268,10 @@
       openChmodDialog();
       return;
     }
+    if (id === "copy_path") {
+      await copySelectedPaths();
+      return;
+    }
     if (id === "delete") {
       await deleteSelected();
       return;
@@ -1633,16 +2299,15 @@
       <span>Files provider is available in the Tauri app.</span>
     </div>
   {:else}
-  <header class="files-toolbar">
-    {#each visibleToolbarActionIds as actionId (actionId)}
-      {#if actionId === "view_mode"}
+  <header class="files-chrome">
+    <div class="files-toolbar">
+      {#each visibleToolbarActionIds as actionId (actionId)}
+        {#if actionId === "view_mode"}
         <div class="view-toggle" role="group" aria-label="View mode">
           <button class:active={viewMode === "tree"} type="button" title="Tree view" aria-label="Tree view" onclick={() => (viewMode = "tree")}>☰</button>
           <button class:active={viewMode === "columns"} type="button" title="Columns view" aria-label="Columns view" onclick={() => (viewMode = "columns")}>▥</button>
         </div>
-      {:else if actionId === "path"}
-        <div class="path-field" title={currentPath}>{currentPath}</div>
-      {:else}
+        {:else}
         <button
           type="button"
           title={toolbarActionLabel(actionId)}
@@ -1655,8 +2320,10 @@
         >
           {toolbarActionIcon(actionId)}
         </button>
-      {/if}
-    {/each}
+        {/if}
+      {/each}
+      <div class="path-field" title={focusedDirectoryPath}>{focusedDirectoryPath}</div>
+    </div>
   </header>
 
   {#if searchOpen}
@@ -1747,15 +2414,18 @@
           class:motion-preparing={columnsMotionPreparing}
           class:motion-resize={columnsMotion === "resize"}
           class:motion-settling={columnsMotionSettling}
+          class:motion-distance-full={columnsMotionDistanceClass(columnsMotionDistance) === "full"}
+          class:motion-distance-third={columnsMotionDistanceClass(columnsMotionDistance) === "third"}
+          class:motion-distance-sixth={columnsMotionDistanceClass(columnsMotionDistance) === "sixth"}
           class="columns-content"
-          style={`--columns-motion-duration: ${columnsMotionDurationMs}ms; --columns-motion-easing: ${columnsMotionEasing};`}
+          style={`--columns-motion-duration: ${columnsMotionDurationMs}ms; --columns-motion-easing: ${columnsMotionEasing}; --columns-motion-distance: ${columnsMotionDistance}; --columns-motion-translate: ${columnsMotionTranslate}; --columns-motion-transition: ${columnsMotionTransition}; transform: translateX(${columnsMotionTranslate}); transition: ${columnsMotionTransition};`}
         >
           {#each columnsPanes as pane (pane.id)}
             <div
               class:current={pane.current}
               class="columns-pane"
               aria-hidden={!pane.current}
-              style={`--columns-count: ${columnsPaneColumnCount(pane)};`}
+              style={`--columns-count: ${columnsPaneColumnCount(pane)}; --columns-visible-count: ${Math.min(columnsPaneColumnCount(pane), 3)};`}
             >
               {#each columnsForRenderedPane(pane) as column (columnsRenderKey(column.path))}
                 <section class="file-column" aria-label={column.path}>
@@ -1780,6 +2450,8 @@
                     >
                       {#each column.entries as entry (entry.path)}
                         <button
+                          class:drop-target={externalDropTargetPath === entry.path}
+                          class:active-selected={sameFilePath(selectedPath, entry.path)}
                           class:selected={entry.selected}
                           class:multi-selected={isPathSelected(entry.path)}
                           class="column-row"
@@ -1787,6 +2459,8 @@
                           data-entry-kind={entry.kind}
                           data-entry-path={entry.path}
                           type="button"
+                          onpointerdown={handleFilesRowPointerDown}
+                          onmousedown={handleFilesRowPointerDown}
                           ondblclick={() => openColumnsEntry(entry)}
                           oncontextmenu={(event) => openSelectionContextMenu(entry, event)}
                           onclick={(event) =>
@@ -1804,9 +2478,12 @@
                                 <FileIcon />
                               {/if}
                             </span>
-                            {entry.name}
+                            <span class="file-name-text">{entry.name}</span>
                           </span>
                           <small>{formatSize(entry)}</small>
+                          {#if externalDropTargetPath === entry.path}
+                            <span class="drop-target-hint">Upload here</span>
+                          {/if}
                         </button>
                       {/each}
                     </div>
@@ -1845,7 +2522,40 @@
               onmousemove={updateMarqueeSelection}
               onmouseup={commitMarqueeSelection}
               onmouseleave={cancelMarqueeSelection}
-            >
+                    >
+                      {#if treeStickyRows.length > 0}
+                        <div class="tree-sticky-rows" aria-label="Sticky parent directories">
+                          {#each treeStickyRows as stickyRow (stickyRow.entry.path)}
+                            <button
+                              class:drop-target={externalDropTargetPath === stickyRow.entry.path}
+                              class:active-selected={sameFilePath(selectedPath, stickyRow.entry.path)}
+                              class:selected={isPathSelected(stickyRow.entry.path)}
+                              class="files-row sticky-row"
+                              data-file-entry="true"
+                              data-entry-kind={stickyRow.entry.kind}
+                              data-entry-path={stickyRow.entry.path}
+                              type="button"
+                              onpointerdown={(event) => event.stopPropagation()}
+                              onmousedown={(event) => event.stopPropagation()}
+                              style={`--tree-depth: ${stickyRow.depth};`}
+                              oncontextmenu={(event) => openSelectionContextMenu(stickyRow.entry, event)}
+                              onclick={(event) =>
+                                void clickTreeEntry(stickyRow.entry, event).catch((error) => {
+                                  operationError = error instanceof Error ? error.message : String(error);
+                                })}
+                            >
+                              <span class="name-cell" title={stickyRow.entry.path}>
+                                <span class="tree-disclosure" aria-hidden="true">{stickyRow.expanded ? "▾" : "▸"}</span>
+                                <span class="kind-icon file-kind-icon" aria-hidden="true"><FolderIcon /></span>
+                                <span class="file-name-text">{stickyRow.entry.name}</span>
+                              </span>
+                              <span></span>
+                              <span></span>
+                              <span>{externalDropTargetPath === stickyRow.entry.path ? "Upload here" : ""}</span>
+                            </button>
+                          {/each}
+                        </div>
+                      {/if}
 	            <div class="files-row files-head" role="row">
 	              <span>Name</span>
 	              <span>Size</span>
@@ -1854,12 +2564,17 @@
 	            </div>
 	            {#each treeRows as row (row.entry.path)}
 	              <div
+                    class:drop-target={externalDropTargetPath === row.entry.path}
+                    class:active-selected={sameFilePath(selectedPath, row.entry.path)}
 	                class:selected={isPathSelected(row.entry.path)}
 	                class="files-row"
                   data-file-entry="true"
+                  data-entry-kind={row.entry.kind}
                   data-entry-path={row.entry.path}
 	                role="row"
                   tabindex="0"
+                  onpointerdown={(event) => event.stopPropagation()}
+                  onmousedown={(event) => event.stopPropagation()}
 	                aria-level={row.depth + 1}
 	                aria-expanded={row.entry.kind === "directory" ? row.expanded : undefined}
 	                style={`--tree-depth: ${row.depth};`}
@@ -1908,11 +2623,11 @@
                         <FileIcon />
                       {/if}
                     </span>
-	                  {row.entry.name}
+	                  <span class="file-name-text">{row.entry.name}</span>
 	                </span>
 	                <span>{formatSize(row.entry)}</span>
 	                <span>{formatModified(row.entry)}</span>
-	                <span>{row.error ?? row.entry.permissions ?? ""}</span>
+	                <span>{externalDropTargetPath === row.entry.path ? "Upload here" : row.error ?? row.entry.permissions ?? ""}</span>
 	              </div>
 	            {/each}
             </div>
@@ -1924,6 +2639,9 @@
           {/if}
 	      </div>
 	    {/if}
+      {#if selectionSummary}
+        <footer class="files-selection-summary">{selectionSummary}</footer>
+      {/if}
   {/if}
 
   {#if nameDialog}
@@ -1952,7 +2670,7 @@
     </div>
   {/if}
 
-  {#if dragHover}
+  {#if dragHover && !externalDropTargetPath}
     <div class="drop-overlay" aria-hidden="true">
       <span>Drop to upload</span>
     </div>
@@ -1971,6 +2689,7 @@
     >
       {#each contextMenu.actions as action (action.id)}
         <button
+          class:dangerous={action.dangerous}
           type="button"
           role="menuitem"
           disabled={action.disabled}
@@ -2055,6 +2774,15 @@
     align-items: center;
     padding: 4px 6px;
     border-bottom: 1px solid var(--app-border);
+  }
+
+  .files-chrome {
+    min-width: 0;
+    border-bottom: 1px solid var(--app-border);
+  }
+
+  .files-chrome .files-toolbar {
+    border-bottom: 0;
   }
 
   button {
@@ -2209,6 +2937,7 @@
   .files-selection-surface {
     min-width: 100%;
     min-height: 100%;
+    padding-bottom: 72px;
     user-select: none;
     -webkit-user-select: none;
   }
@@ -2320,20 +3049,8 @@
     min-height: 0;
     display: flex;
     transform: translateX(0);
-    transition: transform var(--columns-motion-duration, 180ms) var(--columns-motion-easing, cubic-bezier(0.22, 1, 0.36, 1));
+    transition: var(--columns-motion-transition, none);
     will-change: transform;
-  }
-
-  .columns-content.motion-forward.motion-active {
-    transform: translateX(-100%);
-  }
-
-  .columns-content.motion-backward {
-    transform: translateX(-100%);
-  }
-
-  .columns-content.motion-backward.motion-active {
-    transform: translateX(0);
   }
 
   .columns-content.motion-resize {
@@ -2345,33 +3062,67 @@
     transition: none;
   }
 
+  .columns-content.motion-forward.motion-active.motion-distance-full {
+    animation: columns-slide-forward-full var(--columns-motion-duration, 180ms) var(--columns-motion-easing, cubic-bezier(0.22, 1, 0.36, 1)) forwards;
+  }
+
+  .columns-content.motion-forward.motion-active.motion-distance-third {
+    animation: columns-slide-forward-third var(--columns-motion-duration, 180ms) var(--columns-motion-easing, cubic-bezier(0.22, 1, 0.36, 1)) forwards;
+  }
+
+  .columns-content.motion-forward.motion-active.motion-distance-sixth {
+    animation: columns-slide-forward-sixth var(--columns-motion-duration, 180ms) var(--columns-motion-easing, cubic-bezier(0.22, 1, 0.36, 1)) forwards;
+  }
+
+  .columns-content.motion-backward.motion-active.motion-distance-full {
+    animation: columns-slide-backward-full var(--columns-motion-duration, 180ms) var(--columns-motion-easing, cubic-bezier(0.22, 1, 0.36, 1)) forwards;
+  }
+
+  .columns-content.motion-backward.motion-active.motion-distance-third {
+    animation: columns-slide-backward-third var(--columns-motion-duration, 180ms) var(--columns-motion-easing, cubic-bezier(0.22, 1, 0.36, 1)) forwards;
+  }
+
+  .columns-content.motion-backward.motion-active.motion-distance-sixth {
+    animation: columns-slide-backward-sixth var(--columns-motion-duration, 180ms) var(--columns-motion-easing, cubic-bezier(0.22, 1, 0.36, 1)) forwards;
+  }
+
   .columns-content.motion-settling {
     transform: translateX(0);
+    animation: none;
     transition: none;
   }
 
   .columns-pane {
-    flex: 0 0 100%;
-    width: 100%;
-    min-width: 100%;
+    --columns-pane-width: max(100%, calc(var(--columns-count, 1) * (100% / var(--columns-visible-count, 1))));
+    --column-width: calc(100% / var(--columns-count, 1));
+    flex: 0 0 var(--columns-pane-width);
+    width: var(--columns-pane-width);
+    min-width: var(--columns-pane-width);
     height: 100%;
     min-height: 0;
     display: flex;
   }
 
+  .columns-content.motion-forward .columns-pane,
+  .columns-content.motion-backward .columns-pane {
+    --columns-pane-width: calc(var(--columns-count, 1) * (100% / 3));
+    --column-width: calc(100% / var(--columns-count, 1));
+  }
+
   .file-column {
-    flex: 0 0 calc(100% / max(var(--columns-count, 1), 1));
-    width: calc(100% / max(var(--columns-count, 1), 1));
+    flex: 0 0 var(--column-width);
+    width: var(--column-width);
     min-width: 0;
     height: 100%;
+    min-height: 0;
     display: grid;
     grid-template-rows: 28px minmax(0, 1fr);
     border-right: 1px solid var(--app-border);
   }
 
   .preview-column {
-    flex: 0 0 calc(100% / max(var(--columns-count, 1), 1));
-    width: calc(100% / max(var(--columns-count, 1), 1));
+    flex: 0 0 var(--column-width);
+    width: var(--column-width);
     min-width: 0;
   }
 
@@ -2385,6 +3136,66 @@
     transition:
       flex-basis var(--columns-motion-duration, 180ms) var(--columns-motion-easing, cubic-bezier(0.22, 1, 0.36, 1)),
       width var(--columns-motion-duration, 180ms) var(--columns-motion-easing, cubic-bezier(0.22, 1, 0.36, 1));
+  }
+
+  @keyframes columns-slide-forward-full {
+    from {
+      transform: translateX(0);
+    }
+
+    to {
+      transform: translateX(-100%);
+    }
+  }
+
+  @keyframes columns-slide-forward-third {
+    from {
+      transform: translateX(0);
+    }
+
+    to {
+      transform: translateX(calc(-100% / 3));
+    }
+  }
+
+  @keyframes columns-slide-forward-sixth {
+    from {
+      transform: translateX(0);
+    }
+
+    to {
+      transform: translateX(calc(-100% / 6));
+    }
+  }
+
+  @keyframes columns-slide-backward-full {
+    from {
+      transform: translateX(-100%);
+    }
+
+    to {
+      transform: translateX(0);
+    }
+  }
+
+  @keyframes columns-slide-backward-third {
+    from {
+      transform: translateX(calc(-100% / 3));
+    }
+
+    to {
+      transform: translateX(0);
+    }
+  }
+
+  @keyframes columns-slide-backward-sixth {
+    from {
+      transform: translateX(calc(-100% / 6));
+    }
+
+    to {
+      transform: translateX(0);
+    }
   }
 
   .file-column header {
@@ -2420,6 +3231,28 @@
 
   .column-row.selected {
     background: color-mix(in srgb, var(--app-active) 72%, transparent);
+  }
+
+  .column-row.active-selected,
+  .files-row.active-selected {
+    background: color-mix(in srgb, var(--app-active) 84%, transparent);
+    box-shadow: inset 2px 0 0 color-mix(in srgb, var(--app-accent) 82%, transparent);
+  }
+
+  .column-row.drop-target,
+  .files-row.drop-target {
+    background: color-mix(in srgb, var(--app-accent) 18%, var(--app-bg));
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--app-accent) 62%, transparent);
+  }
+
+  .drop-target-hint {
+    grid-column: 1 / -1;
+    justify-self: start;
+    border-radius: 4px;
+    padding: 1px 5px;
+    background: color-mix(in srgb, var(--app-accent) 18%, transparent);
+    color: color-mix(in srgb, var(--app-fg) 74%, transparent);
+    font-size: 10px;
   }
 
   .column-row small {
@@ -2463,6 +3296,21 @@
     font-weight: 600;
   }
 
+  .tree-sticky-rows {
+    position: sticky;
+    top: 0;
+    z-index: 2;
+    display: grid;
+    background: color-mix(in srgb, var(--app-bg) 96%, var(--app-control));
+    box-shadow: 0 1px 0 color-mix(in srgb, var(--app-border) 72%, transparent);
+  }
+
+  .tree-sticky-rows .sticky-row {
+    min-height: 25px;
+    border-bottom-color: color-mix(in srgb, var(--app-border) 42%, transparent);
+    background: color-mix(in srgb, var(--app-bg) 94%, var(--app-control));
+  }
+
   .files-row.selected {
     background: color-mix(in srgb, var(--app-active) 72%, transparent);
   }
@@ -2482,10 +3330,18 @@
   }
 
   .name-cell {
+    min-width: 0;
     display: flex;
     align-items: center;
     gap: 5px;
     padding-left: calc(var(--tree-depth, 0) * 16px);
+  }
+
+  .file-name-text {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .kind-icon,
@@ -2727,6 +3583,21 @@
   .files-context-menu button:focus-visible {
     background: color-mix(in srgb, var(--app-active) 72%, transparent);
     outline: none;
+  }
+
+  .files-context-menu button.dangerous {
+    color: var(--app-danger);
+  }
+
+  .files-selection-summary {
+    min-width: 0;
+    min-height: 24px;
+    display: flex;
+    align-items: center;
+    border-top: 1px solid color-mix(in srgb, var(--app-border) 70%, transparent);
+    padding: 0 8px;
+    color: color-mix(in srgb, var(--app-fg) 60%, transparent);
+    font-size: 11px;
   }
 
   .files-context-menu button:disabled {

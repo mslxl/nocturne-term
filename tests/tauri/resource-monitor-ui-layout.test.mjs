@@ -40,11 +40,15 @@ test("resource monitor ui layout", { timeout: 180_000 }, async () => {
   const appPath = requiredEnvPath("TAURI_TEST_APPLICATION");
   const isolatedAppConfig = await createIsolatedAppConfigEnv("resource-monitor-ui-layout");
   const nativeDriverPath = optionalEnvPath("TAURI_TEST_NATIVE_DRIVER");
+  const nativeDriverPort = process.env.TAURI_TEST_NATIVE_DRIVER_PORT ?? "";
   const driverPort = Number(process.env.TAURI_TEST_DRIVER_PORT ?? "4444");
   const driverUrl = `http://127.0.0.1:${driverPort}`;
   const devUrl = process.env.TAURI_TEST_DEV_URL ?? "http://localhost:1420/";
   const devPort = Number(new URL(devUrl).port);
-  const nativeDriverArgs = nativeDriverPath ? ["--native-driver", nativeDriverPath] : [];
+  const nativeDriverArgs = [
+    ...(nativeDriverPath ? ["--native-driver", nativeDriverPath] : []),
+    ...(nativeDriverPort ? ["--native-port", nativeDriverPort] : []),
+  ];
 
   process.chdir(repoRoot);
   process.env.NOCTURNE_DEV_PORT = String(devPort);
@@ -186,17 +190,7 @@ test("resource monitor ui layout", { timeout: 180_000 }, async () => {
         },
       ],
     });
-    const preview = await execute(`
-      const target = document.querySelector('[data-testid="resource-monitor-row"][data-metric="' + ${JSON.stringify(targetMetric)} + '"]');
-      return {
-        targetHasPreview: target?.classList.contains('pointer-drop-target') ?? false,
-        sourceHasDragClass: document.querySelector('[data-testid="resource-monitor-row"][data-metric="' + ${JSON.stringify(draggedMetric)} + '"]')?.classList.contains('pointer-drag-source') ?? false,
-        classes: [...document.querySelectorAll('[data-testid="resource-monitor-row"]')].map((row) => ({
-          metric: row.getAttribute('data-metric'),
-          className: row.className,
-        })),
-      };
-    `);
+    const preview = await waitForDragPreview(draggedMetric, targetMetric);
     await webdriver("POST", `/session/${sessionId}/actions`, {
       actions: [
         {
@@ -220,6 +214,27 @@ test("resource monitor ui layout", { timeout: 180_000 }, async () => {
       preview,
       after,
     };
+  }
+
+  async function waitForDragPreview(draggedMetric, targetMetric) {
+    let last = null;
+    const deadline = Date.now() + 1_500;
+    while (Date.now() < deadline) {
+      last = await execute(`
+        const target = document.querySelector('[data-testid="resource-monitor-row"][data-metric="' + ${JSON.stringify(targetMetric)} + '"]');
+        return {
+          targetHasPreview: target?.classList.contains('pointer-drop-target') ?? false,
+          sourceHasDragClass: document.querySelector('[data-testid="resource-monitor-row"][data-metric="' + ${JSON.stringify(draggedMetric)} + '"]')?.classList.contains('pointer-drag-source') ?? false,
+          classes: [...document.querySelectorAll('[data-testid="resource-monitor-row"]')].map((row) => ({
+            metric: row.getAttribute('data-metric'),
+            className: row.className,
+          })),
+        };
+      `);
+      if (last.sourceHasDragClass && last.targetHasPreview) return last;
+      await delay(50);
+    }
+    return last;
   }
 
   async function clickFirstDetailToggle() {

@@ -4,91 +4,95 @@ import { unwrapCommand } from "$lib/terminal/commands";
 import { hasTauriRuntime } from "$lib/tauri/runtime";
 import { defaultWorkspaceLayoutSnapshot, defaultWorkspaceToolIds } from "$lib/workspace/dock/default-layout";
 
-export type WorkspaceStore = ReturnType<typeof createWorkspaceStore>;
+export type WorkspaceStore = WorkspaceStoreState;
 
-export function createWorkspaceStore() {
-  const state = $state<{
-    error: string;
-    loading: boolean;
-    snapshot: WorkspaceLayoutSnapshot | null;
-  }>({
-    error: "",
-    loading: false,
-    snapshot: null,
-  });
-  let unlisten: (() => void) | null = null;
+export function createWorkspaceStore(): WorkspaceStore {
+  return new WorkspaceStoreState();
+}
 
-  async function load() {
+class WorkspaceStoreState {
+  error = $state("");
+  loading = $state(false);
+  snapshot = $state<WorkspaceLayoutSnapshot | null>(null);
+  private unlisten: (() => void) | null = null;
+
+  async load() {
     if (!hasTauriRuntime()) {
-      state.snapshot = demoWorkspaceSnapshot();
-      state.error = "";
+      this.snapshot = demoWorkspaceSnapshot();
+      this.error = "";
       return;
     }
-    state.loading = true;
-    state.error = "";
+    this.loading = true;
+    this.error = "";
     try {
-      state.snapshot = await unwrapCommand(commands.getWorkspaceLayoutSnapshot());
+      this.snapshot = await unwrapCommand(commands.getWorkspaceLayoutSnapshot());
     } catch (caught) {
-      state.error = caught instanceof Error ? caught.message : String(caught);
+      this.error = caught instanceof Error ? caught.message : String(caught);
     } finally {
-      state.loading = false;
+      this.loading = false;
     }
   }
 
-  async function dispatch(intent: WorkspaceDispatchInput["intent"]) {
-    const current = state.snapshot;
+  async dispatch(intent: WorkspaceDispatchInput["intent"]) {
+    const current = this.snapshot;
     if (!current) throw new Error("workspace snapshot is not loaded");
     if (!hasTauriRuntime()) {
-      state.snapshot = applyDemoWorkspaceIntent(current, intent);
-      state.error = "";
-      return state.snapshot;
+      this.snapshot = applyDemoWorkspaceIntent(current, intent);
+      this.error = "";
+      return this.snapshot;
     }
-    const next = await unwrapCommand(
-      commands.workspaceDispatch({
-        expected_version: current.version,
-        intent,
-      }),
-    );
-    state.snapshot = next;
-    state.error = "";
+    let next: WorkspaceLayoutSnapshot;
+    try {
+      next = await dispatchWorkspaceIntentWithVersion(current.version, intent);
+    } catch (caught) {
+      if (!isWorkspaceSnapshotVersionMismatch(caught)) {
+        throw caught;
+      }
+      const latest = await unwrapCommand(commands.getWorkspaceLayoutSnapshot());
+      this.snapshot = latest;
+      next = await dispatchWorkspaceIntentWithVersion(latest.version, intent);
+    }
+    this.snapshot = next;
+    this.error = "";
     return next;
   }
 
-  async function subscribe() {
-    if (!hasTauriRuntime() || unlisten) return;
-    unlisten = await listen<WorkspaceChangedEvent>("workspace://changed", (event) => {
+  async subscribe(onSnapshot?: (snapshot: WorkspaceLayoutSnapshot) => void) {
+    if (!hasTauriRuntime() || this.unlisten) return;
+    this.unlisten = await listen<WorkspaceChangedEvent>("workspace://changed", (event) => {
       if (!event.payload?.snapshot) return;
-      state.snapshot = event.payload.snapshot;
-      state.error = "";
+      this.snapshot = event.payload.snapshot;
+      this.error = "";
+      onSnapshot?.(event.payload.snapshot);
     });
   }
 
-  function dispose() {
-    unlisten?.();
-    unlisten = null;
+  dispose() {
+    this.unlisten?.();
+    this.unlisten = null;
   }
 
-  function replaceSnapshot(next: WorkspaceLayoutSnapshot) {
-    state.snapshot = next;
-    state.error = "";
+  replaceSnapshot(next: WorkspaceLayoutSnapshot) {
+    this.snapshot = next;
+    this.error = "";
   }
+}
 
-  return {
-    get snapshot() {
-      return state.snapshot;
-    },
-    get loading() {
-      return state.loading;
-    },
-    get error() {
-      return state.error;
-    },
-    load,
-    dispatch,
-    subscribe,
-    replaceSnapshot,
-    dispose,
-  };
+async function dispatchWorkspaceIntentWithVersion(
+  expectedVersion: number,
+  intent: WorkspaceDispatchInput["intent"],
+): Promise<WorkspaceLayoutSnapshot> {
+  return unwrapCommand(
+    commands.workspaceDispatch({
+      expected_version: expectedVersion,
+      intent,
+    }),
+  );
+}
+
+function isWorkspaceSnapshotVersionMismatch(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.includes("workspace snapshot version mismatch");
 }
 
 function demoWorkspaceSnapshot(): WorkspaceLayoutSnapshot {

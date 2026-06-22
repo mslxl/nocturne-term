@@ -1,24 +1,14 @@
 export type FilesToolbarActionId =
-  | "up"
-  | "refresh"
+  | "upload"
   | "new_folder"
-  | "paste"
-  | "upload_files"
-  | "upload_folder"
-  | "search"
-  | "view_mode"
-  | "path";
+  | "refresh"
+  | "view_mode";
 
 export const DEFAULT_FILES_TOOLBAR_ACTION_IDS: FilesToolbarActionId[] = [
-  "up",
-  "refresh",
+  "upload",
   "new_folder",
-  "paste",
-  "upload_files",
-  "upload_folder",
-  "search",
+  "refresh",
   "view_mode",
-  "path",
 ];
 
 const validFilesToolbarActionIds = new Set<string>(DEFAULT_FILES_TOOLBAR_ACTION_IDS);

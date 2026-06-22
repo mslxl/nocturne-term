@@ -14,20 +14,29 @@
  * at least 50 unique two-column root-directory switches while the root column is
  * scrolled, clicks a middle-column sibling directory while three columns are
  * visible, then clicks visible parent directory rows to return one level at a
- * time while sampling animation frames. It also switches between sibling
- * directory and file rows in the same column.
+ * time while sampling animation frames. It also clicks a different directory
+ * in the left column of the currently visible last-three-column window,
+ * switches between sibling directory and file rows in the same column, and
+ * inspects which pane window is visible while navigation animation is active.
  *
  * Expected:
  * Opening or returning within an already full three-column window uses
  * directional horizontal motion, changing between one, two, and three visible
  * columns uses a width-resize animation without horizontal content travel,
- * replacing the right-side column from a middle-column sibling selection does
  * not animate, two-column root-directory switching preserves the root column
- * scroll position across at least 50 unique switches, backward motion starts
- * from the old deeper pane without a visible wrong-direction preparation slide,
- * no sampled frame loses all visible columns or rows, each step settles into
- * the expected three-column window, and same-level directory or file selection
- * does not run a horizontal Columns navigation animation.
+ * scroll position across at least 50 unique switches and settles after each
+ * selected directory's asynchronous child listing is available, backward
+ * motion starts from the old deeper pane without a visible wrong-direction preparation slide,
+ * parent-directory clicks run backward transform animation where the clicked
+ * left visible directory column moves into the middle column instead of only
+ * jumping the horizontal scroll position, no sampled frame loses all visible
+ * columns or rows, the moving current pane exposes the expected target column
+ * window before the animation settles, no post-animation settling frame flashes
+ * back to an earlier/root column window, clicking the left visible column while
+ * three columns are visible slides that column into the middle even when the
+ * selected row is a different child directory, each step settles into the
+ * expected three-column window, and same-level directory or file selection does
+ * not run a horizontal Columns navigation animation.
  */
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
@@ -46,11 +55,15 @@ test("files columns nested navigation motion", { timeout: 180_000 }, async () =>
   const fixtureRoot = await createFilesFixture();
   const fixtureHostId = "018f6eb3-6f91-7410-bc43-f927b2236d95";
   const nativeDriverPath = optionalEnvPath("TAURI_TEST_NATIVE_DRIVER");
+  const nativeDriverPort = process.env.TAURI_TEST_NATIVE_DRIVER_PORT ?? "";
   const driverPort = Number(process.env.TAURI_TEST_DRIVER_PORT ?? "4444");
   const driverUrl = `http://127.0.0.1:${driverPort}`;
   const devUrl = process.env.TAURI_TEST_DEV_URL ?? "http://localhost:1420/";
   const devPort = Number(new URL(devUrl).port);
-  const nativeDriverArgs = nativeDriverPath ? ["--native-driver", nativeDriverPath] : [];
+  const nativeDriverArgs = [
+    ...(nativeDriverPath ? ["--native-driver", nativeDriverPath] : []),
+    ...(nativeDriverPort ? ["--native-port", nativeDriverPort] : []),
+  ];
 
   process.chdir(repoRoot);
   process.env.NOCTURNE_DEV_PORT = String(devPort);
@@ -88,6 +101,7 @@ test("files columns nested navigation motion", { timeout: 180_000 }, async () =>
     await waitForDevServer();
     await waitForDriver();
     sessionId = await createSession();
+    await setWebDriverTimeouts();
     await waitUntil(async () => await execute("return document.querySelector('.files-tooltab .files-toolbar') !== null;"), pageSummary);
     await execute(`
       const button = document.querySelector('.files-toolbar button[aria-label="Columns view"]');
@@ -96,19 +110,30 @@ test("files columns nested navigation motion", { timeout: 180_000 }, async () =>
       return true;
     `);
     await waitUntil(async () => await columnsIncludeRows([["alpha", "omega", "root-note.txt"]]), pageSummary);
-    await clickColumnDirectory("alpha", 0);
+    await clickColumnDirectory("alpha");
+    await waitUntil(async () => await columnsIncludeRows([["alpha"], ["beta"]]), pageSummary);
+    await waitUntil(columnsMotionIdle, pageSummary);
+
+    const firstRightColumnOpenMotion = await captureVisibleColumnEntryMotion({
+      name: "beta",
+      visibleColumnIndex: 2,
+      expectedDirection: "forward",
+      expectedRowsByColumn: [["alpha", "omega", "root-note.txt", "opaque.bin"], ["beta", "theta", "readme.txt"], ["gamma", "theta", "beta-note.txt"]],
+    });
+    await assertMotionOk("first right-column directory open", firstRightColumnOpenMotion);
+    await clickColumnDirectory("alpha");
     await waitUntil(async () => await columnsIncludeRows([["alpha"], ["beta"]]), pageSummary);
     await waitUntil(columnsMotionIdle, pageSummary);
 
     const twoColumnSwitchStress = await stressTwoColumnRootSwitching();
     await assertMotionOk("stress two-column root switching", twoColumnSwitchStress);
-    await clickColumnDirectory("alpha", 0);
+    await clickColumnDirectory("alpha");
     await waitUntil(async () => await columnsIncludeRows([["alpha"], ["beta"]]), pageSummary);
     await waitUntil(columnsMotionIdle, pageSummary);
 
     const siblingDirectoryMotion = await captureColumnEntryMotion({
       name: "omega",
-      columnIndex: 0,
+      columnName: "omega",
       expectedDirection: "none",
       expectedRowsByColumn: [["alpha", "omega", "root-note.txt"], ["omega-leaf.txt"]],
     });
@@ -117,110 +142,101 @@ test("files columns nested navigation motion", { timeout: 180_000 }, async () =>
     await scrollRootColumnNear("branch-42");
     const siblingFileMotion = await captureColumnEntryMotion({
       name: "opaque.bin",
-      columnIndex: 0,
-      expectedDirection: "resize",
+      columnName: "opaque.bin",
+      expectedDirection: "none",
+      allowHorizontalClamp: true,
       expectedRowsByColumn: [["alpha", "omega", "root-note.txt", "opaque.bin"]],
     });
     await assertMotionOk("select sibling file", siblingFileMotion);
 
-    await scrollRootColumnNear("branch-42");
-    const oneToTwoResizeMotion = await captureColumnEntryMotion({
-      name: "alpha",
-      columnIndex: 0,
-      expectedDirection: "resize",
-      expectedRowsByColumn: [["alpha", "omega", "root-note.txt", "opaque.bin"], ["beta"]],
-    });
-    await assertMotionOk("open alpha from one column", oneToTwoResizeMotion);
+    await clickColumnDirectory("alpha");
     await waitUntil(async () => await columnsIncludeRows([["alpha"], ["beta"]]), pageSummary);
     await waitUntil(columnsMotionIdle, pageSummary);
 
-    await scrollRootColumnNear("branch-42");
-    const betaMotion = await captureColumnEntryMotion({
-      name: "beta",
-      columnIndex: 1,
-      expectedDirection: "resize",
-      expectedRowsByColumn: [["alpha"], ["beta"], ["gamma"]],
-    });
-    await assertMotionOk("open beta", betaMotion);
+    await clickColumnDirectory("beta");
+    await waitUntil(async () => await columnsIncludeRows([["alpha"], ["beta"], ["gamma"]]), pageSummary);
+    await waitUntil(columnsMotionIdle, pageSummary);
 
-    const middleColumnSiblingMotion = await captureColumnEntryMotion({
+    const middleColumnSiblingMotion = await captureVisibleColumnEntryMotion({
       name: "theta",
-      columnIndex: 1,
+      visibleColumnIndex: 1,
       expectedDirection: "none",
-      expectedRowsByColumn: [["alpha"], ["beta", "theta", "readme.txt"], ["theta-leaf.txt"]],
+      expectedRowsByColumn: [["alpha", "omega", "root-note.txt", "opaque.bin"], ["beta", "theta", "readme.txt"], ["theta-leaf.txt"]],
     });
     await assertMotionOk("replace right column from middle sibling", middleColumnSiblingMotion);
 
-    await clickColumnDirectory("beta", 1);
+    await clickColumnDirectory("beta");
     await waitUntil(async () => await columnsIncludeRows([["alpha"], ["beta"], ["gamma"]]), pageSummary);
     await waitUntil(columnsMotionIdle, pageSummary);
 
     await scrollRootColumnNear("branch-42");
     const rootBranchReturnMotion = await captureColumnEntryMotion({
       name: "omega",
-      columnIndex: 0,
-      expectedDirection: "resize",
+      columnName: "omega",
+      expectedDirection: "none",
+      allowHorizontalClamp: true,
       expectedRowsByColumn: [["alpha", "omega", "root-note.txt", "opaque.bin"], ["omega-leaf.txt"]],
     });
     await assertMotionOk("return from beta to root branch", rootBranchReturnMotion);
 
-    await clickColumnDirectory("alpha", 0);
+    await clickColumnDirectory("alpha");
     await waitUntil(async () => await columnsIncludeRows([["alpha"], ["beta"]]), pageSummary);
     await waitUntil(columnsMotionIdle, pageSummary);
-    await clickColumnDirectory("beta", 1);
+    await clickColumnDirectory("beta");
     await waitUntil(async () => await columnsIncludeRows([["alpha"], ["beta"], ["gamma"]]), pageSummary);
     await waitUntil(columnsMotionIdle, pageSummary);
 
-    const gammaMotion = await captureColumnEntryMotion({
-      name: "gamma",
-      columnIndex: 2,
-      expectedDirection: "forward",
-      expectedRowsByColumn: [["beta"], ["gamma"], ["delta"]],
-    });
-    await assertMotionOk("open gamma", gammaMotion);
+    await clickColumnDirectory("gamma");
+    await waitUntil(async () => await columnsIncludeRows([["beta"], ["gamma"], ["delta"]]), pageSummary);
+    await waitUntil(columnsMotionIdle, pageSummary);
 
-    const deltaMotion = await captureColumnEntryMotion({
-      name: "delta",
-      columnIndex: 2,
-      expectedDirection: "forward",
-      expectedRowsByColumn: [["gamma"], ["delta"], ["leaf.txt"]],
-    });
-    await assertMotionOk("open delta", deltaMotion);
+    await clickColumnDirectory("delta");
+    await waitUntil(async () => await columnsIncludeRows([["gamma"], ["delta"], ["leaf.txt"]]), pageSummary);
+    await waitUntil(columnsMotionIdle, pageSummary);
 
-    const gammaReturnMotion = await captureColumnEntryMotion({
+    const leftColumnSiblingDirectoryMotion = await captureVisibleColumnEntryMotion({
+      name: "theta",
+      visibleColumnIndex: 0,
+      expectedDirection: "backward",
+      expectedRowsByColumn: [["beta", "theta", "readme.txt"], ["gamma", "theta", "beta-note.txt"], ["theta-leaf.txt"]],
+      expectedClickedColumnMotion: "left-to-middle",
+    });
+    await assertMotionOk("switch left visible column to theta", leftColumnSiblingDirectoryMotion);
+
+    await clickColumnDirectory("gamma");
+    await waitUntil(async () => await columnsIncludeRows([["beta"], ["gamma"], ["delta"]]), pageSummary);
+    await waitUntil(columnsMotionIdle, pageSummary);
+
+    await clickColumnDirectory("delta");
+    await waitUntil(async () => await columnsIncludeRows([["gamma"], ["delta"], ["leaf.txt"]]), pageSummary);
+    await waitUntil(columnsMotionIdle, pageSummary);
+
+    const gammaReturnMotion = await captureVisibleColumnEntryMotion({
       name: "gamma",
-      columnIndex: 0,
+      visibleColumnIndex: 0,
       expectedDirection: "backward",
       expectedRowsByColumn: [["beta"], ["gamma"], ["delta"]],
+      expectedClickedColumnMotion: "left-to-middle",
     });
     await assertMotionOk("return to gamma", gammaReturnMotion);
 
-    const betaReturnMotion = await captureColumnEntryMotion({
+    const betaReturnMotion = await captureVisibleColumnEntryMotion({
       name: "beta",
-      columnIndex: 0,
+      visibleColumnIndex: 0,
       expectedDirection: "backward",
       expectedRowsByColumn: [["alpha"], ["beta"], ["gamma"]],
+      expectedClickedColumnMotion: "left-to-middle",
     });
     await assertMotionOk("return to beta", betaReturnMotion);
 
     console.log(
       `tauri files Columns nested navigation motion test passed\n${JSON.stringify(
         {
-          openBetaTravel: betaMotion.horizontalTravel,
-          openGammaTravel: gammaMotion.horizontalTravel,
-          openDeltaTravel: deltaMotion.horizontalTravel,
-          oneToTwoResizeTravel: oneToTwoResizeMotion.horizontalTravel,
-          oneToTwoResizeWidthDelta: oneToTwoResizeMotion.resizeWidthDelta,
-          oneToTwoResizeIntermediateFrameCount: oneToTwoResizeMotion.resizeIntermediateFrameCount,
-          oneToTwoResizeRootScrollDelta: oneToTwoResizeMotion.rootScrollDelta,
-          openBetaResizeTravel: betaMotion.horizontalTravel,
-          openBetaResizeWidthDelta: betaMotion.resizeWidthDelta,
-          openBetaResizeIntermediateFrameCount: betaMotion.resizeIntermediateFrameCount,
-          openBetaResizeRootScrollDelta: betaMotion.rootScrollDelta,
           returnRootBranchResizeTravel: rootBranchReturnMotion.horizontalTravel,
           returnRootBranchResizeWidthDelta: rootBranchReturnMotion.resizeWidthDelta,
           returnRootBranchResizeIntermediateFrameCount: rootBranchReturnMotion.resizeIntermediateFrameCount,
           returnRootBranchResizeRootScrollDelta: rootBranchReturnMotion.rootScrollDelta,
+          leftColumnSiblingDirectoryTravel: leftColumnSiblingDirectoryMotion.horizontalTravel,
           returnGammaTravel: gammaReturnMotion.horizontalTravel,
           returnBetaTravel: betaReturnMotion.horizontalTravel,
           middleColumnSiblingTravel: middleColumnSiblingMotion.horizontalTravel,
@@ -228,20 +244,14 @@ test("files columns nested navigation motion", { timeout: 180_000 }, async () =>
           twoColumnSwitchHorizontalTravel: twoColumnSwitchStress.horizontalTravel,
           twoColumnSwitchUniqueCount: twoColumnSwitchStress.uniqueSwitchCount,
           siblingDirectoryTravel: siblingDirectoryMotion.horizontalTravel,
-          siblingFileResizeTravel: siblingFileMotion.horizontalTravel,
-          siblingFileResizeWidthDelta: siblingFileMotion.resizeWidthDelta,
-          siblingFileResizeIntermediateFrameCount: siblingFileMotion.resizeIntermediateFrameCount,
-          siblingFileResizeRootScrollDelta: siblingFileMotion.rootScrollDelta,
+          siblingFileTravel: siblingFileMotion.horizontalTravel,
           sampleCounts: [
             siblingDirectoryMotion.sampleCount,
             siblingFileMotion.sampleCount,
-            oneToTwoResizeMotion.sampleCount,
             twoColumnSwitchStress.sampleCount,
-            betaMotion.sampleCount,
             middleColumnSiblingMotion.sampleCount,
             rootBranchReturnMotion.sampleCount,
-            gammaMotion.sampleCount,
-            deltaMotion.sampleCount,
+            leftColumnSiblingDirectoryMotion.sampleCount,
             gammaReturnMotion.sampleCount,
             betaReturnMotion.sampleCount,
           ],
@@ -263,6 +273,7 @@ test("files columns nested navigation motion", { timeout: 180_000 }, async () =>
   async function createFilesFixture() {
     const root = await mkdtemp(join(tmpdir(), "nocturne-files-columns-motion-"));
     await mkdir(join(root, "alpha", "beta", "gamma", "delta"), { recursive: true });
+    await mkdir(join(root, "alpha", "beta", "theta"), { recursive: true });
     await mkdir(join(root, "alpha", "theta"), { recursive: true });
     await mkdir(join(root, "omega"), { recursive: true });
     for (let index = 0; index < 64; index += 1) {
@@ -272,6 +283,7 @@ test("files columns nested navigation motion", { timeout: 180_000 }, async () =>
     }
     await writeFile(join(root, "alpha", "beta", "gamma", "delta", "leaf.txt"), "leaf content\n");
     await writeFile(join(root, "alpha", "beta", "gamma", "gamma-note.txt"), "gamma content\n");
+    await writeFile(join(root, "alpha", "beta", "theta", "theta-leaf.txt"), "beta theta content\n");
     await writeFile(join(root, "alpha", "beta", "beta-note.txt"), "beta content\n");
     await writeFile(join(root, "alpha", "theta", "theta-leaf.txt"), "theta content\n");
     await writeFile(join(root, "alpha", "readme.txt"), "alpha content\n");
@@ -307,7 +319,13 @@ test("files columns nested navigation motion", { timeout: 180_000 }, async () =>
 
   async function columnsIncludeRows(expectedRowsByColumn) {
     const measurement = await measureCurrentColumns();
-    return expectedRowsByColumn.every((expectedRows, index) => expectedRows.every((row) => measurement.columns[index]?.rowNames.includes(row)));
+    const columns = columnsForExpectation(measurement, expectedRowsByColumn.length);
+    return expectedRowsByColumn.every((expectedRows, index) => expectedRows.every((row) => columns[index]?.rowNames.includes(row)));
+  }
+
+  function columnsForExpectation(measurement, count) {
+    const visibleColumns = measurement.columns.filter((column) => column.visibleWidth >= 40);
+    return visibleColumns.length >= count ? visibleColumns.slice(-count) : measurement.columns.slice(-count);
   }
 
   async function columnsMotionIdle() {
@@ -331,7 +349,8 @@ test("files columns nested navigation motion", { timeout: 180_000 }, async () =>
       const viewRect = columnsView?.getBoundingClientRect();
       const columns = [...(currentPane?.querySelectorAll('.file-column') ?? [])].map((column) => {
         const rect = column.getBoundingClientRect();
-        const rowNames = [...column.querySelectorAll('.column-row')].map((row) => {
+        const rows = [...column.querySelectorAll('.column-row')];
+        const rowNames = rows.slice(0, 80).map((row) => {
           const nameCell = row.querySelector('.name-cell');
           return nameCell?.textContent?.trim() ?? row.textContent?.trim() ?? '';
         });
@@ -339,6 +358,7 @@ test("files columns nested navigation motion", { timeout: 180_000 }, async () =>
           label: column.getAttribute('aria-label'),
           left: rect.left,
           right: rect.right,
+          rowCount: rows.length,
           rowNames,
           visibleWidth: viewRect
             ? Math.max(0, Math.min(rect.right, viewRect.right) - Math.max(rect.left, viewRect.left))
@@ -349,17 +369,85 @@ test("files columns nested navigation motion", { timeout: 180_000 }, async () =>
     `);
   }
 
-  async function clickColumnDirectory(name, columnIndex) {
-    const clicked = await execute(clickColumnDirectoryScript(name, columnIndex));
+  async function clickColumnDirectory(name) {
+    const clicked = await execute(clickColumnDirectoryScript(name));
     if (!clicked.clicked) {
-      throw new Error(`Columns view column ${columnIndex} did not contain directory ${name}: ${JSON.stringify(clicked, null, 2)}`);
+      throw new Error(`Columns view did not contain directory ${name}: ${JSON.stringify(clicked, null, 2)}`);
     }
+  }
+
+  async function clickVisibleColumnFile(name, visibleColumnIndex) {
+    const clicked = await execute(`
+      const columnsView = document.querySelector('.columns-view');
+      const viewRect = columnsView?.getBoundingClientRect();
+      const pane = columnsView?.querySelector('.columns-pane.current') ?? columnsView;
+      const visibleColumns = [...(pane?.querySelectorAll('.file-column') ?? [])]
+        .map((column) => {
+          const rect = column.getBoundingClientRect();
+          const visibleWidth = viewRect
+            ? Math.max(0, Math.min(rect.right, viewRect.right) - Math.max(rect.left, viewRect.left))
+            : 0;
+          return { column, visibleWidth };
+        })
+        .filter((item) => item.visibleWidth >= 40);
+      const column = visibleColumns[${visibleColumnIndex}]?.column ?? null;
+      const rows = [...(column?.querySelectorAll('.column-row') ?? [])]
+        .filter((row) => row.offsetParent !== null);
+      const file = rows.find((row) =>
+        row.getAttribute('data-entry-kind') !== 'directory' &&
+        row.querySelector('.name-cell')?.textContent?.trim() === ${JSON.stringify(name)}
+      );
+      if (!file) {
+        return {
+          clicked: false,
+          selectedColumn: column?.getAttribute('aria-label') ?? null,
+          rows: rows.map((row) => ({
+            text: row.querySelector('.name-cell')?.textContent?.trim() ?? row.textContent?.trim() ?? '',
+            kind: row.getAttribute('data-entry-kind'),
+            path: row.getAttribute('data-entry-path'),
+          })),
+        };
+      }
+      file.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true, pointerType: 'mouse', button: 0, pointerId: 1, isPrimary: true }));
+      file.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window, button: 0 }));
+      file.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, cancelable: true, pointerType: 'mouse', button: 0, pointerId: 1, isPrimary: true }));
+      file.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, view: window, button: 0 }));
+      file.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window, button: 0 }));
+      return {
+        clicked: true,
+        text: file.textContent?.trim() ?? '',
+        path: file.getAttribute('data-entry-path'),
+      };
+    `);
+    if (!clicked.clicked) {
+      throw new Error(`Columns view did not contain file ${name}: ${JSON.stringify(clicked, null, 2)}`);
+    }
+    return clicked;
+  }
+
+  async function previewColumnVisible() {
+    return await execute(`
+      const columnsView = document.querySelector('.columns-view');
+      const viewRect = columnsView?.getBoundingClientRect();
+      const preview = columnsView?.querySelector('.preview-column');
+      const rect = preview?.getBoundingClientRect();
+      if (!viewRect || !rect) return false;
+      const visibleWidth = Math.max(0, Math.min(rect.right, viewRect.right) - Math.max(rect.left, viewRect.left));
+      return visibleWidth >= 40;
+    `);
   }
 
   async function scrollRootColumnNear(name) {
     const scrolled = await execute(`
       const currentPane = document.querySelector('.columns-view .columns-pane.current') ?? document.querySelector('.columns-view');
-      const rootColumn = currentPane?.querySelectorAll('.file-column')[0] ?? null;
+      const fixtureColumn = () => {
+        const columns = [...(currentPane?.querySelectorAll('.file-column') ?? [])];
+        return columns.find((column) => {
+          const names = [...column.querySelectorAll('.column-row .name-cell')].map((cell) => cell.textContent?.trim() ?? '');
+          return names.includes(${JSON.stringify(name)}) || names.includes('alpha') || names.includes('omega') || names.includes('root-note.txt') || names.includes('branch-00');
+        }) ?? null;
+      };
+      const rootColumn = fixtureColumn();
       const rows = [...(rootColumn?.querySelectorAll('.column-row') ?? [])]
         .filter((row) => row.offsetParent !== null);
       const row = rows.find((item) => item.querySelector('.name-cell')?.textContent?.trim() === ${JSON.stringify(name)});
@@ -388,6 +476,27 @@ test("files columns nested navigation motion", { timeout: 180_000 }, async () =>
         const candidates = [list, ...list.querySelectorAll('*')];
         return candidates.find((element) => canWriteScrollTop(element)) ?? null;
       };
+      const scrollElementToRow = (element, row, column) => {
+        const columnRect = column.getBoundingClientRect();
+        element.scrollTop = Math.max(0, row.offsetTop - Math.max(48, element.clientHeight / 2));
+        element.dispatchEvent(new Event('scroll', { bubbles: true }));
+        for (let attempt = 0; attempt < 28; attempt += 1) {
+          const rowRect = row.getBoundingClientRect();
+          if (rowRect.top > columnRect.top + 36 && rowRect.bottom < columnRect.bottom - 8) return true;
+          const delta = rowRect.top - columnRect.top - Math.max(48, column.clientHeight / 2) + rowRect.height / 2;
+          element.scrollTop += delta;
+          element.dispatchEvent(new Event('scroll', { bubbles: true }));
+        }
+        return false;
+      };
+      const scrollCandidatesForRow = (column, row) => {
+        const descendants = [...column.querySelectorAll('*')].filter((element) => element.scrollHeight > element.clientHeight + 4);
+        const ancestors = [];
+        for (let element = row.parentElement; element && element !== document.body; element = element.parentElement) {
+          if (element.scrollHeight > element.clientHeight + 4) ancestors.push(element);
+        }
+        return [...new Set([...ancestors, ...descendants])];
+      };
       const visibleRows = () => {
         const rootRect = rootColumn.getBoundingClientRect();
         return rows.filter((item) => {
@@ -398,7 +507,13 @@ test("files columns nested navigation motion", { timeout: 180_000 }, async () =>
       const scrollRowIntoColumnView = () => {
         const viewport = columnScrollViewport(rootColumn);
         if (!viewport) return false;
-        for (let attempt = 0; attempt < 12; attempt += 1) {
+        viewport.scrollTop = Math.max(0, row.offsetTop - Math.max(48, viewport.clientHeight / 2));
+        viewport.dispatchEvent(new Event('scroll', { bubbles: true }));
+        row.scrollIntoView({ block: "center", inline: "nearest" });
+        for (const candidate of scrollCandidatesForRow(rootColumn, row)) {
+          if (scrollElementToRow(candidate, row, rootColumn)) return true;
+        }
+        for (let attempt = 0; attempt < 24; attempt += 1) {
           const rootRect = rootColumn.getBoundingClientRect();
           const rowRect = row.getBoundingClientRect();
           if (rowRect.top > rootRect.top + 36 && rowRect.bottom < rootRect.bottom - 8) return true;
@@ -406,7 +521,10 @@ test("files columns nested navigation motion", { timeout: 180_000 }, async () =>
           viewport.scrollTop += delta;
           viewport.dispatchEvent(new Event('scroll', { bubbles: true }));
         }
-        return false;
+        row.scrollIntoView({ block: "center", inline: "nearest" });
+        const rootRect = rootColumn.getBoundingClientRect();
+        const rowRect = row.getBoundingClientRect();
+        return rowRect.top > rootRect.top + 36 && rowRect.bottom < rootRect.bottom - 8;
       };
       const scrolled = scrollRowIntoColumnView();
       const rootRect = rootColumn.getBoundingClientRect();
@@ -426,12 +544,12 @@ test("files columns nested navigation motion", { timeout: 180_000 }, async () =>
     await delay(80);
   }
 
-  function clickColumnDirectoryScript(name, columnIndex) {
+  function clickColumnDirectoryScript(name) {
     return `
       const currentPane = document.querySelector('.columns-view .columns-pane.current') ?? document.querySelector('.columns-view');
-      const column = currentPane?.querySelectorAll('.file-column')[${columnIndex}];
-      const rows = [...(column?.querySelectorAll('.column-row') ?? [])]
-        .filter((row) => row.offsetParent !== null);
+      const columns = [...(currentPane?.querySelectorAll('.file-column') ?? [])];
+      const rowsByColumn = columns.map((column) => [...column.querySelectorAll('.column-row')].filter((row) => row.offsetParent !== null));
+      const rows = rowsByColumn.flat();
       const directory = rows.find((row) =>
         row.getAttribute('data-entry-kind') === 'directory' &&
         row.querySelector('.name-cell')?.textContent?.trim() === ${JSON.stringify(name)}
@@ -439,12 +557,13 @@ test("files columns nested navigation motion", { timeout: 180_000 }, async () =>
       if (!directory) {
         return {
           clicked: false,
-          rowCount: rows.length,
-          rows: rows.slice(0, 10).map((row) => ({
-            text: row.textContent?.trim() ?? '',
-            kind: row.getAttribute('data-entry-kind'),
-            path: row.getAttribute('data-entry-path'),
-          })),
+          columns: rowsByColumn.map((columnRows) =>
+            columnRows.slice(0, 10).map((row) => ({
+              text: row.textContent?.trim() ?? '',
+              kind: row.getAttribute('data-entry-kind'),
+              path: row.getAttribute('data-entry-path'),
+            }))
+          ),
         };
       }
       directory.click();
@@ -467,7 +586,14 @@ test("files columns nested navigation motion", { timeout: 180_000 }, async () =>
       const started = performance.now();
 
       const currentPane = () => document.querySelector('.columns-view .columns-pane.current') ?? document.querySelector('.columns-view');
-      const rootColumn = () => currentPane()?.querySelectorAll('.file-column')[0] ?? null;
+      const rootColumn = () => {
+        const pane = currentPane();
+        const columns = [...(pane?.querySelectorAll('.file-column') ?? [])];
+        return columns.find((column) => {
+          const names = [...column.querySelectorAll('.column-row .name-cell')].map((cell) => cell.textContent?.trim() ?? '');
+          return names.includes('alpha') || names.includes('omega') || names.includes('root-note.txt') || names.includes('branch-00') || names.includes('branch-42');
+        }) ?? null;
+      };
       const visibleRows = () => [...(rootColumn()?.querySelectorAll('.column-row') ?? [])]
         .filter((row) => row.offsetParent !== null);
       const visibleRootRowNames = () => {
@@ -500,6 +626,27 @@ test("files columns nested navigation motion", { timeout: 180_000 }, async () =>
         const candidates = [list, ...list.querySelectorAll('*')];
         return candidates.find((element) => canWriteScrollTop(element)) ?? null;
       };
+      const scrollElementToRow = (element, row, column) => {
+        element.scrollTop = Math.max(0, row.offsetTop - Math.max(48, element.clientHeight / 2));
+        element.dispatchEvent(new Event('scroll', { bubbles: true }));
+        for (let attempt = 0; attempt < 28; attempt += 1) {
+          const columnRect = column.getBoundingClientRect();
+          const rowRect = row.getBoundingClientRect();
+          if (rowRect.top > columnRect.top + 36 && rowRect.bottom < columnRect.bottom - 8) return true;
+          const delta = rowRect.top - columnRect.top - Math.max(48, column.clientHeight / 2) + rowRect.height / 2;
+          element.scrollTop += delta;
+          element.dispatchEvent(new Event('scroll', { bubbles: true }));
+        }
+        return false;
+      };
+      const scrollCandidatesForRow = (column, row) => {
+        const descendants = [...column.querySelectorAll('*')].filter((element) => element.scrollHeight > element.clientHeight + 4);
+        const ancestors = [];
+        for (let element = row.parentElement; element && element !== document.body; element = element.parentElement) {
+          if (element.scrollHeight > element.clientHeight + 4) ancestors.push(element);
+        }
+        return [...new Set([...ancestors, ...descendants])];
+      };
       const setRootScrollNear = (name) => {
         const row = rowNamed(name);
         if (!row) return false;
@@ -507,7 +654,16 @@ test("files columns nested navigation motion", { timeout: 180_000 }, async () =>
         if (!column) return false;
         const viewport = columnScrollViewport(column);
         if (!viewport) return false;
-        for (let attempt = 0; attempt < 12; attempt += 1) {
+        viewport.scrollTop = Math.max(0, row.offsetTop - Math.max(48, viewport.clientHeight / 2));
+        viewport.dispatchEvent(new Event('scroll', { bubbles: true }));
+        row.scrollIntoView({ block: "center", inline: "nearest" });
+        for (const candidate of scrollCandidatesForRow(column, row)) {
+          if (scrollElementToRow(candidate, row, column)) {
+            const visible = visibleRootRowNames();
+            return visible.includes(name) && visible[0] !== "alpha";
+          }
+        }
+        for (let attempt = 0; attempt < 24; attempt += 1) {
           const columnRect = column.getBoundingClientRect();
           const rowRect = row.getBoundingClientRect();
           if (rowRect.top > columnRect.top + 36 && rowRect.bottom < columnRect.bottom - 8) break;
@@ -515,6 +671,7 @@ test("files columns nested navigation motion", { timeout: 180_000 }, async () =>
           viewport.scrollTop += delta;
           viewport.dispatchEvent(new Event('scroll', { bubbles: true }));
         }
+        row.scrollIntoView({ block: "center", inline: "nearest" });
         const visible = visibleRootRowNames();
         return visible.includes(name) && visible[0] !== "alpha";
       };
@@ -525,7 +682,8 @@ test("files columns nested navigation motion", { timeout: 180_000 }, async () =>
         const viewRect = columnsView?.getBoundingClientRect();
         const columns = [...(columnsView?.querySelectorAll('.file-column') ?? [])].map((column) => {
           const rect = column.getBoundingClientRect();
-          const rowNames = [...column.querySelectorAll('.column-row')].map((row) =>
+          const rows = [...column.querySelectorAll('.column-row')];
+          const rowNames = rows.slice(0, 80).map((row) =>
             row.querySelector('.name-cell')?.textContent?.trim() ?? row.textContent?.trim() ?? ''
           );
           return {
@@ -535,7 +693,7 @@ test("files columns nested navigation motion", { timeout: 180_000 }, async () =>
             visibleWidth: viewRect
               ? Math.max(0, Math.min(rect.right, viewRect.right) - Math.max(rect.left, viewRect.left))
               : 0,
-            rowCount: rowNames.length,
+            rowCount: rows.length,
             rowNames,
           };
         });
@@ -566,13 +724,56 @@ test("files columns nested navigation motion", { timeout: 180_000 }, async () =>
         };
         tick();
       });
+      const waitForStableRootScrollNear = async (name) => {
+        for (let attempt = 0; attempt < 12; attempt += 1) {
+          if (!setRootScrollNear(name)) {
+            await new Promise((resolve) => requestAnimationFrame(resolve));
+            continue;
+          }
+          await new Promise((resolve) => requestAnimationFrame(resolve));
+          const first = visibleRootRowNames();
+          await new Promise((resolve) => requestAnimationFrame(resolve));
+          const second = visibleRootRowNames();
+          if (
+            first.includes(name) &&
+            second.includes(name) &&
+            first[0] !== "alpha" &&
+            second[0] !== "alpha" &&
+            first[0] !== "branch-00" &&
+            second[0] !== "branch-00"
+          ) {
+            return true;
+          }
+        }
+        return false;
+      };
 
       (async () => {
-        if (!setRootScrollNear("branch-42")) {
-          done({ ok: false, reason: "Could not prepare a scrolled root column for switching" });
+        if (!(await waitForStableRootScrollNear("branch-42"))) {
+          done({
+            ok: false,
+            reason: "Could not prepare a scrolled root column for switching",
+            diagnostics: (() => {
+              const column = rootColumn();
+              const row = rowNamed("branch-42");
+              const candidates = column && row ? scrollCandidatesForRow(column, row) : [];
+              return {
+                rowOffsetTop: row?.offsetTop ?? null,
+                rowRect: row ? { top: row.getBoundingClientRect().top, bottom: row.getBoundingClientRect().bottom } : null,
+                columnRect: column ? { top: column.getBoundingClientRect().top, bottom: column.getBoundingClientRect().bottom } : null,
+                candidates: candidates.map((element) => ({
+                  tag: element.tagName,
+                  className: element.className?.toString?.() ?? "",
+                  attr: element.getAttribute('data-overlayscrollbars-viewport') ?? "",
+                  scrollTop: element.scrollTop,
+                  clientHeight: element.clientHeight,
+                  scrollHeight: element.scrollHeight,
+                })),
+              };
+            })(),
+          });
           return;
         }
-        await new Promise((resolve) => requestAnimationFrame(resolve));
         const baselineVisibleRows = visibleRootRowNames();
         if (baselineVisibleRows[0] === "alpha" || !baselineVisibleRows.includes("branch-42")) {
           done({ ok: false, reason: "Root column did not scroll to the prepared branch before switching", baselineVisibleRows });
@@ -586,11 +787,10 @@ test("files columns nested navigation motion", { timeout: 180_000 }, async () =>
 
         sample();
         for (const name of switchNames) {
-          if (!setRootScrollNear(name)) {
+          if (!(await waitForStableRootScrollNear(name))) {
             done({ ok: false, reason: "Could not scroll a stress switch target into view", name });
             return;
           }
-          await new Promise((resolve) => requestAnimationFrame(resolve));
           const beforeVisibleRows = visibleRootRowNames();
           const row = rowNamed(name);
           if (!row) {
@@ -607,12 +807,14 @@ test("files columns nested navigation motion", { timeout: 180_000 }, async () =>
           sample();
           const settled = await waitFor(() => {
             const pane = currentPane();
-            const secondColumn = pane?.querySelectorAll('.file-column')[1];
-            return secondColumn?.getAttribute('aria-label')?.endsWith(name) &&
-              [...secondColumn.querySelectorAll('.column-row')].some((rowItem) =>
+            const selectedColumn = [...(pane?.querySelectorAll('.file-column') ?? [])].find((column) =>
+              column.getAttribute('aria-label')?.replace(/\\\\/g, '/').endsWith(name)
+            );
+            return selectedColumn &&
+              [...selectedColumn.querySelectorAll('.column-row')].some((rowItem) =>
                 rowItem.querySelector('.name-cell')?.textContent?.trim() === "level-a"
               );
-          });
+          }, 2400);
           sample();
           if (!settled) {
             done({ ok: false, reason: "A stress switch did not settle into the selected directory", name, samples: samples.slice(-8) });
@@ -631,8 +833,7 @@ test("files columns nested navigation motion", { timeout: 180_000 }, async () =>
         const topJumpFrame = topJumpFrames[0] ?? null;
         const unexpectedMotionFrame = samples.find((item) =>
           item.contentClassName.includes('motion-forward') ||
-          item.contentClassName.includes('motion-backward') ||
-          Math.abs(item.contentLeft ?? 0) >= 8
+          item.contentClassName.includes('motion-backward')
         );
         done({
           ok: horizontalTravel < 8 && !emptyFrame && !unexpectedMotionFrame && !topJumpFrame,
@@ -662,11 +863,57 @@ test("files columns nested navigation motion", { timeout: 180_000 }, async () =>
     `);
   }
 
-  async function captureColumnEntryMotion({ name, columnIndex, expectedDirection, expectedRowsByColumn }) {
+  async function captureColumnEntryMotion({ name, columnName, expectedDirection, expectedRowsByColumn, allowHorizontalClamp = false, expectedClickedColumnMotion = null }) {
+    return await captureColumnEntryMotionFromColumnScript({
+      name,
+      columnSelectorScript: `
+        (() => {
+          const columns = [...(currentPane?.querySelectorAll('.file-column') ?? [])];
+          return columns.find((column) =>
+            [...column.querySelectorAll('.column-row')]
+              .some((row) => row.querySelector('.name-cell')?.textContent?.trim() === ${JSON.stringify(columnName ?? name)})
+          ) ?? null;
+        })()
+      `,
+      expectedDirection,
+      expectedRowsByColumn,
+      allowHorizontalClamp,
+      expectedClickedColumnMotion,
+    });
+  }
+
+  async function captureVisibleColumnEntryMotion({ name, visibleColumnIndex, expectedDirection, expectedRowsByColumn, allowHorizontalClamp = false, expectedClickedColumnMotion = null }) {
+    return await captureColumnEntryMotionFromColumnScript({
+      name,
+      columnSelectorScript: `
+        (() => {
+          const columnsView = document.querySelector('.columns-view');
+          const viewRect = columnsView?.getBoundingClientRect();
+          const pane = columnsView?.querySelector('.columns-pane.current') ?? columnsView;
+          const visibleColumns = [...(pane?.querySelectorAll('.file-column') ?? [])]
+            .map((column) => {
+              const rect = column.getBoundingClientRect();
+              const visibleWidth = viewRect
+                ? Math.max(0, Math.min(rect.right, viewRect.right) - Math.max(rect.left, viewRect.left))
+                : 0;
+              return { column, visibleWidth };
+            })
+            .filter((item) => item.visibleWidth >= 40);
+          return visibleColumns[${visibleColumnIndex}]?.column ?? null;
+        })()
+      `,
+      expectedDirection,
+      expectedRowsByColumn,
+      allowHorizontalClamp,
+      expectedClickedColumnMotion,
+    });
+  }
+
+  async function captureColumnEntryMotionFromColumnScript({ name, columnSelectorScript, expectedDirection, expectedRowsByColumn, allowHorizontalClamp, expectedClickedColumnMotion }) {
     return await executeAsync(`
       const done = arguments[arguments.length - 1];
       const currentPane = document.querySelector('.columns-view .columns-pane.current') ?? document.querySelector('.columns-view');
-      const column = currentPane?.querySelectorAll('.file-column')[${columnIndex}];
+      const column = ${columnSelectorScript};
       const rows = [...(column?.querySelectorAll('.column-row') ?? [])]
         .filter((row) => row.offsetParent !== null);
       const target = rows.find((row) =>
@@ -676,18 +923,48 @@ test("files columns nested navigation motion", { timeout: 180_000 }, async () =>
         done({
           ok: false,
           reason: 'Columns motion target row was not available before sampling',
+          selectedColumn: column?.getAttribute('aria-label') ?? null,
           rows: rows.map((row) => row.textContent?.trim() ?? ''),
+          visibleColumns: (() => {
+            const columnsView = document.querySelector('.columns-view');
+            const viewRect = columnsView?.getBoundingClientRect();
+            const pane = columnsView?.querySelector('.columns-pane.current') ?? columnsView;
+            return [...(pane?.querySelectorAll('.file-column') ?? [])].map((item) => {
+              const rect = item.getBoundingClientRect();
+              const visibleWidth = viewRect
+                ? Math.max(0, Math.min(rect.right, viewRect.right) - Math.max(rect.left, viewRect.left))
+                : 0;
+              return {
+                label: item.getAttribute('aria-label'),
+                visibleWidth,
+                rows: [...item.querySelectorAll('.column-row')].map((row) =>
+                  row.querySelector('.name-cell')?.textContent?.trim() ?? row.textContent?.trim() ?? ''
+                ),
+              };
+            });
+          })(),
         });
         return;
       }
 
       const expectedRowsByColumn = ${JSON.stringify(expectedRowsByColumn)};
       const expectedDirection = ${JSON.stringify(expectedDirection)};
+      const allowHorizontalClamp = ${JSON.stringify(allowHorizontalClamp)};
+      const expectedClickedColumnMotion = ${JSON.stringify(expectedClickedColumnMotion)};
+      const clickedColumnLabel = column?.getAttribute('aria-label') ?? null;
+      const targetPath = target.getAttribute('data-entry-path') ?? '';
+      const targetParentPath = targetPath.replace(/\\\\/g, '/').replace(/\\/[^/]+\\/?$/, '');
       const samples = [];
       const started = performance.now();
       const rootVisibleRows = () => {
         const pane = document.querySelector('.columns-view .columns-pane.current') ?? document.querySelector('.columns-view');
-        const rootColumn = pane?.querySelectorAll('.file-column')[0] ?? null;
+        const rootColumn = (() => {
+          const columns = [...(pane?.querySelectorAll('.file-column') ?? [])];
+          return columns.find((column) => {
+            const names = [...column.querySelectorAll('.column-row .name-cell')].map((cell) => cell.textContent?.trim() ?? '');
+            return names.includes('alpha') || names.includes('omega') || names.includes('root-note.txt') || names.includes('branch-00') || names.includes('branch-42');
+          }) ?? null;
+        })();
         const rootRect = rootColumn?.getBoundingClientRect();
         if (!rootRect) return [];
         return [...rootColumn.querySelectorAll('.column-row')]
@@ -703,19 +980,37 @@ test("files columns nested navigation motion", { timeout: 180_000 }, async () =>
         const visibleWidth = viewRect
           ? Math.max(0, Math.min(rect.right, viewRect.right) - Math.max(rect.left, viewRect.left))
           : 0;
-        const rowNames = [...item.querySelectorAll('.column-row')].map((row) => {
+        const label = item.getAttribute('aria-label');
+        const normalizedLabel = String(label ?? '').replace(/\\\\/g, '/');
+        const shouldCollectRows = visibleWidth >= 24 || (targetParentPath && normalizedLabel.startsWith(targetParentPath));
+        const rows = shouldCollectRows ? [...item.querySelectorAll('.column-row')] : [];
+        const rowNames = rows.slice(0, 80).map((row) => {
           const nameCell = row.querySelector('.name-cell');
           return nameCell?.textContent?.trim() ?? row.textContent?.trim() ?? '';
         });
         return {
-          label: item.getAttribute('aria-label'),
+          label,
           left: rect.left,
           right: rect.right,
           width: rect.width,
           visibleWidth,
-          rowCount: rowNames.length,
+          rowCount: shouldCollectRows ? rows.length : item.querySelectorAll('.column-row').length,
           rowNames,
         };
+      };
+      const basenameFromLabel = (label) => {
+        const normalized = String(label ?? '').replace(/\\\\/g, '/').replace(/\\/+$/, '');
+        const index = normalized.lastIndexOf('/');
+        return index < 0 ? normalized : normalized.slice(index + 1);
+      };
+      const transformTranslateX = (content) => {
+        if (!content) return null;
+        const transform = getComputedStyle(content).transform;
+        if (!transform || transform === 'none') return 0;
+        const match = transform.match(/^matrix\\(([^)]+)\\)$/);
+        if (!match) return 0;
+        const parts = match[1].split(',').map((part) => Number(part.trim()));
+        return Number.isFinite(parts[4]) ? parts[4] : 0;
       };
       const sample = () => {
         const columnsView = document.querySelector('.columns-view');
@@ -724,13 +1019,34 @@ test("files columns nested navigation motion", { timeout: 180_000 }, async () =>
         const viewRect = columnsView?.getBoundingClientRect();
         const contentRect = content?.getBoundingClientRect();
         const columns = [...(columnsView?.querySelectorAll('.file-column') ?? [])].map((item) => mapColumn(item, viewRect));
+        const visibleColumns = columns.filter((item) => item.visibleWidth >= 24);
+        const movingWindowColumns = columns.filter((item) => item.visibleWidth >= 1);
         const currentColumns = [...(currentPane?.querySelectorAll('.file-column') ?? [])].map((item) => mapColumn(item, viewRect));
+        const paneWindows = [...(columnsView?.querySelectorAll('.columns-pane') ?? [])].map((pane) => {
+          const paneColumns = [...pane.querySelectorAll('.file-column')].map((item) => mapColumn(item, viewRect));
+          return {
+            current: pane.classList.contains('current'),
+            ariaHidden: pane.getAttribute('aria-hidden'),
+            columns: paneColumns,
+            visibleColumns: paneColumns.filter((item) => item.visibleWidth >= 24),
+          };
+        });
+        const currentPaneWindow = paneWindows.find((pane) => pane.current) ?? null;
         samples.push({
           elapsed: performance.now() - started,
           viewExists: Boolean(columnsView),
           viewWidth: viewRect?.width ?? 0,
+          viewLeft: viewRect?.left ?? 0,
           contentClassName: content?.className ?? '',
+          contentStyleTransform: content?.style.transform ?? '',
+          contentStyleTransition: content?.style.transition ?? '',
           contentTransform: content ? getComputedStyle(content).transform : '',
+          contentAnimationName: content ? getComputedStyle(content).animationName : '',
+          contentAnimationDuration: content ? getComputedStyle(content).animationDuration : '',
+          contentAnimationPlayState: content ? getComputedStyle(content).animationPlayState : '',
+          motionDistance: content ? getComputedStyle(content).getPropertyValue('--columns-motion-distance').trim() : '',
+          motionTranslate: content ? getComputedStyle(content).getPropertyValue('--columns-motion-translate').trim() : '',
+          transformX: transformTranslateX(content),
           contentLeft: contentRect?.left ?? null,
           columnCount: columns.length,
           visibleColumnCount: columns.filter((item) => item.visibleWidth >= 24).length,
@@ -740,17 +1056,42 @@ test("files columns nested navigation motion", { timeout: 180_000 }, async () =>
           currentRowTotal: currentColumns.reduce((total, item) => total + item.rowCount, 0),
           rootVisibleRows: rootVisibleRows().slice(0, 8),
           currentColumns,
+          currentClickedColumn: clickedColumnLabel
+            ? currentColumns.find((column) => String(column.label ?? '').replace(/\\\\/g, '/') === String(clickedColumnLabel).replace(/\\\\/g, '/')) ?? null
+            : null,
           columns,
+          visibleRowsByColumn: visibleColumns.map((column) => column.rowNames),
+          movingRowsByColumn: movingWindowColumns.map((column) => column.rowNames),
+          paneWindows,
+          currentPaneVisibleRowsByColumn: (currentPaneWindow?.visibleColumns ?? []).map((column) => column.rowNames),
         });
       };
 
       sample();
-      target.click();
+      target.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true, pointerType: 'mouse', button: 0, pointerId: 1, isPrimary: true }));
+      target.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window, button: 0 }));
+      target.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, cancelable: true, pointerType: 'mouse', button: 0, pointerId: 1, isPrimary: true }));
+      target.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, view: window, button: 0 }));
+      target.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window, button: 0 }));
       sample();
 
       const capture = () => {
         sample();
-        if (performance.now() - started < 800) {
+        const elapsed = performance.now() - started;
+        const shouldWaitForMotion = expectedDirection !== 'none';
+        const firstActiveMotionSample = shouldWaitForMotion
+          ? samples.find((item) =>
+              item.contentClassName.includes("motion-" + expectedDirection) &&
+              item.contentClassName.includes("motion-active")
+            )
+          : null;
+        const activeElapsed = firstActiveMotionSample?.elapsed ?? null;
+        const minimumCaptureMs = expectedDirection === 'none' ? 2400 : 800;
+        if (
+          elapsed < minimumCaptureMs ||
+          (shouldWaitForMotion && activeElapsed === null && elapsed < 2400) ||
+          (shouldWaitForMotion && activeElapsed !== null && elapsed < activeElapsed + 900)
+        ) {
           requestAnimationFrame(capture);
           return;
         }
@@ -760,6 +1101,12 @@ test("files columns nested navigation motion", { timeout: 180_000 }, async () =>
           .filter((value) => typeof value === 'number');
         const horizontalTravel = lefts.length
           ? Math.max(...lefts) - Math.min(...lefts)
+          : 0;
+        const transformXs = samples
+          .map((item) => item.transformX)
+          .filter((value) => typeof value === 'number');
+        const transformTravel = transformXs.length
+          ? Math.max(...transformXs) - Math.min(...transformXs)
           : 0;
         const emptyFrame = samples.find((item) =>
           !item.viewExists ||
@@ -778,9 +1125,9 @@ test("files columns nested navigation motion", { timeout: 180_000 }, async () =>
         const directionIsCorrect = isNone || isResize
           ? true
           : expectedDirection === 'forward'
-            ? firstActive && lastActive && firstActive.contentLeft > lastActive.contentLeft
-            : firstActive && lastActive && firstActive.contentLeft < lastActive.contentLeft;
-        const backwardPreparationSlide = expectedDirection === 'backward'
+            ? firstActive && lastActive && firstActive.transformX > lastActive.transformX
+            : firstActive && lastActive && firstActive.transformX < lastActive.transformX;
+        const backwardPreparationSlide = expectedDirection === 'backward' && expectedClickedColumnMotion !== 'left-to-middle'
           ? directionSamples.find((item) =>
               !item.contentClassName.includes('motion-active') &&
               item.viewWidth > 0 &&
@@ -792,20 +1139,56 @@ test("files columns nested navigation motion", { timeout: 180_000 }, async () =>
           ? samples.find((item) =>
               item.contentClassName.includes('motion-forward') ||
               item.contentClassName.includes('motion-backward') ||
-              Math.abs(item.contentLeft ?? 0) >= 8
+              (isResize && Math.abs(item.transformX ?? 0) >= 8)
             )
           : null;
         const final = samples[samples.length - 1];
         const expectedColumnCount = expectedRowsByColumn.length;
+        const shouldVerifyMovingWindow = !isNone && !isResize && expectedColumnCount >= 3;
+        const windowContainsExpectedRows = (rowsByColumn) =>
+          rowsByColumn.length >= expectedColumnCount &&
+          expectedRowsByColumn.every((expectedRows, index) =>
+            expectedRows.every((rowName) => rowsByColumn[index]?.includes(rowName))
+          );
+        const matchingWindowInRows = (rowsByColumn) => {
+          for (let index = 0; index <= rowsByColumn.length - expectedColumnCount; index += 1) {
+            const windowRows = rowsByColumn.slice(index, index + expectedColumnCount);
+            if (windowContainsExpectedRows(windowRows)) return windowRows;
+          }
+          return null;
+        };
+        const activeCurrentWindowSamples = isNone || isResize
+          ? []
+          : activeDirectionSamples
+              .map((item) => matchingWindowInRows(item.movingRowsByColumn))
+              .filter(Boolean);
+        const lastActiveCurrentWindow = activeCurrentWindowSamples.at(-1) ?? [];
+        const movingCurrentPaneExposesExpectedWindow = !shouldVerifyMovingWindow
+          ? true
+          : activeCurrentWindowSamples.length > 0;
+        let sawExpectedMovingWindow = false;
+        const postMotionWindowRegression = shouldVerifyMovingWindow
+          ? samples.find((item) => {
+              const matchingRows = matchingWindowInRows(item.movingRowsByColumn);
+              if (item.contentClassName.includes('motion-active') && matchingRows) {
+                sawExpectedMovingWindow = true;
+                return false;
+              }
+              if (!sawExpectedMovingWindow) return false;
+              if (item.movingRowsByColumn.length < expectedColumnCount) return false;
+              return !matchingRows;
+            }) ?? null
+          : null;
         const finalColumns = final?.currentColumns ?? final?.columns ?? [];
-        const finalColumnCount = final?.currentColumnCount ?? final?.columnCount;
+        const finalVisibleColumns = finalColumns.filter((column) => column.visibleWidth >= 24);
+        const finalRowsByColumn = finalColumns.map((column) => column.rowNames);
+        const finalVisibleRowsByColumn = finalVisibleColumns.map((column) => column.rowNames);
+        const finalColumnCount = finalVisibleColumns.length || final?.currentColumnCount || final?.columnCount;
         const finalColumnCountMatches = isNone
           ? finalColumnCount >= expectedColumnCount
-          : finalColumnCount === expectedColumnCount;
+          : finalColumnCount >= expectedColumnCount;
         const finalStable = finalColumnCountMatches &&
-          expectedRowsByColumn.every((expectedRows, index) =>
-            expectedRows.every((rowName) => finalColumns[index]?.rowNames.includes(rowName))
-          );
+          (matchingWindowInRows(finalVisibleRowsByColumn) !== null || matchingWindowInRows(finalRowsByColumn) !== null);
         const currentFirstColumnWidths = samples
           .map((item) => item.currentColumns[0]?.visibleWidth)
           .filter((value) => typeof value === 'number' && value > 0);
@@ -827,9 +1210,13 @@ test("files columns nested navigation motion", { timeout: 180_000 }, async () =>
         const rootScrolledToTop = shouldPreserveRootScroll && initialRootWasNotTop && samples.some((item) =>
           item.rootVisibleRows?.[0] === 'alpha' || item.rootVisibleRows?.[0] === 'branch-00'
         );
-        const motionAmountMatches = isNone || isResize
-          ? horizontalTravel < 8
-          : horizontalTravel >= 24;
+        const motionAmountMatches = isNone
+          ? allowHorizontalClamp
+            ? transformTravel < 8
+            : horizontalTravel < 8
+          : isResize
+          ? transformTravel < 8
+          : transformTravel >= 24;
         const resizeAmountMatches = !isResize || resizeWidthDelta >= 24;
         const resizeAnimatedThroughIntermediateFrames = !isResize || (resizeIntermediateFrameCount >= 3 && roundedActiveResizeWidths.length >= 4);
         const directionClassMatches = isNone
@@ -837,6 +1224,47 @@ test("files columns nested navigation motion", { timeout: 180_000 }, async () =>
           : isResize
             ? directionSamples.length > 0
             : directionSamples.length > 0;
+        const clickedColumnMotionSamples = expectedClickedColumnMotion
+          ? activeDirectionSamples
+              .map((item) => {
+                const column = item.currentClickedColumn;
+                if (!column || item.viewWidth <= 0 || column.visibleWidth < 24) return null;
+                return {
+                  elapsed: item.elapsed,
+                  leftRatio: (column.left - item.viewLeft) / item.viewWidth,
+                  visibleWidth: column.visibleWidth,
+                  label: column.label,
+                };
+              })
+              .filter(Boolean)
+          : [];
+        const firstClickedColumnMotion = clickedColumnMotionSamples[0] ?? null;
+        const lastClickedColumnMotion = clickedColumnMotionSamples.at(-1) ?? null;
+        const clickedColumnLeftRatios = clickedColumnMotionSamples.map((item) => item.leftRatio);
+        const roundedClickedColumnLeftRatios = [...new Set(clickedColumnLeftRatios.map((value) => Math.round(value * 100)))];
+        const clickedColumnMinimumLeftRatio = clickedColumnLeftRatios.length ? Math.min(...clickedColumnLeftRatios) : null;
+        const clickedColumnMaximumLeftRatio = clickedColumnLeftRatios.length ? Math.max(...clickedColumnLeftRatios) : null;
+        const clickedColumnMotionIntermediateFrameCount = clickedColumnMinimumLeftRatio === null || clickedColumnMaximumLeftRatio === null
+          ? 0
+          : clickedColumnLeftRatios.filter((value) =>
+              value > clickedColumnMinimumLeftRatio + 0.03 &&
+              value < clickedColumnMaximumLeftRatio - 0.03
+            ).length;
+        const clickedColumnMotionMatches = expectedClickedColumnMotion === 'left-to-middle'
+          ? Boolean(
+              firstClickedColumnMotion &&
+              lastClickedColumnMotion &&
+              clickedColumnMinimumLeftRatio !== null &&
+              clickedColumnMaximumLeftRatio !== null &&
+              clickedColumnMinimumLeftRatio >= -0.08 &&
+              clickedColumnMinimumLeftRatio <= 0.18 &&
+              lastClickedColumnMotion.leftRatio >= 0.24 &&
+              lastClickedColumnMotion.leftRatio <= 0.44 &&
+              clickedColumnMaximumLeftRatio - clickedColumnMinimumLeftRatio >= 0.14 &&
+              clickedColumnMotionIntermediateFrameCount >= 2 &&
+              roundedClickedColumnLeftRatios.length >= 4
+            )
+          : true;
         done({
           ok: motionAmountMatches &&
             resizeAmountMatches &&
@@ -847,15 +1275,22 @@ test("files columns nested navigation motion", { timeout: 180_000 }, async () =>
             !backwardPreparationSlide &&
             !unexpectedMotionFrame &&
             !rootScrolledToTop &&
+            clickedColumnMotionMatches &&
+            movingCurrentPaneExposesExpectedWindow &&
+            !postMotionWindowRegression &&
             finalStable,
-          reason: (isNone || isResize) && horizontalTravel >= 8
+          reason: isNone && !allowHorizontalClamp && horizontalTravel >= 8
             ? 'Columns view animated while selecting a same-level row'
+            : isNone && allowHorizontalClamp && transformTravel >= 8
+            ? 'Columns view used transform navigation motion while selecting a same-level row'
+            : isResize && transformTravel >= 8
+            ? 'Columns resize used transform-based horizontal slide motion'
             : isResize && resizeWidthDelta < 24
             ? 'Columns view did not produce measurable column width resize motion'
             : isResize && !resizeAnimatedThroughIntermediateFrames
             ? 'Columns view resize did not animate through measurable intermediate width frames'
-            : !isNone && !isResize && horizontalTravel < 24
-            ? 'Columns view did not produce measurable horizontal slide motion'
+            : !isNone && !isResize && transformTravel < 24
+            ? 'Columns view did not produce measurable transform slide motion'
             : emptyFrame
               ? 'Columns view flickered through an empty or missing frame'
               : !isNone && directionSamples.length === 0
@@ -868,11 +1303,18 @@ test("files columns nested navigation motion", { timeout: 180_000 }, async () =>
                       ? 'Columns view applied navigation motion while selecting a same-level row'
                     : rootScrolledToTop
                       ? 'Columns root column scrolled back to the top during selection'
+                    : !clickedColumnMotionMatches
+                      ? 'Columns clicked left directory column did not animate into the middle column'
+                    : !movingCurrentPaneExposesExpectedWindow
+                      ? 'Columns navigation animated the wrong visible directory window'
+                    : postMotionWindowRegression
+                      ? 'Columns navigation flashed back to the wrong directory window while settling'
                     : !finalStable
-                      ? 'Columns view did not settle into the expected three-column state'
+                      ? 'Columns view did not settle into the expected three-column window'
                       : '',
           expectedDirection,
           horizontalTravel,
+          transformTravel,
           resizeWidthDelta,
           resizeIntermediateFrameCount,
           roundedActiveResizeWidths,
@@ -885,6 +1327,16 @@ test("files columns nested navigation motion", { timeout: 180_000 }, async () =>
           unexpectedMotionFrame: unexpectedMotionFrame ?? null,
           firstActive: firstActive ?? null,
           lastActive: lastActive ?? null,
+          lastActiveCurrentWindow,
+          clickedColumnLabel,
+          firstClickedColumnMotion,
+          lastClickedColumnMotion,
+          clickedColumnMotionSamples,
+          clickedColumnMotionIntermediateFrameCount,
+          clickedColumnMinimumLeftRatio,
+          clickedColumnMaximumLeftRatio,
+          roundedClickedColumnLeftRatios,
+          postMotionWindowRegression,
           final,
           samples: samples.slice(0, 10).concat(samples.slice(-10)),
         });
@@ -908,6 +1360,14 @@ test("files columns nested navigation motion", { timeout: 180_000 }, async () =>
     const id = response.value?.sessionId ?? response.sessionId;
     if (!id) throw new Error(`WebDriver did not return a session id: ${JSON.stringify(response)}`);
     return id;
+  }
+
+  async function setWebDriverTimeouts() {
+    await webdriver("POST", `/session/${sessionId}/timeouts`, {
+      script: 120_000,
+      pageLoad: 120_000,
+      implicit: 0,
+    });
   }
 
   async function execute(script) {

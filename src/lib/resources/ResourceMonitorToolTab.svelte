@@ -242,7 +242,7 @@
       return;
     }
     event.preventDefault();
-    const targetMetric = metricAtPoint(event.clientX, event.clientY);
+    const targetMetric = metricAtPoint(event.clientX, event.clientY, drag.metric);
     pointerDrag = {
       ...drag,
       hoverMetric: targetMetric && targetMetric !== drag.metric ? targetMetric : null,
@@ -264,7 +264,7 @@
       return;
     }
     event.preventDefault();
-    const targetMetric = drag.hoverMetric ?? metricAtPoint(event.clientX, event.clientY);
+    const targetMetric = drag.hoverMetric ?? metricAtPoint(event.clientX, event.clientY, drag.metric);
     suppressedMetricClick = { metric: drag.metric, until: performance.now() + 350 };
     reorderMetric(drag.metric, targetMetric);
   }
@@ -314,11 +314,23 @@
     return value === "cpu" || value === "memory" || value === "swap" || value === "gpu" || value === "disk";
   }
 
-  function metricAtPoint(clientX: number, clientY: number): ResourceMetricId | null {
-    const element = document.elementFromPoint(clientX, clientY);
-    const row = element?.closest<HTMLElement>('[data-testid="resource-monitor-row"]');
-    const metric = row?.dataset.metric ?? "";
-    return isResourceMetricId(metric) ? metric : null;
+  function metricAtPoint(clientX: number, clientY: number, ignoredMetric: ResourceMetricId | null = null): ResourceMetricId | null {
+    for (const element of document.elementsFromPoint(clientX, clientY)) {
+      const row = element.closest<HTMLElement>('[data-testid="resource-monitor-row"]');
+      const metric = row?.dataset.metric ?? "";
+      if (isResourceMetricId(metric) && metric !== ignoredMetric) return metric;
+    }
+
+    let nearest: { metric: ResourceMetricId; distance: number } | null = null;
+    for (const row of document.querySelectorAll<HTMLElement>('[data-testid="resource-monitor-row"]')) {
+      const metric = row.dataset.metric ?? "";
+      if (!isResourceMetricId(metric) || metric === ignoredMetric) continue;
+      const rect = row.getBoundingClientRect();
+      if (clientX < rect.left || clientX > rect.right) continue;
+      const distance = Math.abs(clientY - (rect.top + rect.height / 2));
+      if (!nearest || distance < nearest.distance) nearest = { metric, distance };
+    }
+    return nearest?.metric ?? null;
   }
 
   function historyPolyline(points: number[]): string {

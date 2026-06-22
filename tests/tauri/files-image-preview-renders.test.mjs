@@ -32,13 +32,18 @@ test("files image preview renders", { timeout: 180_000 }, async () => {
   const appPath = requiredEnvPath("TAURI_TEST_APPLICATION");
   const isolatedAppConfig = await createIsolatedAppConfigEnv("files-image-preview");
   const fixtureRoot = await createFilesFixture();
+  const pixelPath = join(fixtureRoot, "pixel.png");
   const fixtureHostId = "018f6eb3-6f91-7410-bc43-f927b2236d96";
   const nativeDriverPath = optionalEnvPath("TAURI_TEST_NATIVE_DRIVER");
+  const nativeDriverPort = process.env.TAURI_TEST_NATIVE_DRIVER_PORT ?? "";
   const driverPort = Number(process.env.TAURI_TEST_DRIVER_PORT ?? "4444");
   const driverUrl = `http://127.0.0.1:${driverPort}`;
   const devUrl = process.env.TAURI_TEST_DEV_URL ?? "http://localhost:1420/";
   const devPort = Number(new URL(devUrl).port);
-  const nativeDriverArgs = nativeDriverPath ? ["--native-driver", nativeDriverPath] : [];
+  const nativeDriverArgs = [
+    ...(nativeDriverPath ? ["--native-driver", nativeDriverPath] : []),
+    ...(nativeDriverPort ? ["--native-port", nativeDriverPort] : []),
+  ];
 
   process.chdir(repoRoot);
   process.env.NOCTURNE_DEV_PORT = String(devPort);
@@ -78,11 +83,16 @@ test("files image preview renders", { timeout: 180_000 }, async () => {
     sessionId = await createSession();
     await waitUntil(async () => await execute("return document.querySelector('.files-tooltab .files-toolbar') !== null;"), pageSummary);
     await waitUntil(async () => {
-      const rows = await visibleTreeRowNames();
-      return rows.includes("pixel.png");
+      const rows = await visibleTreeRows();
+      return rows.some((row) => sameTestPath(row.path, fixtureRoot));
+    }, pageSummary);
+    await ensureTreePathExpanded(fixtureRoot);
+    await waitUntil(async () => {
+      const rows = await visibleTreeRows();
+      return rows.some((row) => sameTestPath(row.path, pixelPath));
     }, pageSummary);
 
-    await clickTreeRow("pixel.png");
+    await clickTreeRow(pixelPath);
     await waitUntil(async () => {
       const preview = await imagePreviewState();
       return preview.ok;
@@ -125,23 +135,36 @@ test("files image preview renders", { timeout: 180_000 }, async () => {
     );
   }
 
-  async function visibleTreeRowNames() {
+  async function visibleTreeRows() {
     return await execute(`
-      return [...document.querySelectorAll('.files-table [data-file-entry="true"]')]
+      return [...document.querySelectorAll('.files-table [data-file-entry="true"]:not(.sticky-row)')]
         .filter((row) => row.offsetParent !== null)
-        .map((row) => row.querySelector('.name-cell')?.textContent?.trim() ?? row.textContent?.trim() ?? '');
+        .map((row) => ({
+          name: basename(row.getAttribute('data-entry-path') ?? row.querySelector('.name-cell')?.textContent?.trim() ?? row.textContent?.trim() ?? ''),
+          path: row.getAttribute('data-entry-path') ?? '',
+          kind: row.getAttribute('data-entry-kind') ?? '',
+          expanded: row.getAttribute('aria-expanded'),
+        }));
+
+      function basename(value) {
+        const normalized = value.replace(/\\\\/g, '/').replace(/\\/+$/, '');
+        return normalized.slice(normalized.lastIndexOf('/') + 1) || normalized;
+      }
     `);
   }
 
-  async function clickTreeRow(name) {
+  async function clickTreeRow(path) {
     const result = await execute(`
-      const rows = [...document.querySelectorAll('.files-table [data-file-entry="true"]')]
+      const rows = [...document.querySelectorAll('.files-table [data-file-entry="true"]:not(.sticky-row)')]
         .filter((row) => row.offsetParent !== null);
-      const row = rows.find((candidate) => candidate.querySelector('.name-cell')?.textContent?.trim() === ${JSON.stringify(name)});
+      const row = rows.find((candidate) => samePath(candidate.getAttribute('data-entry-path') ?? '', ${JSON.stringify(path)}));
       if (!row) {
         return {
           found: false,
-          rows: rows.map((candidate) => candidate.querySelector('.name-cell')?.textContent?.trim() ?? candidate.textContent?.trim() ?? ''),
+          rows: rows.map((candidate) => ({
+            name: basename(candidate.getAttribute('data-entry-path') ?? candidate.querySelector('.name-cell')?.textContent?.trim() ?? candidate.textContent?.trim() ?? ''),
+            path: candidate.getAttribute('data-entry-path') ?? '',
+          })),
         };
       }
       const rect = row.getBoundingClientRect();
@@ -154,9 +177,70 @@ test("files image preview renders", { timeout: 180_000 }, async () => {
         button: 0,
       }));
       return { found: true };
+
+      function basename(value) {
+        const normalized = value.replace(/\\\\/g, '/').replace(/\\/+$/, '');
+        return normalized.slice(normalized.lastIndexOf('/') + 1) || normalized;
+      }
+      function samePath(left, right) {
+        return normalizePath(left) === normalizePath(right);
+      }
+      function normalizePath(value) {
+        return value.replace(/\\\\/g, '/').replace(/\\/+$/, '');
+      }
     `);
     if (!result.found) {
-      throw new Error(`Tree row ${name} was not found: ${JSON.stringify(result, null, 2)}`);
+      throw new Error(`Tree row ${path} was not found: ${JSON.stringify(result, null, 2)}`);
+    }
+  }
+
+  async function ensureTreePathExpanded(path) {
+    const rows = await visibleTreeRows();
+    const row = rows.find((candidate) => sameTestPath(candidate.path, path));
+    if (!row) {
+      throw new Error(`Tree directory ${path} was not found: ${await pageSummary()}`);
+    }
+    if (row.expanded === "true") return;
+    await expandTreeDirectory(path);
+  }
+
+  async function expandTreeDirectory(path) {
+    const result = await execute(`
+      const rows = [...document.querySelectorAll('.files-table [data-file-entry="true"]:not(.sticky-row)')]
+        .filter((row) => row.offsetParent !== null);
+      const row = rows.find((candidate) =>
+        candidate.getAttribute('data-entry-kind') === 'directory' &&
+        samePath(candidate.getAttribute('data-entry-path') ?? '', ${JSON.stringify(path)})
+      );
+      if (!row) {
+        return {
+          found: false,
+          rows: rows.map((candidate) => ({
+            name: basename(candidate.getAttribute('data-entry-path') ?? candidate.querySelector('.name-cell')?.textContent?.trim() ?? candidate.textContent?.trim() ?? ''),
+            path: candidate.getAttribute('data-entry-path') ?? '',
+          })),
+        };
+      }
+      const disclosure = row.querySelector('.tree-disclosure:not(.placeholder)');
+      if (!disclosure) {
+        return { found: false, reason: 'Directory disclosure was not available', rows: rows.map((candidate) => ({ name: basename(candidate.getAttribute('data-entry-path') ?? ''), path: candidate.getAttribute('data-entry-path') ?? '' })) };
+      }
+      disclosure.click();
+      return { found: true, expanded: row.getAttribute('aria-expanded') };
+
+      function basename(value) {
+        const normalized = value.replace(/\\\\/g, '/').replace(/\\/+$/, '');
+        return normalized.slice(normalized.lastIndexOf('/') + 1) || normalized;
+      }
+      function samePath(left, right) {
+        return normalizePath(left) === normalizePath(right);
+      }
+      function normalizePath(value) {
+        return value.replace(/\\\\/g, '/').replace(/\\/+$/, '');
+      }
+    `);
+    if (!result.found) {
+      throw new Error(`Tree directory ${path} was not found: ${JSON.stringify(result, null, 2)}`);
     }
   }
 
@@ -281,6 +365,14 @@ test("files image preview renders", { timeout: 180_000 }, async () => {
       throw new Error(`${name} points to a missing file: ${path}`);
     }
     return path;
+  }
+
+  function sameTestPath(left, right) {
+    return normalizeTestPath(left) === normalizeTestPath(right);
+  }
+
+  function normalizeTestPath(value) {
+    return value.replace(/\\/g, "/").replace(/\/+$/, "");
   }
 
   async function pageSummary() {

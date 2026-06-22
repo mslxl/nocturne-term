@@ -36,11 +36,15 @@ test("files columns directory double click keeps window", { timeout: 180_000 }, 
   const fixtureRoot = await createFilesFixture();
   const fixtureHostId = "018f6eb3-6f91-7410-bc43-f927b2236d96";
   const nativeDriverPath = optionalEnvPath("TAURI_TEST_NATIVE_DRIVER");
+  const nativeDriverPort = process.env.TAURI_TEST_NATIVE_DRIVER_PORT ?? "";
   const driverPort = Number(process.env.TAURI_TEST_DRIVER_PORT ?? "4444");
   const driverUrl = `http://127.0.0.1:${driverPort}`;
   const devUrl = process.env.TAURI_TEST_DEV_URL ?? "http://localhost:1420/";
   const devPort = Number(new URL(devUrl).port);
-  const nativeDriverArgs = nativeDriverPath ? ["--native-driver", nativeDriverPath] : [];
+  const nativeDriverArgs = [
+    ...(nativeDriverPath ? ["--native-driver", nativeDriverPath] : []),
+    ...(nativeDriverPort ? ["--native-port", nativeDriverPort] : []),
+  ];
 
   process.chdir(repoRoot);
   process.env.NOCTURNE_DEV_PORT = String(devPort);
@@ -86,19 +90,20 @@ test("files columns directory double click keeps window", { timeout: 180_000 }, 
       return true;
     `);
     await waitUntil(async () => await columnsIncludeRows([["alpha"]]), pageSummary);
-    await clickColumnDirectory("alpha", 0);
+    await clickColumnDirectory("alpha");
     await waitUntil(async () => await columnsIncludeRows([["alpha"], ["beta"]]), pageSummary);
-    await clickColumnDirectory("beta", 1);
+    await clickColumnDirectory("beta");
     await waitUntil(async () => await columnsIncludeRows([["alpha"], ["beta"], ["gamma"]]), pageSummary);
 
     const before = await measureColumnsView();
-    await doubleClickColumnDirectory("gamma", 2);
+    await doubleClickColumnDirectory("gamma");
     await delay(300);
     const after = await measureColumnsView();
-    const ok = after.columnCount === 3 &&
-      after.columns[0]?.rowNames.includes("alpha") &&
-      after.columns[1]?.rowNames.includes("beta") &&
-      after.columns[2]?.rowNames.includes("gamma") &&
+    const visibleColumns = columnsForExpectation(after, 3);
+    const ok = visibleColumns.length === 3 &&
+      visibleColumns[0]?.rowNames.includes("alpha") &&
+      visibleColumns[1]?.rowNames.includes("beta") &&
+      visibleColumns[2]?.rowNames.includes("gamma") &&
       !after.columns.some((column) => column.rowNames.includes("leaf.txt"));
 
     if (!ok) {
@@ -110,9 +115,9 @@ test("files columns directory double click keeps window", { timeout: 180_000 }, 
       `tauri files Columns directory double-click keeps window test passed\n${JSON.stringify(
         {
           columnCount: after.columnCount,
-          firstColumnText: after.columns[0]?.firstRowText ?? "",
-          secondColumnText: after.columns[1]?.firstRowText ?? "",
-          thirdColumnText: after.columns[2]?.firstRowText ?? "",
+          firstColumnText: visibleColumns[0]?.firstRowText ?? "",
+          secondColumnText: visibleColumns[1]?.firstRowText ?? "",
+          thirdColumnText: visibleColumns[2]?.firstRowText ?? "",
         },
         null,
         2,
@@ -156,18 +161,30 @@ test("files columns directory double click keeps window", { timeout: 180_000 }, 
 
   async function columnsIncludeRows(expectedRowsByColumn) {
     const measurement = await measureColumnsView();
-    return expectedRowsByColumn.every((expectedRows, index) => expectedRows.every((row) => measurement.columns[index]?.rowNames.includes(row)));
+    const columns = columnsForExpectation(measurement, expectedRowsByColumn.length);
+    return expectedRowsByColumn.every((expectedRows, index) => expectedRows.every((row) => columns[index]?.rowNames.includes(row)));
+  }
+
+  function columnsForExpectation(measurement, count) {
+    const visibleColumns = measurement.columns.filter((column) => column.visibleWidth >= 40);
+    return visibleColumns.length >= count ? visibleColumns.slice(-count) : measurement.columns.slice(-count);
   }
 
   async function measureColumnsView() {
     return await execute(`
       const columnsView = document.querySelector('.columns-view');
       const currentPane = columnsView?.querySelector('.columns-pane.current') ?? columnsView;
+      const viewRect = columnsView?.getBoundingClientRect();
       const columns = [...(currentPane?.querySelectorAll('.file-column') ?? [])].map((column) => {
+        const rect = column.getBoundingClientRect();
         const rows = [...column.querySelectorAll('.column-row')].filter((row) => row.offsetParent !== null);
         const rowNames = rows.map((row) => row.querySelector('.name-cell')?.textContent?.trim() ?? row.textContent?.trim() ?? '');
+        const visibleWidth = viewRect
+          ? Math.max(0, Math.min(rect.right, viewRect.right) - Math.max(rect.left, viewRect.left))
+          : 0;
         return {
           label: column.getAttribute('aria-label'),
+          visibleWidth,
           rowCount: rows.length,
           rowNames,
           firstRowText: rows[0]?.textContent?.trim() ?? '',
@@ -177,34 +194,33 @@ test("files columns directory double click keeps window", { timeout: 180_000 }, 
     `);
   }
 
-  async function clickColumnDirectory(name, columnIndex) {
-    const clicked = await execute(columnDirectoryScript(name, columnIndex, "click"));
+  async function clickColumnDirectory(name) {
+    const clicked = await execute(columnDirectoryScript(name, "click"));
     if (!clicked.clicked) {
-      throw new Error(`Columns view column ${columnIndex} did not contain directory ${name}: ${JSON.stringify(clicked, null, 2)}`);
+      throw new Error(`Columns view did not contain directory ${name}: ${JSON.stringify(clicked, null, 2)}`);
     }
   }
 
-  async function doubleClickColumnDirectory(name, columnIndex) {
-    const clicked = await execute(columnDirectoryScript(name, columnIndex, "doubleClick"));
+  async function doubleClickColumnDirectory(name) {
+    const clicked = await execute(columnDirectoryScript(name, "doubleClick"));
     if (!clicked.clicked) {
-      throw new Error(`Columns view column ${columnIndex} did not contain directory ${name}: ${JSON.stringify(clicked, null, 2)}`);
+      throw new Error(`Columns view did not contain directory ${name}: ${JSON.stringify(clicked, null, 2)}`);
     }
   }
 
-  function columnDirectoryScript(name, columnIndex, operation) {
+  function columnDirectoryScript(name, operation) {
     return `
       const currentPane = document.querySelector('.columns-view .columns-pane.current') ?? document.querySelector('.columns-view');
-      const column = currentPane?.querySelectorAll('.file-column')[${columnIndex}];
-      const rows = [...(column?.querySelectorAll('.column-row') ?? [])]
-        .filter((row) => row.offsetParent !== null);
-      const directory = rows.find((row) =>
+      const columns = [...(currentPane?.querySelectorAll('.file-column') ?? [])];
+      const rowsByColumn = columns.map((column) => [...column.querySelectorAll('.column-row')].filter((row) => row.offsetParent !== null));
+      const directory = rowsByColumn.flat().find((row) =>
         row.getAttribute('data-entry-kind') === 'directory' &&
         row.querySelector('.name-cell')?.textContent?.trim() === ${JSON.stringify(name)}
       );
       if (!directory) {
         return {
           clicked: false,
-          rows: rows.map((row) => row.querySelector('.name-cell')?.textContent?.trim() ?? row.textContent?.trim() ?? ''),
+          columns: rowsByColumn.map((rows) => rows.map((row) => row.querySelector('.name-cell')?.textContent?.trim() ?? row.textContent?.trim() ?? '')),
         };
       }
       if (${JSON.stringify(operation)} === 'doubleClick') {

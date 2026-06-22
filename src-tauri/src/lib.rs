@@ -138,6 +138,7 @@ pub fn run() {
         .typ::<types::PaneMenuEvent>()
         .typ::<types::WorkspaceChangedEvent>()
         .typ::<types::WorkspaceSshVerificationRequiredEvent>()
+        .typ::<types::TransferQueueChangedEvent>()
         .typ::<types::WorkspaceDockGroupRole>()
         .typ::<types::WorkspaceDockLayout>();
 

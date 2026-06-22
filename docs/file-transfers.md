@@ -128,6 +128,14 @@ This lets Transfers filter and close confirmations remain understandable.
 
 Native file panels are used for upload/download path selection.
 
-Drag-and-drop should use Tauri/native file APIs where possible. The first implementation handles drag-in uploads through Tauri webview drag/drop events and creates Transfer Service tasks from dropped local paths. Upload Folder uses the native open panel with recursive directory access and enqueues a recursive directory transfer. If native drag-out downloads cannot be implemented reliably, fall back to a Web API path only after documenting the trade-off.
+Files exposes a single Upload action. The Files ToolTab resolves the target
+directory first, using the current Tree/Columns focus, selected directory, file
+parent, common multi-selection parent, explicit drop target, or a Finder-style
+target selection sheet when no target is clear. After that resolution, the
+Transfer Service receives ordinary upload tasks for the selected local files or
+directories. Directory uploads recurse through the same transfer pipeline as any
+other recursive directory transfer.
+
+Drag-and-drop should use Tauri/native file APIs where possible. The first implementation handles drag-in uploads through Tauri WebView drag/drop events and creates Transfer Service tasks from dropped local paths. Tauri external file drop handling must stay separate from HTML pointer/marquee/internal-drag handling so file uploads do not break multi-selection or future internal file moves. If native drag-out downloads cannot be implemented reliably, fall back to a Web API path only after documenting the trade-off.
 
 OS notifications may be used for transfer completion or failure when the app/window is not frontmost. In-window web-style toasts should not be the primary transfer notification surface.

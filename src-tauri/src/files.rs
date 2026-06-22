@@ -494,15 +494,13 @@ fn search_files_blocking(app: AppHandle, input: FileSearchInput) -> Result<FileS
 }
 
 fn list_local_files(host: &ConnectionHostEntry, path: Option<String>) -> Result<FileListResult> {
-    let root_path = local_default_path(host)?;
+    let root_path = local_filesystem_root_path();
+    let default_path = local_default_path(host)?;
     let current_path = path
         .filter(|value| !value.trim().is_empty())
         .map(expand_local_home)
-        .unwrap_or_else(|| root_path.clone());
-    let entries = fs::read_dir(&current_path)
-        .map_err(io_error)?
-        .map(|entry| local_file_entry(entry.map_err(io_error)?))
-        .collect::<Result<Vec<_>>>()?;
+        .unwrap_or(default_path);
+    let (current_path, entries) = list_local_entries(&current_path)?;
     Ok(FileListResult {
         provider: FileProviderInfo {
             kind: FileProviderKind::Local,
@@ -513,6 +511,20 @@ fn list_local_files(host: &ConnectionHostEntry, path: Option<String>) -> Result<
         },
         entries: sort_entries(entries),
     })
+}
+
+fn list_local_entries(path: &str) -> Result<(String, Vec<FileEntry>)> {
+    #[cfg(windows)]
+    {
+        if is_windows_virtual_root(path) {
+            return Ok(("/".to_string(), sort_entries(windows_drive_entries()?)));
+        }
+    }
+    let entries = fs::read_dir(path)
+        .map_err(io_error)?
+        .map(|entry| local_file_entry(entry.map_err(io_error)?))
+        .collect::<Result<Vec<_>>>()?;
+    Ok((normalize_local_display_path(path), sort_entries(entries)))
 }
 
 fn list_sftp_files(
@@ -542,7 +554,9 @@ fn list_sftp_files(
             .as_ref()
             .and_then(|files| files.default_path.clone()),
     )?;
-    let current_path = sftp_current_path(input.path, &root_path);
+    let default_path = root_path;
+    let root_path = "/".to_string();
+    let current_path = sftp_current_path(input.path, &default_path);
     let entries = sftp
         .readdir(Path::new(&current_path))
         .map_err(terminal_error)?
@@ -2718,7 +2732,7 @@ fn local_file_entry(entry: fs::DirEntry) -> Result<FileEntry> {
     let file_type = metadata.file_type();
     Ok(FileEntry {
         name: entry.file_name().to_string_lossy().into_owned(),
-        path: path.to_string_lossy().into_owned(),
+        path: normalize_local_display_path(&path.to_string_lossy()),
         kind: local_entry_kind(&file_type),
         size: Some(metadata.len().to_string()),
         modified_unix_ms: metadata
@@ -2794,6 +2808,74 @@ fn local_default_path(host: &ConnectionHostEntry) -> Result<String> {
                 .to_string_lossy()
                 .into_owned()
         }))
+}
+
+fn local_filesystem_root_path() -> String {
+    #[cfg(windows)]
+    {
+        "/".to_string()
+    }
+    #[cfg(not(windows))]
+    {
+        "/".to_string()
+    }
+}
+
+fn normalize_local_display_path(value: &str) -> String {
+    #[cfg(windows)]
+    {
+        let with_forward_slashes = value.replace('\\', "/");
+        if with_forward_slashes == "/" {
+            return "/".to_string();
+        }
+        if with_forward_slashes.len() == 2
+            && with_forward_slashes.as_bytes()[1] == b':'
+            && with_forward_slashes.as_bytes()[0].is_ascii_alphabetic()
+        {
+            return format!("{with_forward_slashes}/");
+        }
+        return with_forward_slashes;
+    }
+    #[cfg(not(windows))]
+    {
+        value.to_string()
+    }
+}
+
+#[cfg(windows)]
+fn is_windows_virtual_root(path: &str) -> bool {
+    let trimmed = path.trim();
+    trimmed == "/" || trimmed == "\\"
+}
+
+#[cfg(windows)]
+fn windows_drive_entries() -> Result<Vec<FileEntry>> {
+    use windows_sys::Win32::Storage::FileSystem::GetLogicalDrives;
+
+    let mask = unsafe { GetLogicalDrives() };
+    if mask == 0 {
+        return Err(io_error(std::io::Error::last_os_error()));
+    }
+    let mut entries = Vec::new();
+    for index in 0..26 {
+        if mask & (1 << index) == 0 {
+            continue;
+        }
+        let letter = char::from(b'A' + index as u8);
+        let name = format!("{letter}:");
+        entries.push(FileEntry {
+            name: name.clone(),
+            path: format!("{name}/"),
+            kind: FileEntryKind::Directory,
+            size: None,
+            modified_unix_ms: None,
+            permissions: None,
+            owner: None,
+            group: None,
+            symlink_target: None,
+        });
+    }
+    Ok(entries)
 }
 
 fn sftp_default_path(
@@ -2970,6 +3052,84 @@ mod libc_mode {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn local_file_provider_uses_filesystem_root_with_default_path_as_current_path() {
+        let root = tempdir().expect("tempdir");
+        let host = ConnectionHostEntry {
+            id: "local-fixture".to_string(),
+            path: None,
+            source: ConnectionHostSource::User,
+            read_only: false,
+            document: crate::types::ConnectionHostDocument {
+                version: 1,
+                id: "local-fixture".to_string(),
+                name: "Local Fixture".to_string(),
+                protocol: ConnectionProtocol::Local,
+                files: Some(crate::types::HostFilesConfig {
+                    default_path: Some(root.path().to_string_lossy().into_owned()),
+                }),
+                local: Some(crate::types::LocalConnectionConfig::default()),
+                ..Default::default()
+            },
+            diagnostics: Vec::new(),
+        };
+
+        let result = list_local_files(&host, None).expect("list local files");
+
+        assert_eq!(
+            result.provider.current_path,
+            normalize_local_display_path(&root.path().to_string_lossy())
+        );
+        assert_ne!(result.provider.root_path, result.provider.current_path);
+        #[cfg(windows)]
+        assert_eq!(result.provider.root_path, "/");
+        #[cfg(not(windows))]
+        assert_eq!(result.provider.root_path, "/");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_local_file_provider_uses_virtual_root_with_drive_entries() {
+        let root = tempdir().expect("tempdir");
+        let host = ConnectionHostEntry {
+            id: "local-windows-root-fixture".to_string(),
+            path: None,
+            source: ConnectionHostSource::User,
+            read_only: false,
+            document: crate::types::ConnectionHostDocument {
+                version: 1,
+                id: "local-windows-root-fixture".to_string(),
+                name: "Local Windows Root Fixture".to_string(),
+                protocol: ConnectionProtocol::Local,
+                files: Some(crate::types::HostFilesConfig {
+                    default_path: Some(root.path().to_string_lossy().into_owned()),
+                }),
+                local: Some(crate::types::LocalConnectionConfig::default()),
+                ..Default::default()
+            },
+            diagnostics: Vec::new(),
+        };
+
+        let root_result = list_local_files(&host, Some("/".to_string())).expect("list virtual root");
+        let current_drive = root
+            .path()
+            .components()
+            .next()
+            .map(|component| component.as_os_str().to_string_lossy().into_owned())
+            .expect("tempdir has a drive prefix");
+
+        assert_eq!(root_result.provider.root_path, "/");
+        assert_eq!(root_result.provider.current_path, "/");
+        assert!(
+            root_result
+                .entries
+                .iter()
+                .any(|entry| entry.name == current_drive && entry.path == format!("{current_drive}/")),
+            "virtual root should include the current drive; entries: {:?}",
+            root_result.entries
+        );
+    }
 
     #[test]
     fn local_search_filters_hidden_files_and_matches_case_insensitively() {

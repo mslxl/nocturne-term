@@ -20,12 +20,15 @@
  * With the default setting, app menu roots render on the first titlebar row,
  * Workspace tabs and the New Workspace split button render on the second row,
  * decorum controls remain mounted on the first row at the far right, and the
- * Workspace content starts below the complete two-row titlebar. With the
- * single-row setting enabled, app menu roots, Workspace tabs, Workspace
- * actions, drag region, and decorum controls share one row without overlap.
- * In both layouts, the New Workspace split button has a stable gap from the
- * Workspace tab strip, is visually quiet while not hovered, and matches
- * inactive Workspace tab button background color.
+ * Workspace content starts below the complete two-row titlebar. The decorum
+ * control buttons are mounted inside the Workspace titlebar slot and each
+ * button has a visible, clickable rectangle with a CSS-drawn control glyph
+ * that does not depend on private icon-font characters. With the single-row
+ * setting enabled, app menu roots, Workspace tabs, Workspace actions, drag
+ * region, and decorum controls share one row without overlap. In both layouts,
+ * the New Workspace split button has a stable gap from the Workspace tab strip,
+ * is visually quiet while not hovered, and matches inactive Workspace tab
+ * button background color.
  */
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
@@ -41,6 +44,7 @@ test("integrated titlebar decorum layout", { timeout: 180_000 }, async () => {
   const appPath = requiredEnvPath("TAURI_TEST_APPLICATION");
   const nativeDriverPath = optionalEnvPath("TAURI_TEST_NATIVE_DRIVER");
   const baseDriverPort = Number(process.env.TAURI_TEST_DRIVER_PORT ?? "4444");
+  const baseNativeDriverPort = Number(process.env.TAURI_TEST_NATIVE_DRIVER_PORT ?? "9515");
   const devUrl = process.env.TAURI_TEST_DEV_URL ?? "http://localhost:1420/";
   const devPort = Number(new URL(devUrl).port);
   const nativeDriverArgs = nativeDriverPath ? ["--native-driver", nativeDriverPath] : [];
@@ -65,14 +69,14 @@ test("integrated titlebar decorum layout", { timeout: 180_000 }, async () => {
     await runScenario({
       name: "default-two-row",
       driverPort: baseDriverPort,
-      nativeDriverPort: baseDriverPort + 100,
+      nativeDriverPort: baseNativeDriverPort,
       configText: "",
       expectedLayout: "two-row",
     });
     await runScenario({
       name: "enabled-single-row",
       driverPort: baseDriverPort + 1,
-      nativeDriverPort: baseDriverPort + 101,
+      nativeDriverPort: baseNativeDriverPort + 1,
       configText: "[ui]\nintegrated_titlebar = true\nintegrated_titlebar_single_row = true\n",
       expectedLayout: "single-row",
     });
@@ -144,6 +148,12 @@ test("integrated titlebar decorum layout", { timeout: 180_000 }, async () => {
     }
     if (!state.decorumHostHiddenStyleCleared) {
       throw new Error(`${name}: decorum host stayed hidden after mounting\n${JSON.stringify(state, null, 2)}`);
+    }
+    if (!state.decorumButtonsVisible) {
+      throw new Error(`${name}: decorum control buttons were not visibly mounted and clickable\n${JSON.stringify(state, null, 2)}`);
+    }
+    if (!state.decorumButtonsHaveCssGlyphs) {
+      throw new Error(`${name}: decorum control buttons did not expose CSS-drawn visible glyphs\n${JSON.stringify(state, null, 2)}`);
     }
     if (state.appMenuRootIds.join(",") !== "file,edit,view,window") {
       throw new Error(`${name}: app menu roots were not rendered in File/Edit/View/Window order\n${JSON.stringify(state, null, 2)}`);
@@ -274,6 +284,64 @@ test("integrated titlebar decorum layout", { timeout: 180_000 }, async () => {
       const hostPickerIconRect = rectOf(hostPickerIcon);
       const decorumRect = rectOf(decorumHost);
       const buttonRects = decorumButtons.map(rectOf).filter(Boolean);
+      const buttonStates = decorumButtons.map((button) => {
+        const style = getComputedStyle(button);
+        const beforeStyle = getComputedStyle(button, '::before');
+        const afterStyle = getComputedStyle(button, '::after');
+        const rect = rectOf(button);
+        const centerElement = rect
+          ? document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2)
+          : null;
+        const cssGlyphVisible = (pseudo) =>
+          pseudo.content !== 'none' &&
+          pseudo.display !== 'none' &&
+          pseudo.visibility !== 'hidden' &&
+          (
+            Number.parseFloat(pseudo.width) >= 1 ||
+            Number.parseFloat(pseudo.height) >= 1 ||
+            pseudo.borderTopWidth !== '0px' ||
+            pseudo.backgroundColor !== 'rgba(0, 0, 0, 0)'
+          );
+        return {
+          text: button.textContent,
+          id: button.id,
+          windowControl: button.getAttribute('data-window-control') ?? '',
+          ariaLabel: button.getAttribute('aria-label') ?? '',
+          className: button.className,
+          display: style.display,
+          visibility: style.visibility,
+          opacity: Number(style.opacity),
+          pointerEvents: style.pointerEvents,
+          color: style.color,
+          backgroundColor: style.backgroundColor,
+          fontSize: style.fontSize,
+          before: {
+            content: beforeStyle.content,
+            display: beforeStyle.display,
+            visibility: beforeStyle.visibility,
+            color: beforeStyle.color,
+            backgroundColor: beforeStyle.backgroundColor,
+            width: beforeStyle.width,
+            height: beforeStyle.height,
+            borderTopWidth: beforeStyle.borderTopWidth,
+            borderRightWidth: beforeStyle.borderRightWidth,
+            borderBottomWidth: beforeStyle.borderBottomWidth,
+            borderLeftWidth: beforeStyle.borderLeftWidth,
+          },
+          after: {
+            content: afterStyle.content,
+            display: afterStyle.display,
+            visibility: afterStyle.visibility,
+            color: afterStyle.color,
+            backgroundColor: afterStyle.backgroundColor,
+            width: afterStyle.width,
+            height: afterStyle.height,
+          },
+          cssGlyphVisible: cssGlyphVisible(beforeStyle) || cssGlyphVisible(afterStyle),
+          rect,
+          receivesPointerAtCenter: centerElement === button || button.contains(centerElement),
+        };
+      });
       return {
         bodyText: document.body?.innerText?.slice(0, 1000) ?? '',
         tabbarClassName: tabbar?.className ?? '',
@@ -324,6 +392,26 @@ test("integrated titlebar decorum layout", { timeout: 180_000 }, async () => {
         decorumButtonCount: decorumButtons.length,
         decorumHostMountedInSlot: decorumHost?.parentElement === decorumSlot,
         decorumHostHiddenStyleCleared: decorumHost ? getComputedStyle(decorumHost).display !== 'none' : false,
+        decorumButtonsVisible: buttonStates.length >= 3 && buttonStates.every((button) =>
+          button.display !== 'none' &&
+          button.visibility !== 'hidden' &&
+          button.opacity > 0.95 &&
+          button.pointerEvents !== 'none' &&
+          button.rect &&
+          button.rect.width >= 36 &&
+          button.rect.height >= 24 &&
+          button.receivesPointerAtCenter
+        ),
+        decorumButtonsHaveCssGlyphs: buttonStates.length >= 3 &&
+          ['minimize', 'maximize', 'close'].every((control) =>
+            buttonStates.some((button) =>
+              button.windowControl === control &&
+              button.ariaLabel.toLowerCase().includes(control === 'close' ? 'close' : control) &&
+              button.color === 'rgba(0, 0, 0, 0)' &&
+              button.fontSize === '0px' &&
+              button.cssGlyphVisible
+            )
+          ),
         actionGapFromWorkspaceTab: workspaceTabRect && splitButtonRect ? splitButtonRect.left - workspaceTabRect.right : -1,
         splitButtonWrapsSegments: Boolean(
           splitButtonRect &&
@@ -369,6 +457,7 @@ test("integrated titlebar decorum layout", { timeout: 180_000 }, async () => {
           decorum: decorumRect,
           buttons: buttonRects,
         },
+        buttonStates,
       };
     `);
   }

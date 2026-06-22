@@ -19,6 +19,7 @@
     type WorkspaceSshVerificationRequiredEvent,
     type WorkspaceDockLayout,
     type WorkspaceFloatingWindowState,
+    type WorkspaceDispatchInput,
     type WorkspaceLayoutSnapshot,
     type WorkspaceTabState,
     type WorkspaceToolSlot,
@@ -33,6 +34,7 @@
   import { buildHostFolderTree, hostFolderLabel, hostHasBlockingDiagnostics, hostSubtitle, type HostFolderTreeNode } from "$lib/hosts/model";
   import { hasTauriRuntime } from "$lib/tauri/runtime";
   import { dockSplitGridTemplate, resizeWorkspaceDockSplit } from "$lib/workspace/dock/resize";
+  import WorkspaceDockGroup from "$lib/workspace/components/WorkspaceDockGroup.svelte";
   import WorkspaceTabBar from "$lib/workspace/components/WorkspaceTabBar.svelte";
   import { mountDecorumTitlebarHost } from "$lib/window/decorum-titlebar";
   import { createWorkspaceStore } from "$lib/workspace/state.svelte";
@@ -42,6 +44,7 @@
   import ResourceMonitorToolTab from "$lib/resources/ResourceMonitorToolTab.svelte";
   import { DEFAULT_FILES_TOOLBAR_ACTION_IDS, normalizeFilesToolbarActionIds, type FilesToolbarActionId } from "$lib/files/toolbar-actions";
   import TransfersToolTab from "$lib/transfers/TransfersToolTab.svelte";
+  import { startTransferQueueObserver } from "$lib/transfers/queue.svelte";
   import { routeTerminalPaneEvent, shouldHandleTerminalPaneEvent } from "$lib/terminal/event-routing";
   import { isTerminalSessionInactiveMessage } from "$lib/terminal/errors";
   import {
@@ -324,6 +327,8 @@
   let textPreviewLimitBytes = $state(1_048_576);
   let imagePreviewLimitBytes = $state(10_485_760);
   let filesToolbarActionIds = $state<FilesToolbarActionId[]>([...DEFAULT_FILES_TOOLBAR_ACTION_IDS]);
+  let filesTreeStickyEnabled = $state(true);
+  let filesTreeStickyMaxLevels = $state(3);
   let pendingSshCredential = $state<PendingSshCredential | null>(null);
   let hostSessionRetryByPaneId = $state<Record<string, HostSessionRetry>>({});
   let commandPaletteLastFocus: HTMLElement | null = null;
@@ -359,6 +364,8 @@
   let dragState = $state<{ kind: "pane" | "tab"; id: string } | null>(null);
   let toolTabDragState = $state<{ workspaceId: string; slotId: string; toolTabId: string | null; active: boolean } | null>(null);
   let toolTabDropTarget = $state<ToolTabDropTarget | null>(null);
+  let activeToolSlotOverrideByGroupId = $state<Record<string, string>>({});
+  let activeToolSlotOverrideRevision = $state(0);
   let dropTarget = $state<{ paneId: string; zone: PaneDropZone } | null>(null);
   let pointerDrag = $state<{
     kind: "pane" | "tab";
@@ -383,9 +390,11 @@
   const workspaceStore = createWorkspaceStore();
 
   let activeTab = $derived(tabs.find((tab) => tab.id === activeId));
-  let workspaceSnapshot = $derived(workspaceStore.snapshot);
+  let workspaceViewSnapshot = $state<WorkspaceLayoutSnapshot | null>(null);
+  let workspaceSnapshot = $derived(workspaceViewSnapshot);
+  let workspaceRenderRevision = $state(0);
   let activeWorkspace = $derived.by(() => {
-    const snapshot = workspaceStore.snapshot;
+    const snapshot = workspaceSnapshot;
     return snapshot?.workspaces.find((workspace) => workspace.id === snapshot.active_workspace_id) ?? null;
   });
   let floatingWindowId = $state<string | null>(null);
@@ -434,6 +443,32 @@
     },
   });
 
+  function syncWorkspaceSnapshot(next: WorkspaceLayoutSnapshot | null) {
+    workspaceViewSnapshot = next;
+    workspaceRenderRevision += 1;
+    if (typeof window !== "undefined") {
+      Object.assign(window, {
+        __NOCTURNE_WORKSPACE_DEBUG__: {
+          snapshot: next,
+          workspaceRenderRevision,
+          activeToolSlotOverrideByGroupId,
+          activeToolSlotOverrideRevision,
+        },
+      });
+    }
+  }
+
+  async function dispatchWorkspaceIntent(intent: WorkspaceDispatchInput["intent"]) {
+    const next = await workspaceStore.dispatch(intent);
+    syncWorkspaceSnapshot(next);
+    return next;
+  }
+
+  function replaceWorkspaceSnapshot(next: WorkspaceLayoutSnapshot) {
+    workspaceStore.replaceSnapshot(next);
+    syncWorkspaceSnapshot(next);
+  }
+
   function terminalRuntimeTabs() {
     return Array.from(terminalRuntimeByToolTabId.values()).map((runtime) => runtime.tab);
   }
@@ -473,6 +508,8 @@
       textPreviewLimitBytes = 1_048_576;
       imagePreviewLimitBytes = 10_485_760;
       filesToolbarActionIds = [...DEFAULT_FILES_TOOLBAR_ACTION_IDS];
+      filesTreeStickyEnabled = true;
+      filesTreeStickyMaxLevels = 3;
       settings = demoTerminalSettings();
       tabBarOrientation = settings.tab_bar_orientation;
       syncSettingsVariables(settings);
@@ -495,6 +532,8 @@
     textPreviewLimitBytes = integerValue(readValue(snapshot.effective_config.root, ["files", "text_preview_limit_bytes"])) ?? 1_048_576;
     imagePreviewLimitBytes = integerValue(readValue(snapshot.effective_config.root, ["files", "image_preview_limit_bytes"])) ?? 10_485_760;
     filesToolbarActionIds = normalizeFilesToolbarActionIds(stringArrayValue(readValue(snapshot.effective_config.root, ["files", "toolbar_actions"])));
+    filesTreeStickyEnabled = booleanValue(readValue(snapshot.effective_config.root, ["files", "tree_sticky_enabled"])) ?? true;
+    filesTreeStickyMaxLevels = integerValue(readValue(snapshot.effective_config.root, ["files", "tree_sticky_max_levels"])) ?? 3;
     const next = await unwrapCommand(commands.getTerminalSettingsForTheme({ resolved_theme: appTheme }));
     settings = next;
     tabBarOrientation = next.tab_bar_orientation;
@@ -570,7 +609,18 @@
   }
 
   function activeGroupSlot(layout: Extract<WorkspaceDockLayout, { kind: "group" }>): WorkspaceToolSlot | null {
-    return layout.slots.find((slot) => slot.id === layout.active_slot_id) ?? layout.slots[0] ?? null;
+    const activeSlotId = activeGroupSlotId(layout);
+    return layout.slots.find((slot) => slot.id === activeSlotId) ?? layout.slots[0] ?? null;
+  }
+
+  function activeGroupSlotId(layout: Extract<WorkspaceDockLayout, { kind: "group" }>): string {
+    activeToolSlotOverrideRevision;
+    const override = activeToolSlotOverrideByGroupId[layout.id];
+    return override && layout.slots.some((slot) => slot.id === override) ? override : layout.active_slot_id;
+  }
+
+  function isGroupSlotActive(layout: Extract<WorkspaceDockLayout, { kind: "group" }>, slotId: string): boolean {
+    return slotId === activeGroupSlotId(layout);
   }
 
   function workspaceSlotToolTabId(slot: WorkspaceToolSlot): string | null {
@@ -604,6 +654,22 @@
       return layout.slots.some((slot) => slot.id === slotId) ? layout.id : null;
     }
     return layout.children.map((child) => groupIdForSlot(child, slotId)).find((id): id is string => id !== null) ?? null;
+  }
+
+  function activateWorkspaceLayoutSlot(layout: WorkspaceDockLayout, slotId: string): WorkspaceDockLayout {
+    if (layout.kind === "group") {
+      return layout.slots.some((slot) => slot.id === slotId) ? { ...layout, active_slot_id: slotId } : layout;
+    }
+    return { ...layout, children: layout.children.map((child) => activateWorkspaceLayoutSlot(child, slotId)) };
+  }
+
+  function replaceWorkspaceLayoutSnapshot(workspaceId: string, layout: WorkspaceDockLayout) {
+    const current = workspaceSnapshot;
+    if (!current) return;
+    replaceWorkspaceSnapshot({
+      ...current,
+      workspaces: current.workspaces.map((item) => (item.id === workspaceId ? { ...item, layout } : item)),
+    });
   }
 
   function terminalToolTabForSlot(slot: WorkspaceToolSlot | null): WorkspaceToolTab | null {
@@ -681,6 +747,10 @@
     return title.length > 0 ? title : null;
   }
 
+  function terminalSessionIdForToolTab(tool: WorkspaceToolTab | null): string | undefined {
+    return tool?.kind === "terminal" ? terminalRuntimeForToolTab(tool.id)?.tab.activePaneId : undefined;
+  }
+
   function ownerWorkspaceTitle(slot: WorkspaceToolSlot) {
     if (slot.kind === "closed_source") return slot.owner_workspace_title;
     if (slot.kind !== "mirror") return "";
@@ -691,10 +761,40 @@
     return dockSplitGridTemplate(layout.direction, layout.children.length, layout.ratios);
   }
 
+  function dockLayoutRenderKey(layout: WorkspaceDockLayout): string {
+    if (layout.kind === "group") return `${layout.id}:${layout.active_slot_id}:${layout.slots.map((slot) => slot.id).join("|")}`;
+    return `${layout.kind}:${layout.direction}:${layout.children.map(dockLayoutRenderKey).join("/")}`;
+  }
+
+  function dockLayoutActiveSlotRenderKey(layout: WorkspaceDockLayout, activeSlotOverrides: Record<string, string>): string {
+    if (layout.kind === "group") {
+      const override = activeSlotOverrides[layout.id];
+      const activeSlotId = override && layout.slots.some((slot) => slot.id === override) ? override : layout.active_slot_id;
+      return `${layout.id}:${activeSlotId}`;
+    }
+    return layout.children.map((child) => dockLayoutActiveSlotRenderKey(child, activeSlotOverrides)).join("/");
+  }
+
   async function activateWorkspaceSlot(workspace: WorkspaceTabState, slotId: string) {
     const slot = findWorkspaceSlot(workspace.layout, slotId);
     const groupId = groupIdForSlot(workspace.layout, slotId);
+    const previousLayout = workspace.layout;
     if (slot && groupId) {
+      const revisionBefore = activeToolSlotOverrideRevision;
+      activeToolSlotOverrideByGroupId = { ...activeToolSlotOverrideByGroupId, [groupId]: slotId };
+      activeToolSlotOverrideRevision += 1;
+      if (typeof window !== "undefined") {
+        Object.assign(window, {
+          __NOCTURNE_LAST_TOOL_ACTIVATION__: {
+            slotId,
+            groupId,
+            revisionBefore,
+            revisionAfter: activeToolSlotOverrideRevision,
+            override: activeToolSlotOverrideByGroupId[groupId],
+          },
+        });
+      }
+      replaceWorkspaceLayoutSnapshot(workspace.id, activateWorkspaceLayoutSlot(workspace.layout, slotId));
       const tool = terminalToolTabForSlot(slot);
       const group = findWorkspaceGroup(workspace.layout, groupId);
       if (group && dockGroupRole(group) === "content") {
@@ -702,11 +802,27 @@
       }
       if (tool) activeTerminalToolTabId = tool.id;
     }
-    await workspaceStore.dispatch({
-      kind: "activate_tool_slot",
-      workspace_id: workspace.id,
-      slot_id: slotId,
-    });
+    try {
+      const next = await dispatchWorkspaceIntent({
+        kind: "activate_tool_slot",
+        workspace_id: workspace.id,
+        slot_id: slotId,
+      });
+      replaceWorkspaceSnapshot(next);
+    } catch (error) {
+      if (groupId) {
+        const previousGroup = findWorkspaceGroup(previousLayout, groupId);
+        if (previousGroup) {
+          activeToolSlotOverrideByGroupId = {
+            ...activeToolSlotOverrideByGroupId,
+            [groupId]: previousGroup.active_slot_id,
+          };
+          activeToolSlotOverrideRevision += 1;
+        }
+      }
+      replaceWorkspaceLayoutSnapshot(workspace.id, previousLayout);
+      settingsError = error instanceof Error ? error.message : String(error);
+    }
   }
 
   async function closeWorkspaceSlot(workspaceId: string, slotId: string) {
@@ -717,7 +833,7 @@
       const confirmed = await confirmTerminalToolRuntimeClose(tool.id);
       if (!confirmed) return;
     }
-    const next = await workspaceStore.dispatch({ kind: "close_tool_slot", workspace_id: workspaceId, slot_id: slotId });
+    const next = await dispatchWorkspaceIntent({ kind: "close_tool_slot", workspace_id: workspaceId, slot_id: slotId });
     if (slot?.kind === "owned" && tool) {
       await disposeTerminalToolRuntime(tool.id);
       await mountActiveTerminalForWorkspace(workspaceId, next);
@@ -759,7 +875,7 @@
       const confirmed = await confirmTerminalToolRuntimeClose(toolTabId);
       if (!confirmed) return;
     }
-    const next = await workspaceStore.dispatch({ kind: "close_other_tool_slots", workspace_id: workspaceId, slot_id: slotId });
+    const next = await dispatchWorkspaceIntent({ kind: "close_other_tool_slots", workspace_id: workspaceId, slot_id: slotId });
     for (const toolTabId of toolIds) await disposeTerminalToolRuntime(toolTabId);
     await mountActiveTerminalForWorkspace(workspaceId, next);
   }
@@ -770,7 +886,7 @@
       const confirmed = await confirmTerminalToolRuntimeClose(toolTabId);
       if (!confirmed) return;
     }
-    const next = await workspaceStore.dispatch({ kind: "close_tool_slots_to_right", workspace_id: workspaceId, slot_id: slotId });
+    const next = await dispatchWorkspaceIntent({ kind: "close_tool_slots_to_right", workspace_id: workspaceId, slot_id: slotId });
     for (const toolTabId of toolIds) await disposeTerminalToolRuntime(toolTabId);
     await mountActiveTerminalForWorkspace(workspaceId, next);
   }
@@ -844,7 +960,7 @@
   }
 
   async function mirrorToolTabToWorkspace(toolTabId: string, targetWorkspaceId: string, targetGroupId: string) {
-    await workspaceStore.dispatch({
+    await dispatchWorkspaceIntent({
       kind: "mirror_tool_tab",
       source_tool_tab_id: toolTabId,
       target_workspace_id: targetWorkspaceId,
@@ -853,9 +969,9 @@
   }
 
   async function floatWorkspaceSlot(workspaceId: string, slotId: string) {
-    const before = workspaceStore.snapshot?.floating_windows.map((window) => window.id) ?? [];
-    await workspaceStore.dispatch({ kind: "float_tool_slot", workspace_id: workspaceId, slot_id: slotId });
-    const after = workspaceStore.snapshot?.floating_windows ?? [];
+    const before = workspaceSnapshot?.floating_windows.map((window) => window.id) ?? [];
+    await dispatchWorkspaceIntent({ kind: "float_tool_slot", workspace_id: workspaceId, slot_id: slotId });
+    const after = workspaceSnapshot?.floating_windows ?? [];
     const created = after.find((window) => !before.includes(window.id));
     if (created && hasTauriRuntime()) {
       void openFloatingWindow(created.id).catch((error) => {
@@ -952,7 +1068,7 @@
   }
 
   async function moveWorkspaceSlotToGroup(workspaceId: string, slotId: string, targetGroupId: string) {
-    await workspaceStore.dispatch({
+    await dispatchWorkspaceIntent({
       kind: "move_tool_slot_to_group",
       workspace_id: workspaceId,
       slot_id: slotId,
@@ -966,7 +1082,7 @@
     targetSlotId: string,
     side: "left" | "right" | "up" | "down",
   ) {
-    await workspaceStore.dispatch({
+    await dispatchWorkspaceIntent({
       kind: "move_tool_slot_to_split",
       workspace_id: workspaceId,
       slot_id: slotId,
@@ -1190,7 +1306,7 @@
     );
     const targetGroupId =
       lastActivatedContentGroupIdByWorkspace.get(workspace.id) ?? firstContentGroupId(workspace);
-    const next = await workspaceStore.dispatch({
+    const next = await dispatchWorkspaceIntent({
       kind: "create_terminal_tool_tab",
       workspace_id: workspace.id,
       target_group_id: targetGroupId,
@@ -1209,7 +1325,7 @@
   async function openWorkspaceResourceMonitor() {
     const workspace = activeWorkspace;
     if (!workspace) throw new Error("active workspace is not loaded");
-    await workspaceStore.dispatch({
+    await dispatchWorkspaceIntent({
       kind: "open_resource_monitor_tool_tab",
       workspace_id: workspace.id,
       target_group_id: firstToolGroupId(workspace),
@@ -1222,22 +1338,22 @@
   }
 
   async function createWorkspaceForHost(hostId: string) {
-    await workspaceStore.dispatch({ kind: "create_workspace", host_id: hostId });
+    await dispatchWorkspaceIntent({ kind: "create_workspace", host_id: hostId });
   }
 
   async function activateWorkspace(id: string) {
     const current = workspaceSnapshot;
     if (!current || current.active_workspace_id === id) return;
-    await workspaceStore.dispatch({ kind: "activate_workspace", workspace_id: id });
+    await dispatchWorkspaceIntent({ kind: "activate_workspace", workspace_id: id });
     await restoreTerminalRuntimeForWorkspace(id);
   }
 
   async function closeWorkspace(id: string) {
     const canClose = await confirmWorkspaceTransferClose(id);
     if (!canClose) return;
-    await workspaceStore.dispatch({ kind: "close_workspace", workspace_id: id });
+    await dispatchWorkspaceIntent({ kind: "close_workspace", workspace_id: id });
     await disposeTerminalRuntimesForWorkspace(id);
-    const nextWorkspaceId = workspaceStore.snapshot?.active_workspace_id;
+    const nextWorkspaceId = workspaceSnapshot?.active_workspace_id;
     if (nextWorkspaceId) await restoreTerminalRuntimeForWorkspace(nextWorkspaceId);
   }
 
@@ -1247,7 +1363,7 @@
       const canClose = await confirmWorkspaceTransferClose(workspaceId);
       if (!canClose) return;
     }
-    await workspaceStore.dispatch({ kind: "close_other_workspaces", workspace_id: id });
+    await dispatchWorkspaceIntent({ kind: "close_other_workspaces", workspace_id: id });
     for (const workspaceId of ids) {
       await disposeTerminalRuntimesForWorkspace(workspaceId);
     }
@@ -1263,11 +1379,11 @@
       const canClose = await confirmWorkspaceTransferClose(workspaceId);
       if (!canClose) return;
     }
-    await workspaceStore.dispatch({ kind: "close_workspaces_to_right", workspace_id: id });
+    await dispatchWorkspaceIntent({ kind: "close_workspaces_to_right", workspace_id: id });
     for (const workspaceId of ids) {
       await disposeTerminalRuntimesForWorkspace(workspaceId);
     }
-    const nextWorkspaceId = workspaceStore.snapshot?.active_workspace_id;
+    const nextWorkspaceId = workspaceSnapshot?.active_workspace_id;
     if (nextWorkspaceId) await restoreTerminalRuntimeForWorkspace(nextWorkspaceId);
   }
 
@@ -1855,9 +1971,9 @@
   }
 
   function replaceDockOwnerLayout(workspaceId: string | null, floatingWindowId: string | null, layout: WorkspaceDockLayout) {
-    const current = workspaceStore.snapshot;
+    const current = workspaceSnapshot;
     if (!current) return;
-    workspaceStore.replaceSnapshot({
+    replaceWorkspaceSnapshot({
       ...current,
       workspaces: workspaceId
         ? current.workspaces.map((workspace) => (workspace.id === workspaceId ? { ...workspace, layout } : workspace))
@@ -1873,7 +1989,7 @@
     slotId: string,
     side: "left" | "right" | "up" | "down",
   ) {
-    await workspaceStore.dispatch({
+    await dispatchWorkspaceIntent({
       kind: "move_tool_slot_to_workspace_edge",
       workspace_id: workspaceId,
       slot_id: slotId,
@@ -2265,6 +2381,14 @@
   function toolSlotElementById(slotId: string): HTMLElement | null {
     return [...document.querySelectorAll<HTMLElement>("[data-tool-slot-id]")]
       .find((slot) => slot.dataset.toolSlotId === slotId) ?? null;
+  }
+
+  function activeToolDropTargetGroupId() {
+    return toolTabDropTarget?.kind === "group" ? toolTabDropTarget.groupId : null;
+  }
+
+  function activeToolSplitTargetSlotId() {
+    return toolTabDropTarget?.kind === "split" ? toolTabDropTarget.slotId : null;
   }
 
   function sliceRect(rect: DOMRect, side: "left" | "right" | "up" | "down", ratio: number) {
@@ -3883,6 +4007,7 @@
   onMount(() => {
     let mounted = true;
     floatingWindowId = currentFloatingWindowId();
+    const stopTransferQueueObserver = startTransferQueueObserver();
     void (async () => {
       if (hasTauriRuntime()) {
         const [outputDispose, exitDispose, transportStateDispose, configDispose, verificationDispose, paneMenuDispose, terminalMenuDispose] = await Promise.all([
@@ -3930,11 +4055,12 @@
         paneMenuUnlisten = paneMenuDispose;
         terminalMenuUnlisten = terminalMenuDispose;
       }
-      await workspaceStore.subscribe();
+      await workspaceStore.subscribe(syncWorkspaceSnapshot);
       await loadSettings();
       await workspaceStore.load();
-      if (!floatingWindowId && workspaceStore.snapshot?.active_workspace_id) {
-        await restoreTerminalRuntimeForWorkspace(workspaceStore.snapshot.active_workspace_id);
+      syncWorkspaceSnapshot(workspaceStore.snapshot);
+      if (!floatingWindowId && workspaceSnapshot?.active_workspace_id) {
+        await restoreTerminalRuntimeForWorkspace(workspaceSnapshot.active_workspace_id);
       }
       if (!floatingWindowId) {
         const restored = (await restoreTabHandoff()) || (await restoreHotTabs());
@@ -3983,6 +4109,7 @@
       workspaceSshVerificationUnlisten?.();
       paneMenuUnlisten?.();
       terminalMenuUnlisten?.();
+      stopTransferQueueObserver();
       workspaceStore.dispose();
       if (floatingWindowId) {
         for (const tab of terminalRuntimeTabs()) disposeTerminalTab(tab);
@@ -4123,8 +4250,11 @@
     data-workspace-active-id={workspaceSnapshot?.active_workspace_id ?? ""}
     data-workspace-rendered-id={activeWorkspace?.id ?? ""}
     data-workspace-snapshot-count={workspaceSnapshot?.workspaces.length ?? 0}
+    data-workspace-render-revision={workspaceRenderRevision}
+    data-active-tool-slot-revision={activeToolSlotOverrideRevision}
+    data-active-tool-slot-signature={activeWorkspace ? dockLayoutActiveSlotRenderKey(activeWorkspace.layout, activeToolSlotOverrideByGroupId) : ""}
   >
-    {#key `${workspaceSnapshot?.version ?? "none"}:${workspaceSnapshot?.active_workspace_id ?? ""}`}
+    {#key activeFloatingWindow ? `floating:${activeFloatingWindow.id}` : floatingWindowId ? `floating-missing:${floatingWindowId}` : activeWorkspace ? `workspace:${activeWorkspace.id}` : "workspace:none"}
       {#if workspaceSnapshot}
         {#if activeFloatingWindow}
           {@render floatingDockLayout(activeFloatingWindow)}
@@ -4134,7 +4264,7 @@
             <span>The floating ToolTab source is no longer available.</span>
           </div>
         {:else if activeWorkspace}
-          {@render dockLayout(activeWorkspace.layout, activeWorkspace, null, [])}
+          {@render dockLayout(activeWorkspace.layout, activeWorkspace, null, [], activeToolSlotOverrideRevision, activeToolSlotOverrideByGroupId)}
         {:else}
           <div class="dock-empty">Workspace</div>
         {/if}
@@ -4398,11 +4528,18 @@
     <header>
       <span>Floating ToolTabs</span>
     </header>
-    {@render dockLayout(floatingWindow.layout, null, floatingWindow.id, [])}
+    {@render dockLayout(floatingWindow.layout, null, floatingWindow.id, [], activeToolSlotOverrideRevision, activeToolSlotOverrideByGroupId)}
   </section>
 {/snippet}
 
-{#snippet dockLayout(layout: WorkspaceDockLayout, workspace: WorkspaceTabState | null, floatingWindowId: string | null, splitPath: number[])}
+{#snippet dockLayout(
+  layout: WorkspaceDockLayout,
+  workspace: WorkspaceTabState | null,
+  floatingWindowId: string | null,
+  splitPath: number[],
+  activeSlotRevision: number,
+  activeSlotOverrides: Record<string, string>,
+)}
   {#if layout.kind === "split"}
     <section
       class:column={layout.direction === "column"}
@@ -4410,8 +4547,8 @@
       class="workspace-dock-split"
       style={splitStyle(layout)}
     >
-      {#each layout.children as child, index (`${layout.kind}-${index}-${child.kind}`)}
-        {@render dockLayout(child, workspace, floatingWindowId, [...splitPath, index])}
+      {#each layout.children as child, index (`${index}:${dockLayoutRenderKey(child)}:${dockLayoutActiveSlotRenderKey(child, activeSlotOverrides)}`)}
+        {@render dockLayout(child, workspace, floatingWindowId, [...splitPath, index], activeSlotRevision, activeSlotOverrides)}
         {#if index < layout.children.length - 1}
           <button
             class:column={layout.direction === "column"}
@@ -4432,83 +4569,31 @@
       {/each}
     </section>
   {:else}
-    <section
-      class:drop-target={toolTabDropTarget?.kind === "group" && toolTabDropTarget.groupId === layout.id}
-      class="workspace-dock-group"
-      aria-label="Tool tabs"
-      data-dock-group-id={layout.id}
-      data-dock-group-role={dockGroupRole(layout)}
-      data-active-tool-slot-id={layout.active_slot_id}
-      data-testid={`dock-group-${layout.id}`}
-      data-workspace-id={workspace?.id ?? ""}
+    <WorkspaceDockGroup
+      {layout}
+      {workspace}
+      activeSlotId={activeGroupSlotId(layout)}
+      {activeSlotRevision}
+      dropTargetGroupId={activeToolDropTargetGroupId()}
+      splitTargetSlotId={activeToolSplitTargetSlotId()}
+      draggingSlotId={toolTabDragState?.slotId ?? null}
+      {slotTool}
+      slotTitle={slotToolTitle}
+      {ownerWorkspaceTitle}
+      terminalSessionId={terminalSessionIdForToolTab}
+      onActivate={(slotId) => workspace ? void activateWorkspaceSlot(workspace, slotId) : undefined}
+      onClose={(slotId) => workspace ? void closeWorkspaceSlot(workspace.id, slotId) : undefined}
+      onContextMenu={(event, group, slot) => workspace ? openToolTabContextMenu(event, workspace, group, slot) : undefined}
+      onPointerDown={(event, slot) => workspace ? startToolTabPointerDrag(event, workspace, slot) : undefined}
     >
-      <div class="tool-tabbar">
-        {#each layout.slots as slot (slot.id)}
-          {@const tool = slotTool(slot)}
-          <div
-            class="tool-tab"
-            class:active={slot.id === layout.active_slot_id}
-            class:closed={slot.kind === "closed_source"}
-            class:dragging={toolTabDragState?.slotId === slot.id}
-            class:mirror={slot.kind === "mirror"}
-            class:placeholder={slot.kind === "floating_placeholder"}
-            class:split-target={toolTabDropTarget?.kind === "split" && toolTabDropTarget.slotId === slot.id}
-            data-testid={`tool-slot-${slot.id}`}
-            data-session-id={tool?.kind === "terminal" ? terminalRuntimeForToolTab(tool.id)?.tab.activePaneId : undefined}
-            data-tool-snapshot-title={tool?.title ?? ""}
-            data-tool-kind={tool?.kind ?? ""}
-            data-tool-slot-id={slot.id}
-            data-tool-tab-id={tool?.id ?? ""}
-            role="tab"
-            tabindex="0"
-            aria-selected={slot.id === layout.active_slot_id}
-            title={slotToolTitle(slot)}
-            onclick={() => workspace ? void activateWorkspaceSlot(workspace, slot.id) : undefined}
-            onkeydown={(event) => {
-              if (event.key !== "Enter" && event.key !== " ") return;
-              event.preventDefault();
-              if (workspace) void activateWorkspaceSlot(workspace, slot.id);
-            }}
-            oncontextmenu={(event) => workspace ? openToolTabContextMenu(event, workspace, layout, slot) : undefined}
-            onpointerdown={(event) => workspace ? startToolTabPointerDrag(event, workspace, slot) : undefined}
-          >
-            <span class="tool-title">{slotToolTitle(slot)}</span>
-            {#if slot.kind === "mirror"}
-              <small>{ownerWorkspaceTitle(slot)}</small>
-            {:else if slot.kind === "floating_placeholder"}
-              <small>Floating</small>
-            {:else if slot.kind === "closed_source"}
-              <small>Closed</small>
-            {/if}
-            {#if workspace && slot.id === layout.active_slot_id}
-              <button
-                class="tool-close"
-                type="button"
-                aria-label={`Close ${slotToolTitle(slot)}`}
-                title="Close ToolTab"
-                onpointerdown={(event) => event.stopPropagation()}
-                onclick={(event) => {
-                  event.stopPropagation();
-                  void closeWorkspaceSlot(workspace.id, slot.id);
-                }}
-              >
-                ×
-              </button>
-            {/if}
-          </div>
-        {/each}
-      </div>
-      {#if true}
-        {@const activeSlot = activeGroupSlot(layout)}
-        <div class="tool-surface">
-          {@render dockSlotContent(activeSlot, workspace)}
-        </div>
-      {/if}
-    </section>
+      {#snippet children(activeSlot, active)}
+        {@render dockSlotContent(activeSlot, workspace, active)}
+      {/snippet}
+    </WorkspaceDockGroup>
   {/if}
 {/snippet}
 
-{#snippet dockSlotContent(slot: WorkspaceToolSlot | null, workspace: WorkspaceTabState | null)}
+{#snippet dockSlotContent(slot: WorkspaceToolSlot | null, workspace: WorkspaceTabState | null, active: boolean = true)}
   {@const tool = slot ? slotTool(slot) : null}
   {@const effectiveWorkspace = workspace ?? (tool ? workspaceById(tool.owner_workspace_id) : null)}
   {#if !slot}
@@ -4541,10 +4626,12 @@
         {textPreviewLimitBytes}
         {imagePreviewLimitBytes}
         toolbarActionIds={filesToolbarActionIds}
+        treeStickyEnabled={filesTreeStickyEnabled}
+        treeStickyMaxLevels={filesTreeStickyMaxLevels}
       />
     {/key}
   {:else if tool.kind === "transfers"}
-    <TransfersToolTab workspace={effectiveWorkspace} />
+    <TransfersToolTab workspace={effectiveWorkspace} {active} />
   {:else if tool.kind === "resources"}
     <ResourceMonitorToolTab toolTab={tool} workspaceId={effectiveWorkspace.id} viewId={slot.id} />
   {:else}
@@ -4746,8 +4833,8 @@
   }
 
   .workspace.integrated-titlebar-decorum :global(button.decorum-tb-btn) {
-    position: static !important;
     z-index: 3 !important;
+    position: relative !important;
     width: 46px !important;
     min-width: 46px !important;
     height: 100% !important;
@@ -4761,9 +4848,8 @@
     margin: 0 !important;
     padding: 0 !important;
     background: transparent !important;
-    color: color-mix(in srgb, var(--app-fg) 72%, transparent) !important;
-    font-family: "Segoe Fluent Icons", "Segoe MDL2 Assets", system-ui, sans-serif !important;
-    font-size: 10px !important;
+    color: transparent !important;
+    font-size: 0 !important;
     font-weight: 400 !important;
     line-height: 1 !important;
     text-shadow: none !important;
@@ -4772,9 +4858,59 @@
     cursor: default !important;
   }
 
+  .workspace.integrated-titlebar-decorum :global(button.decorum-tb-btn::before),
+  .workspace.integrated-titlebar-decorum :global(button.decorum-tb-btn::after) {
+    content: "";
+    position: absolute;
+    box-sizing: border-box;
+    display: block;
+    pointer-events: none;
+    color: color-mix(in srgb, var(--app-fg) 74%, transparent);
+  }
+
+  .workspace.integrated-titlebar-decorum :global(#decorum-tb-minimize::before) {
+    left: 18px;
+    top: 50%;
+    width: 10px;
+    height: 1px;
+    background: currentColor;
+    transform: translateY(4px);
+  }
+
+  .workspace.integrated-titlebar-decorum :global(#decorum-tb-maximize::before) {
+    left: 18px;
+    top: 50%;
+    width: 10px;
+    height: 10px;
+    border: 1px solid currentColor;
+    transform: translateY(-5px);
+  }
+
+  .workspace.integrated-titlebar-decorum :global(#decorum-tb-close::before),
+  .workspace.integrated-titlebar-decorum :global(#decorum-tb-close::after) {
+    left: 17px;
+    top: 50%;
+    width: 12px;
+    height: 1px;
+    background: currentColor;
+    transform-origin: center;
+  }
+
+  .workspace.integrated-titlebar-decorum :global(#decorum-tb-close::before) {
+    transform: rotate(45deg);
+  }
+
+  .workspace.integrated-titlebar-decorum :global(#decorum-tb-close::after) {
+    transform: rotate(-45deg);
+  }
+
   .workspace.integrated-titlebar-decorum :global(button.decorum-tb-btn:hover) {
     background: color-mix(in srgb, var(--app-fg) 11%, transparent) !important;
-    color: var(--app-fg) !important;
+  }
+
+  .workspace.integrated-titlebar-decorum :global(button.decorum-tb-btn:hover::before),
+  .workspace.integrated-titlebar-decorum :global(button.decorum-tb-btn:hover::after) {
+    color: var(--app-fg);
   }
 
   .workspace.integrated-titlebar-decorum :global(button.decorum-tb-btn:active) {
@@ -4783,7 +4919,11 @@
 
   .workspace.integrated-titlebar-decorum :global(#decorum-tb-close:hover) {
     background: #c42b1c !important;
-    color: #ffffff !important;
+  }
+
+  .workspace.integrated-titlebar-decorum :global(#decorum-tb-close:hover::before),
+  .workspace.integrated-titlebar-decorum :global(#decorum-tb-close:hover::after) {
+    color: #ffffff;
   }
 
   .workspace-tabbar-loading span {
@@ -4887,23 +5027,6 @@
     outline: 0;
   }
 
-  .workspace-dock-group {
-    min-width: 0;
-    min-height: 0;
-    height: 100%;
-    display: grid;
-    grid-template-rows: 31px minmax(0, 1fr);
-    overflow: hidden;
-    border-right: 1px solid var(--app-border);
-    border-bottom: 1px solid var(--app-border);
-    background: color-mix(in srgb, var(--app-bg) 96%, var(--app-control));
-  }
-
-  .workspace-dock-group.drop-target {
-    outline: 2px solid color-mix(in srgb, var(--app-accent) 62%, transparent);
-    outline-offset: -3px;
-  }
-
   .tooltab-drop-preview {
     position: absolute;
     z-index: 60;
@@ -4951,112 +5074,6 @@
 
   .tooltab-drop-preview.group {
     border-style: dashed;
-  }
-
-  .tool-tabbar {
-    min-width: 0;
-    display: flex;
-    align-items: end;
-    gap: 2px;
-    overflow-x: auto;
-    overflow-y: hidden;
-    border-bottom: 1px solid var(--app-border);
-    padding: 3px 5px 0;
-  }
-
-  .tool-tab {
-    min-width: 0;
-    max-width: 180px;
-    height: 28px;
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    border: 1px solid transparent;
-    border-bottom: 0;
-    border-radius: 6px 6px 0 0;
-    padding: 0 9px;
-    background: transparent;
-    color: color-mix(in srgb, var(--app-fg) 72%, transparent);
-    font: inherit;
-    font-size: 12px;
-    user-select: none;
-    -webkit-user-select: none;
-  }
-
-  .tool-close {
-    flex: none;
-    width: 24px;
-    height: 22px;
-    max-width: 24px;
-    justify-content: center;
-    align-items: center;
-    display: inline-flex;
-    border: 0;
-    border-radius: 4px;
-    padding: 0;
-    background: transparent;
-    color: color-mix(in srgb, var(--app-fg) 48%, transparent);
-    font: inherit;
-    font-size: 13px;
-  }
-
-  .tool-close:hover {
-    color: var(--app-fg);
-    background: var(--app-hover);
-  }
-
-  .tool-tab.active {
-    border-color: var(--app-border);
-    background: color-mix(in srgb, var(--app-bg) 88%, var(--app-control));
-    color: var(--app-fg);
-  }
-
-  .tool-tab:focus-visible {
-    outline: 1px solid color-mix(in srgb, var(--app-accent) 76%, transparent);
-    outline-offset: -2px;
-  }
-
-  .tool-tab.dragging {
-    opacity: 0.45;
-  }
-
-  .tool-tab.split-target {
-    border-color: color-mix(in srgb, var(--app-accent) 72%, var(--app-border));
-    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--app-accent) 45%, transparent);
-  }
-
-  .tool-tab.mirror {
-    border-color: color-mix(in srgb, var(--app-accent) 58%, var(--app-border));
-  }
-
-  .tool-tab.closed,
-  .tool-tab.placeholder {
-    color: color-mix(in srgb, var(--app-fg) 54%, transparent);
-  }
-
-  .tool-tab .tool-title {
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .tool-tab small {
-    flex: none;
-    border: 1px solid color-mix(in srgb, var(--app-fg) 16%, transparent);
-    border-radius: 999px;
-    padding: 0 5px;
-    color: color-mix(in srgb, var(--app-fg) 60%, transparent);
-    font-size: 10px;
-  }
-
-  .tool-surface {
-    min-width: 0;
-    min-height: 0;
-    height: 100%;
-    display: grid;
-    grid-template-rows: minmax(0, 1fr);
-    overflow: hidden;
   }
 
   .tooltab-context-menu {

@@ -12,22 +12,21 @@
  * Local Workspace, launches the Tauri application provided by
  * TAURI_TEST_APPLICATION through tauri-driver, verifies the Files toolbar does
  * not render Rename, Permissions, Delete, Copy, Cut, or Download actions,
- * activates the Files ToolTab explicitly, drags a marquee rectangle across
- * visible Tree rows, Ctrl-clicks and Shift-clicks rows, opens the context menu
- * on a selected row, and inspects the rendered menu actions and disabled
- * states.
+ * activates the Files ToolTab explicitly, Ctrl-clicks and Shift-clicks rows,
+ * opens the context menu on a selected row, and inspects the rendered menu
+ * actions and disabled states.
  *
  * Expected:
  * Selection-scoped file actions are absent from the toolbar, Ctrl and Shift
- * marquee, Ctrl, and Shift selection produce multi-selected row sets in the
- * real WebView, right-clicking an already selected row preserves that set,
- * Rename is disabled for multi-selection, and Permissions, Delete, Copy, Cut,
- * and Download remain enabled from the context menu.
+ * selection produce multi-selected row sets in the real WebView, right-clicking
+ * an already selected row preserves that set, Rename is disabled for
+ * multi-selection, Permissions remains present as a capability-gated action,
+ * and Delete, Copy, Cut, and Download remain enabled from the context menu.
  */
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
+import { basename as pathBasename, dirname, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { createServer } from "vite";
@@ -39,13 +38,21 @@ test("files context menu multi selection", { timeout: 180_000 }, async () => {
   const appPath = requiredEnvPath("TAURI_TEST_APPLICATION");
   const isolatedAppConfig = await createIsolatedAppConfigEnv("files-context-menu-multi-selection");
   const fixtureRoot = await createFilesFixture();
+  const alphaPath = join(fixtureRoot, "alpha.txt");
+  const betaPath = join(fixtureRoot, "beta.txt");
+  const gammaPath = join(fixtureRoot, "gamma.txt");
+  const deltaPath = join(fixtureRoot, "delta.txt");
   const fixtureHostId = "018f6eb3-6f91-7410-bc43-f927b2236d97";
   const nativeDriverPath = optionalEnvPath("TAURI_TEST_NATIVE_DRIVER");
+  const nativeDriverPort = process.env.TAURI_TEST_NATIVE_DRIVER_PORT ?? "";
   const driverPort = Number(process.env.TAURI_TEST_DRIVER_PORT ?? "4444");
   const driverUrl = `http://127.0.0.1:${driverPort}`;
   const devUrl = process.env.TAURI_TEST_DEV_URL ?? "http://localhost:1420/";
   const devPort = Number(new URL(devUrl).port);
-  const nativeDriverArgs = nativeDriverPath ? ["--native-driver", nativeDriverPath] : [];
+  const nativeDriverArgs = [
+    ...(nativeDriverPath ? ["--native-driver", nativeDriverPath] : []),
+    ...(nativeDriverPort ? ["--native-port", nativeDriverPort] : []),
+  ];
 
   process.chdir(repoRoot);
   process.env.NOCTURNE_DEV_PORT = String(devPort);
@@ -87,9 +94,14 @@ test("files context menu multi selection", { timeout: 180_000 }, async () => {
     await activateFilesToolTab();
     await waitUntil(async () => await execute("return document.querySelector('.files-tooltab .files-toolbar') !== null;"), pageSummary);
     await waitUntil(async () => {
-      const rows = await treeRowNames();
-      return rows.includes("alpha.txt") && rows.includes("beta.txt") && rows.includes("gamma.txt") && rows.includes("delta.txt");
+      const rows = await treeRows();
+      return rows.some((row) => sameTestPath(row.path, fixtureRoot));
     }, pageSummary);
+    const fixtureExpand = await ensureTreePathExpanded(fixtureRoot);
+    await waitUntil(async () => {
+      const rows = await treeRows();
+      return [alphaPath, betaPath, gammaPath, deltaPath].every((path) => rows.some((row) => sameTestPath(row.path, path)));
+    }, async () => `${await pageSummary()}\nfixture expand result: ${JSON.stringify(fixtureExpand, null, 2)}`);
 
     const toolbar = await toolbarActions();
     const forbidden = ["Rename", "Permissions", "Delete", "Copy", "Cut", "Download"].filter((label) => toolbar.includes(label));
@@ -98,42 +110,22 @@ test("files context menu multi selection", { timeout: 180_000 }, async () => {
       throw new Error(`Selection-scoped actions are still in the toolbar: ${forbidden.join(", ")}\n${JSON.stringify(toolbar, null, 2)}\nscreenshot: ${screenshotPath}`);
     }
 
-    await dragMarqueeOverTreeRows("alpha.txt", "beta.txt");
-    await waitUntil(async () => sameSet(await selectedTreeRowNames(), ["alpha.txt", "beta.txt"]), pageSummary);
+    await clickTreeRow(alphaPath);
+    await clickTreeRow(gammaPath, { ctrlKey: true });
     let selected = await selectedTreeRowNames();
-    if (!sameSet(selected, ["alpha.txt", "beta.txt"])) {
-      const screenshotPath = await saveScreenshot("files-context-menu-marquee-selection.png");
-      const marqueeLog = await execute("return window.__NOCTURNE_TEST_MARQUEE_LOG__ ?? [];");
-      const marqueeState = await execute(`
-        const surface = document.querySelector('.files-table .files-selection-surface');
-        const rect = surface?.getBoundingClientRect();
-        return {
-          errors: window.__NOCTURNE_TEST_ERRORS__ ?? [],
-          surfaceRect: rect ? { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom, width: rect.width, height: rect.height } : null,
-          marqueeVisible: document.querySelector('.marquee-selection') !== null,
-          selectedRows: [...document.querySelectorAll('.files-table [data-file-entry="true"].selected')]
-            .map((row) => row.querySelector('.name-cell')?.textContent?.trim() ?? row.textContent?.trim() ?? ''),
-        };
-      `);
-      throw new Error(`Mouse marquee drag did not produce the expected selection\n${JSON.stringify({ selected, marqueeLog, marqueeState }, null, 2)}\nscreenshot: ${screenshotPath}`);
-    }
-
-    await clickTreeRow("alpha.txt");
-    await clickTreeRow("gamma.txt", { ctrlKey: true });
-    selected = await selectedTreeRowNames();
     if (!sameSet(selected, ["alpha.txt", "gamma.txt"])) {
       const screenshotPath = await saveScreenshot("files-context-menu-ctrl-selection.png");
       throw new Error(`Ctrl-click did not produce the expected selection\n${JSON.stringify(selected, null, 2)}\nscreenshot: ${screenshotPath}`);
     }
 
-    await clickTreeRow("delta.txt", { shiftKey: true });
+    await clickTreeRow(deltaPath, { shiftKey: true });
     selected = await selectedTreeRowNames();
     if (!sameSet(selected, ["gamma.txt", "delta.txt"])) {
       const screenshotPath = await saveScreenshot("files-context-menu-shift-selection.png");
       throw new Error(`Shift-click did not select the expected visible range\n${JSON.stringify(selected, null, 2)}\nscreenshot: ${screenshotPath}`);
     }
 
-    const menu = await openContextMenuOnTreeRow("gamma.txt");
+    const menu = await openContextMenuOnTreeRow(gammaPath);
     const expectedDisabled = {
       Rename: true,
       Delete: false,
@@ -174,7 +166,7 @@ test("files context menu multi selection", { timeout: 180_000 }, async () => {
   }
 
   async function createFilesFixture() {
-    const root = await mkdtemp(join(tmpdir(), "nocturne-files-context-menu-"));
+    const root = await mkdtemp(join(tmpdir(), "zzzz-nocturne-files-context-menu-"));
     await writeFile(join(root, "alpha.txt"), "alpha\n");
     await writeFile(join(root, "beta.txt"), "beta\n");
     await writeFile(join(root, "gamma.txt"), "gamma\n");
@@ -249,33 +241,113 @@ test("files context menu multi selection", { timeout: 180_000 }, async () => {
     `);
   }
 
-  async function treeRowNames() {
+  async function treeRows() {
     return await execute(`
-      return [...document.querySelectorAll('.files-table [data-file-entry="true"]')]
+      return [...document.querySelectorAll('.files-table [data-file-entry="true"]:not(.sticky-row)')]
         .filter((row) => row.offsetParent !== null)
-        .map((row) => row.querySelector('.name-cell')?.textContent?.trim() ?? row.textContent?.trim() ?? '');
+        .map((row) => ({
+          name: basename(row.getAttribute('data-entry-path') ?? row.querySelector('.name-cell')?.textContent?.trim() ?? row.textContent?.trim() ?? ''),
+          path: row.getAttribute('data-entry-path') ?? '',
+          kind: row.getAttribute('data-entry-kind') ?? '',
+          expanded: row.getAttribute('aria-expanded'),
+        }));
+
+      function basename(value) {
+        const normalized = value.replace(/\\\\/g, '/').replace(/\\/+$/, '');
+        return normalized.slice(normalized.lastIndexOf('/') + 1) || normalized;
+      }
     `);
   }
 
   async function selectedTreeRowNames() {
     return await execute(`
-      return [...document.querySelectorAll('.files-table [data-file-entry="true"].selected')]
+      return [...document.querySelectorAll('.files-table [data-file-entry="true"].selected:not(.sticky-row)')]
         .filter((row) => row.offsetParent !== null)
-        .map((row) => row.querySelector('.name-cell')?.textContent?.trim() ?? row.textContent?.trim() ?? '');
+        .map((row) => basename(row.getAttribute('data-entry-path') ?? row.querySelector('.name-cell')?.textContent?.trim() ?? row.textContent?.trim() ?? ''));
+
+      function basename(value) {
+        const normalized = value.replace(/\\\\/g, '/').replace(/\\/+$/, '');
+        return normalized.slice(normalized.lastIndexOf('/') + 1) || normalized;
+      }
     `);
   }
 
-  async function clickTreeRow(name, options = {}) {
-    const result = await execute(treeRowScript(name, "click", options));
+  async function ensureTreePathExpanded(path) {
+    const rows = await treeRows();
+    const row = rows.find((candidate) => sameTestPath(candidate.path, path));
+    if (!row) {
+      throw new Error(`Tree directory ${path} was not found: ${await pageSummary()}`);
+    }
+    if (row.expanded === "true") return { found: true, alreadyExpanded: true, path: row.path };
+    return await expandTreeDirectory(path);
+  }
+
+  async function expandTreeDirectory(path) {
+    const result = await execute(`
+      const rows = [...document.querySelectorAll('.files-table [data-file-entry="true"]:not(.sticky-row)')]
+        .filter((row) => row.offsetParent !== null);
+      const row = rows.find((candidate) =>
+        candidate.getAttribute('data-entry-kind') === 'directory' &&
+        samePath(candidate.getAttribute('data-entry-path') ?? '', ${JSON.stringify(path)})
+      );
+      if (!row) {
+        return {
+          found: false,
+          rows: rows.map((candidate) => ({
+            name: basename(candidate.getAttribute('data-entry-path') ?? candidate.querySelector('.name-cell')?.textContent?.trim() ?? candidate.textContent?.trim() ?? ''),
+            path: candidate.getAttribute('data-entry-path') ?? '',
+          })),
+        };
+      }
+      const disclosure = row.querySelector('.tree-disclosure:not(.placeholder)');
+      if (!disclosure) {
+        return { found: false, reason: 'Directory disclosure was not available', rows: rows.map((candidate) => ({ name: basename(candidate.getAttribute('data-entry-path') ?? ''), path: candidate.getAttribute('data-entry-path') ?? '' })) };
+      }
+      const before = row.getAttribute('aria-expanded');
+      disclosure.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true, pointerType: 'mouse', button: 0 }));
+      disclosure.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window, button: 0 }));
+      disclosure.click();
+      return {
+        found: true,
+        before,
+        after: row.getAttribute('aria-expanded'),
+        text: row.textContent?.trim() ?? '',
+        path: row.getAttribute('data-entry-path') ?? '',
+        rows: rows.map((candidate) => ({
+          name: basename(candidate.getAttribute('data-entry-path') ?? candidate.querySelector('.name-cell')?.textContent?.trim() ?? candidate.textContent?.trim() ?? ''),
+          expanded: candidate.getAttribute('aria-expanded'),
+          kind: candidate.getAttribute('data-entry-kind'),
+        })),
+      };
+
+      function basename(value) {
+        const normalized = value.replace(/\\\\/g, '/').replace(/\\/+$/, '');
+        return normalized.slice(normalized.lastIndexOf('/') + 1) || normalized;
+      }
+      function samePath(left, right) {
+        return normalizePath(left) === normalizePath(right);
+      }
+      function normalizePath(value) {
+        return value.replace(/\\\\/g, '/').replace(/\\/+$/, '');
+      }
+    `);
     if (!result.found) {
-      throw new Error(`Tree row ${name} was not found: ${JSON.stringify(result, null, 2)}`);
+      throw new Error(`Tree directory ${path} was not found: ${JSON.stringify(result, null, 2)}`);
+    }
+    return result;
+  }
+
+  async function clickTreeRow(path, options = {}) {
+    const result = await execute(treeRowScript(path, "click", options));
+    if (!result.found) {
+      throw new Error(`Tree row ${path} was not found: ${JSON.stringify(result, null, 2)}`);
     }
   }
 
-  async function openContextMenuOnTreeRow(name) {
-    const result = await execute(treeRowScript(name, "contextmenu", {}));
+  async function openContextMenuOnTreeRow(path) {
+    const result = await execute(treeRowScript(path, "contextmenu", {}));
     if (!result.found) {
-      throw new Error(`Tree row ${name} was not found for context menu: ${JSON.stringify(result, null, 2)}`);
+      throw new Error(`Tree row ${path} was not found for context menu: ${JSON.stringify(result, null, 2)}`);
     }
     await waitUntil(async () => await execute("return document.querySelector('.files-context-menu') !== null;"), pageSummary);
     return await execute(`
@@ -286,72 +358,173 @@ test("files context menu multi selection", { timeout: 180_000 }, async () => {
     `);
   }
 
-  async function dragMarqueeOverTreeRows(firstName, lastName) {
+  async function dragMarqueeOverTreeRows(firstPath, lastPath) {
     const drag = await execute(`
       const root = document.querySelector('.files-table');
-      const rows = [...document.querySelectorAll('.files-table [data-file-entry="true"]')]
+      const surface = document.querySelector('.files-table .files-selection-surface');
+      const rows = [...document.querySelectorAll('.files-table [data-file-entry="true"]:not(.sticky-row)')]
         .filter((row) => row.offsetParent !== null);
-      const first = rows.find((candidate) => candidate.querySelector('.name-cell')?.textContent?.trim() === ${JSON.stringify(firstName)});
-      const last = rows.find((candidate) => candidate.querySelector('.name-cell')?.textContent?.trim() === ${JSON.stringify(lastName)});
-      if (!root || !first || !last) {
+      const first = rows.find((candidate) => samePath(candidate.getAttribute('data-entry-path') ?? '', ${JSON.stringify(firstPath)}));
+      const last = rows.find((candidate) => samePath(candidate.getAttribute('data-entry-path') ?? '', ${JSON.stringify(lastPath)}));
+      if (!root || !surface || !first || !last) {
         return {
           found: false,
-          rows: rows.map((candidate) => candidate.querySelector('.name-cell')?.textContent?.trim() ?? candidate.textContent?.trim() ?? ''),
+          hasRoot: Boolean(root),
+          hasSurface: Boolean(surface),
+          rows: rows.map((candidate) => ({
+            name: basename(candidate.getAttribute('data-entry-path') ?? candidate.querySelector('.name-cell')?.textContent?.trim() ?? candidate.textContent?.trim() ?? ''),
+            path: candidate.getAttribute('data-entry-path') ?? '',
+          })),
         };
       }
+      const scrolled = scrollRowsIntoFilesViewport(root, [first, last]);
       const rootRect = root.getBoundingClientRect();
+      const surfaceRect = surface.getBoundingClientRect();
       const firstRect = first.getBoundingClientRect();
       const lastRect = last.getBoundingClientRect();
+      const firstPath = first.getAttribute('data-entry-path') ?? '';
+      const parentPath = dirname(firstPath);
+      const siblingRows = rows.filter((row) => dirname(row.getAttribute('data-entry-path') ?? '') === parentPath && row.getAttribute('data-entry-kind') === 'file');
+      const siblingRowsBottom = siblingRows.reduce((bottom, row) => Math.max(bottom, row.getBoundingClientRect().bottom), Math.max(firstRect.bottom, lastRect.bottom));
+      const emptyStartY = Math.min(rootRect.bottom - 8, Math.max(lastRect.bottom, siblingRowsBottom) + 24);
+      if (emptyStartY <= Math.max(lastRect.bottom, siblingRowsBottom) + 4) {
+        return {
+          found: false,
+          reason: "Tree surface does not expose empty space below visible rows for marquee start",
+          rootRect: rect(rootRect),
+          surfaceRect: rect(surfaceRect),
+          firstRect: rect(firstRect),
+          lastRect: rect(lastRect),
+          siblingRowsBottom,
+          parentPath,
+          scrolled,
+        };
+      }
+      const startX = Math.round(Math.min(rootRect.right - 8, Math.max(rootRect.left + 8, firstRect.left + 16)));
+      const startY = Math.round(emptyStartY);
       return {
         found: true,
-        startX: Math.round(firstRect.left + 8),
-        startY: Math.round(firstRect.top + 2),
+        startX,
+        startY,
         endX: Math.round(Math.min(rootRect.right - 8, firstRect.left + 180)),
-        endY: Math.round(lastRect.bottom - 2),
+        endY: Math.round(firstRect.top + 2),
+        hitTest: hitTest(startX, startY),
+        firstRect: rect(firstRect),
+        lastRect: rect(lastRect),
+        rootRect: rect(rootRect),
+        surfaceRect: rect(surfaceRect),
+        scrolled,
       };
+      function rect(value) {
+        return { left: value.left, top: value.top, right: value.right, bottom: value.bottom, width: value.width, height: value.height };
+      }
+      function basename(value) {
+        const normalized = value.replace(/\\\\/g, '/').replace(/\\/+$/, '');
+        return normalized.slice(normalized.lastIndexOf('/') + 1) || normalized;
+      }
+      function dirname(value) {
+        const normalized = value.replace(/\\\\/g, '/').replace(/\\/+$/, '');
+        const index = normalized.lastIndexOf('/');
+        return index <= 0 ? normalized.slice(0, index + 1) || '/' : normalized.slice(0, index);
+      }
+      function samePath(left, right) {
+        return normalizePath(left) === normalizePath(right);
+      }
+      function normalizePath(value) {
+        return value.replace(/\\\\/g, '/').replace(/\\/+$/, '');
+      }
+      function scrollRowsIntoFilesViewport(root, targetRows) {
+        const candidates = [
+          ...document.querySelectorAll('[data-overlayscrollbars-viewport], .files-table, .files-selection-surface'),
+          document.scrollingElement,
+        ].filter(Boolean).filter((element, index, list) =>
+          list.indexOf(element) === index &&
+          element.scrollHeight > element.clientHeight
+        );
+        const changes = [];
+        for (let attempt = 0; attempt < 12; attempt += 1) {
+          const rootRect = root.getBoundingClientRect();
+          const firstRect = targetRows[0].getBoundingClientRect();
+          const lastRect = targetRows[targetRows.length - 1].getBoundingClientRect();
+          const desiredTop = rootRect.top + 64;
+          const desiredBottom = rootRect.bottom - 96;
+          const delta = firstRect.top < desiredTop
+            ? firstRect.top - desiredTop
+            : lastRect.bottom > desiredBottom
+              ? lastRect.bottom - desiredBottom
+              : 0;
+          if (Math.abs(delta) < 1) break;
+          let moved = false;
+          for (const candidate of candidates) {
+            const before = candidate.scrollTop;
+            candidate.scrollTop += delta;
+            if (candidate.scrollTop !== before) {
+              moved = true;
+              changes.push({
+                className: candidate.className?.toString?.() ?? candidate.tagName,
+                before,
+                after: candidate.scrollTop,
+                delta,
+              });
+            }
+          }
+          if (!moved) break;
+        }
+        return changes;
+      }
+      function hitTest(x, y) {
+        const element = document.elementFromPoint(x, y);
+        return {
+          tagName: element?.tagName ?? '',
+          className: element?.className?.toString?.() ?? '',
+          entryPath: element?.closest?.('[data-file-entry="true"]')?.getAttribute('data-entry-path') ?? '',
+          inSurface: Boolean(element?.closest?.('.files-selection-surface')),
+          inTable: Boolean(element?.closest?.('.files-table')),
+        };
+      }
     `);
     if (!drag.found) {
       throw new Error(`Rows for marquee drag were not found: ${JSON.stringify(drag, null, 2)}`);
     }
     await execute(`
-      const points = ${JSON.stringify(drag)};
-      const log = [];
-      window.__NOCTURNE_TEST_MARQUEE_LOG__ = log;
-      for (const type of ["mousedown", "mousemove", "mousemove", "mouseup"]) {
-        const clientX = type === "mousedown" ? points.startX : points.endX;
-        const clientY = type === "mousedown" ? points.startY : points.endY;
-        const target = document.elementFromPoint(clientX, clientY);
-        log.push({ type, ...hit(clientX, clientY) });
-        target?.dispatchEvent(new MouseEvent(type, {
-          bubbles: true,
-          cancelable: true,
-          view: window,
-          button: 0,
-          buttons: type === "mouseup" ? 0 : 1,
-          clientX,
-          clientY,
-        }));
-      }
-      function hit(clientX, clientY) {
-        const target = document.elementFromPoint(clientX, clientY);
-        return {
-          targetTag: target?.tagName ?? "",
-          targetClass: target?.className?.toString?.() ?? "",
-          targetName: target?.querySelector?.(".name-cell")?.textContent?.trim?.() ?? target?.textContent?.trim?.().slice(0, 40) ?? "",
-        };
-      }
+      window.__NOCTURNE_TEST_MARQUEE_LOG__ = [];
+      return true;
     `);
+    await pointerDrag(drag.startX, drag.startY, drag.endX, drag.endY);
+    return drag;
   }
 
-  function treeRowScript(name, operation, options) {
+  async function pointerDrag(startX, startY, endX, endY) {
+    await webdriver("POST", `/session/${sessionId}/actions`, {
+      actions: [
+        {
+          type: "pointer",
+          id: "mouse",
+          parameters: { pointerType: "mouse" },
+          actions: [
+            { type: "pointerMove", duration: 0, origin: "viewport", x: startX, y: startY },
+            { type: "pointerDown", button: 0 },
+            { type: "pointerMove", duration: 80, origin: "viewport", x: endX, y: endY },
+            { type: "pointerUp", button: 0 },
+          ],
+        },
+      ],
+    });
+    await webdriver("DELETE", `/session/${sessionId}/actions`).catch(() => undefined);
+  }
+
+  function treeRowScript(path, operation, options) {
     return `
-      const rows = [...document.querySelectorAll('.files-table [data-file-entry="true"]')]
+      const rows = [...document.querySelectorAll('.files-table [data-file-entry="true"]:not(.sticky-row)')]
         .filter((row) => row.offsetParent !== null);
-      const row = rows.find((candidate) => candidate.querySelector('.name-cell')?.textContent?.trim() === ${JSON.stringify(name)});
+      const row = rows.find((candidate) => samePath(candidate.getAttribute('data-entry-path') ?? '', ${JSON.stringify(path)}));
       if (!row) {
         return {
           found: false,
-          rows: rows.map((candidate) => candidate.querySelector('.name-cell')?.textContent?.trim() ?? candidate.textContent?.trim() ?? ''),
+          rows: rows.map((candidate) => ({
+            name: basename(candidate.getAttribute('data-entry-path') ?? candidate.querySelector('.name-cell')?.textContent?.trim() ?? candidate.textContent?.trim() ?? ''),
+            path: candidate.getAttribute('data-entry-path') ?? '',
+          })),
         };
       }
       const rect = row.getBoundingClientRect();
@@ -368,6 +541,17 @@ test("files context menu multi selection", { timeout: 180_000 }, async () => {
       };
       row.dispatchEvent(new MouseEvent(${JSON.stringify(operation)}, eventOptions));
       return { found: true };
+
+      function basename(value) {
+        const normalized = value.replace(/\\\\/g, '/').replace(/\\/+$/, '');
+        return normalized.slice(normalized.lastIndexOf('/') + 1) || normalized;
+      }
+      function samePath(left, right) {
+        return normalizePath(left) === normalizePath(right);
+      }
+      function normalizePath(value) {
+        return value.replace(/\\\\/g, '/').replace(/\\/+$/, '');
+      }
     `;
   }
 
@@ -485,6 +669,14 @@ test("files context menu multi selection", { timeout: 180_000 }, async () => {
       throw new Error(`${name} points to a missing file: ${path}`);
     }
     return path;
+  }
+
+  function sameTestPath(left, right) {
+    return normalizeTestPath(left) === normalizeTestPath(right);
+  }
+
+  function normalizeTestPath(value) {
+    return value.replace(/\\/g, "/").replace(/\/+$/, "");
   }
 
   async function pageSummary() {

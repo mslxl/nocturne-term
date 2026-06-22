@@ -14,7 +14,13 @@
  * Expected:
  * Integrated chrome is eligible only for Workspace and floating windows;
  * settings, host manager, and dialogs are excluded, and decorum setup is
- * present for Windows/Linux fallback-capable titlebar integration.
+ * present for Windows/Linux fallback-capable titlebar integration. Because the
+ * decorum plugin installs its DOM with a page-load event and DOMContentLoaded
+ * listener pair, the app shell also schedules a short refresh loop so controls
+ * are still mounted when the plugin receives the event after DOMContentLoaded.
+ * Windows/Linux Workspace windows also use builder-level decoration settings
+ * and the mounted Workspace slot requests decorum injection, which keeps the
+ * controls visible under dev URL / HMR launches such as `pnpm tauri dev`.
  */
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
@@ -42,10 +48,26 @@ describe("integrated titlebar window scope source", () => {
 
     assert.match(cargoToml, /tauri-plugin-decorum/);
     assert.match(tauriConfig, /"withGlobalTauri"\s*:\s*true/);
+    assert.match(tauriConfig, /"decorations"\s*:\s*false/);
     assert.match(capability, /decorum:allow-show-snap-overlay/);
     assert.match(libSource, /tauri_plugin_decorum::init\(\)/);
     assert.match(appShell, /create_overlay_titlebar/);
+    assert.match(appShell, /builder\.decorations\(!integrated\)/);
+    assert.match(appShell, /schedule_decorum_titlebar_refresh/);
+    assert.match(appShell, /DECORUM_TITLEBAR_REFRESH_ATTEMPTS/);
+    assert.match(appShell, /window\.emit\("decorum-page-load", \(\)\)/);
+    assert.match(appShell, /document\.dispatchEvent\(new Event\("DOMContentLoaded"\)\)/);
     assert.match(appShell, /log::warn!\([^;]*decorum/i);
+  });
+
+  it("requests decorum injection from the mounted Workspace slot in dev-url windows", async () => {
+    const decorumHost = await readFile(new URL("../src/lib/window/decorum-titlebar.ts", import.meta.url), "utf8");
+
+    assert.match(decorumHost, /emit\("decorum-page-load"\)/);
+    assert.match(decorumHost, /document\.dispatchEvent\(new Event\("DOMContentLoaded"\)\)/);
+    assert.match(decorumHost, /setTimeout\(\(\) => document\.dispatchEvent\(new Event\("DOMContentLoaded"\)\), 30\)/);
+    assert.match(decorumHost, /decorumInjectionAttempts >= 20/);
+    assert.match(decorumHost, /findAndAttach\(\)/);
   });
 
   it("applies decorum to the initial Windows and Linux main window during setup", async () => {

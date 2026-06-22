@@ -19,6 +19,14 @@ describe("Files preview visibility for unsupported content", () => {
   it("creates the preview region only after a matching renderable preview result exists", () => {
     assert.equal(shouldShowFilePreviewRegion({ selectedPath: "/repo/README.md", previewPath: "/repo/README.md", preview: preview("text") }), true);
     assert.equal(shouldShowFilePreviewRegion({ selectedPath: "/repo/image.png", previewPath: "/repo/image.png", preview: preview("image") }), true);
+    assert.equal(
+      shouldShowFilePreviewRegion({
+        selectedPath: "C:\\Users\\alice\\project\\README.md",
+        previewPath: "C:\\Users\\alice\\project\\README.md",
+        preview: { ...preview("text"), path: "C:/Users/alice/project/README.md" },
+      }),
+      true,
+    );
     assert.equal(shouldShowFilePreviewRegion({ selectedPath: "/repo/archive.bin", previewPath: "/repo/archive.bin", preview: preview("unsupported") }), false);
     assert.equal(shouldShowFilePreviewRegion({ selectedPath: "/repo/archive.bin", previewPath: "/repo/archive.bin", preview: preview("too_large") }), false);
     assert.equal(shouldShowFilePreviewRegion({ selectedPath: "/repo/archive.bin", previewPath: "/repo/archive.bin", preview: undefined }), false);

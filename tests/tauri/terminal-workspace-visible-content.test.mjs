@@ -12,12 +12,15 @@
  * Starts the dev server, starts tauri-driver, launches the Tauri application
  * provided by the TAURI_TEST_APPLICATION environment variable, waits for the
  * default Terminal ToolTab in the live Tauri WebView, and inspects terminal
- * host, mount, viewport, screen, and row DOM state.
+ * host, mount, viewport, screen, and row DOM state inside the visible Terminal
+ * ToolTab pane.
  *
  * Expected:
- * Exactly one terminal host and one xterm are mounted, the terminal host,
- * xterm viewport, and xterm row layer all have non-zero visible dimensions,
- * and the xterm rows contain non-empty text from the running local terminal.
+ * Exactly one visible terminal surface, host, and xterm are mounted, the
+ * visible terminal surface, host, xterm viewport, and xterm row layer all have
+ * non-zero visible dimensions, no placeholder or terminal error covers that
+ * surface, and the active xterm rows contain non-empty text from the running
+ * local terminal.
  */
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
@@ -32,11 +35,15 @@ test("terminal workspace visible content", { timeout: 180_000 }, async () => {
   const appPath = requiredEnvPath("TAURI_TEST_APPLICATION");
   const isolatedAppConfig = await createIsolatedAppConfigEnv("visible-content");
   const nativeDriverPath = optionalEnvPath("TAURI_TEST_NATIVE_DRIVER");
+  const nativeDriverPort = process.env.TAURI_TEST_NATIVE_DRIVER_PORT ?? "";
   const driverPort = Number(process.env.TAURI_TEST_DRIVER_PORT ?? "4444");
   const driverUrl = `http://127.0.0.1:${driverPort}`;
   const devUrl = process.env.TAURI_TEST_DEV_URL ?? "http://localhost:1420/";
   const devPort = Number(new URL(devUrl).port);
-  const nativeDriverArgs = nativeDriverPath ? ["--native-driver", nativeDriverPath] : [];
+  const nativeDriverArgs = [
+    ...(nativeDriverPath ? ["--native-driver", nativeDriverPath] : []),
+    ...(nativeDriverPort ? ["--native-port", nativeDriverPort] : []),
+  ];
 
   process.chdir(repoRoot);
   process.env.NOCTURNE_DEV_PORT = String(devPort);
@@ -80,12 +87,14 @@ test("terminal workspace visible content", { timeout: 180_000 }, async () => {
 
     await waitUntil(async () => {
       const state = await terminalVisibilityState();
-      return state.hosts === 1 && state.xterms === 1;
+      return state.visibleSurfaceCount === 1 && state.visibleHosts === 1 && state.visibleXterms === 1;
     }, async () => `default terminal did not mount exactly once\n${await pageSummary()}`);
 
     await waitUntil(async () => {
       const state = await terminalVisibilityState();
-      return state.hostRect.width >= 200 &&
+      return state.surfaceRect.width >= 200 &&
+        state.surfaceRect.height >= 120 &&
+        state.hostRect.width >= 200 &&
         state.hostRect.height >= 120 &&
         state.viewportRect.width >= 180 &&
         state.viewportRect.height >= 100 &&
@@ -95,7 +104,7 @@ test("terminal workspace visible content", { timeout: 180_000 }, async () => {
 
     await waitUntil(async () => {
       const state = await terminalVisibilityState();
-      return state.rowsText.trim().length > 0;
+      return state.rowsText.trim().length > 0 && !state.activeTerminalError && !state.activePlaceholderText;
     }, async () => `terminal rendered a blank xterm surface\n${await pageSummary()}`);
 
     console.log("tauri terminal workspace visible-content unit test passed");
@@ -110,12 +119,20 @@ test("terminal workspace visible content", { timeout: 180_000 }, async () => {
 
   async function terminalVisibilityState() {
     return await execute(`
-      const host = document.querySelector('[data-testid="terminal-host"]');
-      const mount = document.querySelector('[data-testid="terminal-mount"]');
-      const xterm = document.querySelector('.xterm');
-      const viewport = document.querySelector('.xterm .xterm-viewport');
-      const screen = document.querySelector('.xterm .xterm-screen');
-      const rows = document.querySelector('.xterm .xterm-rows');
+      const allSurfaces = [...document.querySelectorAll('[data-testid="terminal-surface"]')];
+      const visibleSurfaces = allSurfaces.filter((item) => {
+        const rect = item.getBoundingClientRect();
+        const pane = item.closest('.tool-pane');
+        return rect.width >= 1 && rect.height >= 1 && !pane?.hidden && pane?.getAttribute('aria-hidden') !== 'true';
+      });
+      const surface = visibleSurfaces[0];
+      const activePane = surface?.closest('.tool-pane');
+      const host = surface?.querySelector('[data-testid="terminal-host"]');
+      const mount = surface?.querySelector('[data-testid="terminal-mount"]');
+      const xterm = surface?.querySelector('.xterm');
+      const viewport = surface?.querySelector('.xterm .xterm-viewport');
+      const screen = surface?.querySelector('.xterm .xterm-screen');
+      const rows = surface?.querySelector('.xterm .xterm-rows');
       const rect = (element) => {
         if (!element) return { width: 0, height: 0, top: 0, left: 0 };
         const value = element.getBoundingClientRect();
@@ -137,10 +154,15 @@ test("terminal workspace visible content", { timeout: 180_000 }, async () => {
         };
       };
       return {
-        hosts: document.querySelectorAll('[data-testid="terminal-host"]').length,
-        mounts: document.querySelectorAll('[data-testid="terminal-mount"]').length,
-        xterms: document.querySelectorAll('.xterm').length,
-        rowCount: document.querySelectorAll('.xterm .xterm-rows > div').length,
+        visibleSurfaceCount: visibleSurfaces.length,
+        visibleHosts: surface?.querySelectorAll('[data-testid="terminal-host"]').length ?? 0,
+        visibleMounts: surface?.querySelectorAll('[data-testid="terminal-mount"]').length ?? 0,
+        visibleXterms: surface?.querySelectorAll('.xterm').length ?? 0,
+        visibleRowCount: surface?.querySelectorAll('.xterm .xterm-rows > div').length ?? 0,
+        totalHosts: document.querySelectorAll('[data-testid="terminal-host"]').length,
+        totalMounts: document.querySelectorAll('[data-testid="terminal-mount"]').length,
+        totalXterms: document.querySelectorAll('.xterm').length,
+        surfaceRect: rect(surface),
         hostRect: rect(host),
         mountRect: rect(mount),
         xtermRect: rect(xterm),
@@ -152,8 +174,9 @@ test("terminal workspace visible content", { timeout: 180_000 }, async () => {
         viewportStyle: style(viewport),
         rowsStyle: style(rows),
         rowsText: rows?.textContent ?? '',
-        terminalError: document.querySelector('.terminal-error')?.textContent ?? '',
-        placeholderText: document.querySelector('.placeholder')?.textContent ?? '',
+        activeTerminalError: surface?.querySelector('.terminal-error')?.textContent ?? '',
+        activePlaceholderText: activePane?.querySelector('.placeholder')?.textContent ?? '',
+        bodyErrorText: document.querySelector('.error-state')?.textContent ?? '',
       };
     `);
   }

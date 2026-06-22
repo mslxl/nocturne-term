@@ -11,7 +11,7 @@ use std::{
 };
 
 use ssh2::{OpenFlags, OpenType, Sftp};
-use tauri::AppHandle;
+use tauri::{AppHandle, Emitter};
 use uuid::Uuid;
 
 use crate::{
@@ -20,14 +20,15 @@ use crate::{
     files::{connect_sftp_for_host, expand_local_home, join_remote_path, SftpAuthScope},
     types::{
         ConnectionHostEntry, ConnectionProtocol, FileProviderKind, TransferCreateInput,
-        TransferEndpoint, TransferEndpointKind, TransferQueueSnapshot, TransferTask,
-        TransferTaskInput, TransferTaskStatus,
+        TransferEndpoint, TransferEndpointKind, TransferQueueChangedEvent, TransferQueueSnapshot,
+        TransferTask, TransferTaskInput, TransferTaskStatus,
     },
 };
 
 const TRANSFER_CHUNK_SIZE: usize = 128 * 1024;
 const DEFAULT_GLOBAL_TRANSFER_CONCURRENCY: usize = 3;
 const DEFAULT_PER_HOST_TRANSFER_CONCURRENCY: usize = 2;
+const TRANSFER_QUEUE_CHANGED_EVENT: &str = "transfer://changed";
 
 struct RunningTransfer {
     canceled: Arc<AtomicBool>,
@@ -155,14 +156,16 @@ pub(crate) fn create_transfer_task(
         guard.tasks.push(task);
         bump_version(&mut guard)?;
     }
-    schedule_transfers(app)?;
-    snapshot()
+    schedule_transfers(app.clone())?;
+    let snapshot = snapshot()?;
+    emit_transfer_queue_changed(&app, &snapshot)?;
+    Ok(snapshot)
 }
 
 #[tauri::command]
 #[specta::specta]
 pub(crate) fn cancel_transfer_task(
-    _app: AppHandle,
+    app: AppHandle,
     input: TransferTaskInput,
 ) -> Result<TransferQueueSnapshot> {
     let store = transfer_store();
@@ -181,7 +184,10 @@ pub(crate) fn cancel_transfer_task(
         }
     }
     guard.running.remove(&input.task_id);
-    Ok(snapshot_from_store(&guard))
+    let snapshot = snapshot_from_store(&guard);
+    drop(guard);
+    emit_transfer_queue_changed(&app, &snapshot)?;
+    Ok(snapshot)
 }
 
 #[tauri::command]
@@ -217,8 +223,10 @@ pub(crate) fn retry_transfer_task(
         task.updated_at_unix_ms = now_unix_ms();
         bump_version(&mut guard)?;
     }
-    schedule_transfers(app)?;
-    snapshot()
+    schedule_transfers(app.clone())?;
+    let snapshot = snapshot()?;
+    emit_transfer_queue_changed(&app, &snapshot)?;
+    Ok(snapshot)
 }
 
 fn create_queued_task(input: TransferCreateInput) -> TransferTask {
@@ -281,7 +289,7 @@ fn spawn_transfer_worker(app: AppHandle, task: TransferTask, canceled: Arc<Atomi
         let result = execute_transfer(&app, &task, &canceled);
         match result {
             Ok(()) => {
-                if let Err(error) = mark_transfer_completed(&task_id, &canceled) {
+                if let Err(error) = mark_transfer_completed(&app, &task_id, &canceled) {
                     log::warn!("failed to complete transfer {task_id}: {error}");
                 }
                 if let Err(error) = schedule_transfers(app.clone()) {
@@ -290,7 +298,7 @@ fn spawn_transfer_worker(app: AppHandle, task: TransferTask, canceled: Arc<Atomi
             }
             Err(error) => {
                 if let Err(update_error) =
-                    mark_transfer_failed(&task_id, error.to_string(), &canceled)
+                    mark_transfer_failed(&app, &task_id, error.to_string(), &canceled)
                 {
                     log::warn!("failed to mark transfer {task_id} failed: {update_error}");
                 }
@@ -858,7 +866,7 @@ fn update_transfer_progress(task_id: &str, done: u64) -> Result<()> {
     })
 }
 
-fn mark_transfer_completed(task_id: &str, canceled: &AtomicBool) -> Result<()> {
+fn mark_transfer_completed(app: &AppHandle, task_id: &str, canceled: &AtomicBool) -> Result<()> {
     let store = transfer_store();
     let mut guard = lock_store(&store)?;
     let task = task_mut(&mut guard, task_id)?;
@@ -874,10 +882,18 @@ fn mark_transfer_completed(task_id: &str, canceled: &AtomicBool) -> Result<()> {
     task.updated_at_unix_ms = now_unix_ms();
     guard.running.remove(task_id);
     bump_version(&mut guard)?;
+    let snapshot = snapshot_from_store(&guard);
+    drop(guard);
+    emit_transfer_queue_changed(app, &snapshot)?;
     Ok(())
 }
 
-fn mark_transfer_failed(task_id: &str, error: String, canceled: &AtomicBool) -> Result<()> {
+fn mark_transfer_failed(
+    app: &AppHandle,
+    task_id: &str,
+    error: String,
+    canceled: &AtomicBool,
+) -> Result<()> {
     let store = transfer_store();
     let mut guard = lock_store(&store)?;
     let task = task_mut(&mut guard, task_id)?;
@@ -891,6 +907,9 @@ fn mark_transfer_failed(task_id: &str, error: String, canceled: &AtomicBool) -> 
     task.updated_at_unix_ms = now_unix_ms();
     guard.running.remove(task_id);
     bump_version(&mut guard)?;
+    let snapshot = snapshot_from_store(&guard);
+    drop(guard);
+    emit_transfer_queue_changed(app, &snapshot)?;
     Ok(())
 }
 
@@ -901,6 +920,17 @@ fn update_task(task_id: &str, update: impl FnOnce(&mut TransferTask) -> Result<(
     update(task)?;
     bump_version(&mut guard)?;
     Ok(())
+}
+
+fn emit_transfer_queue_changed(app: &AppHandle, snapshot: &TransferQueueSnapshot) -> Result<()> {
+    app.emit(
+        TRANSFER_QUEUE_CHANGED_EVENT,
+        TransferQueueChangedEvent {
+            version: snapshot.version,
+            snapshot: snapshot.clone(),
+        },
+    )
+    .map_err(|error| invalid_error(format!("failed to emit transfer queue change: {error}")))
 }
 
 fn lock_store(

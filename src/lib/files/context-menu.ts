@@ -1,4 +1,4 @@
-export type FilesContextMenuActionId = "rename" | "permissions" | "delete" | "copy" | "cut" | "download";
+export type FilesContextMenuActionId = "download" | "rename" | "copy" | "cut" | "permissions" | "copy_path" | "delete";
 
 export type FilesContextMenuCapabilities = {
   canChmod: boolean;
@@ -8,25 +8,30 @@ export type FilesContextMenuAction = {
   id: FilesContextMenuActionId;
   label: string;
   disabled: boolean;
+  dangerous: boolean;
 };
 
 const actionLabels: Record<FilesContextMenuActionId, string> = {
+  download: "Download",
   rename: "Rename",
-  permissions: "Permissions",
-  delete: "Delete",
   copy: "Copy",
   cut: "Cut",
-  download: "Download",
+  permissions: "Permissions",
+  copy_path: "Copy Path",
+  delete: "Delete",
 };
+
+const selectionActionOrder: FilesContextMenuActionId[] = ["download", "rename", "copy", "cut", "permissions", "copy_path", "delete"];
 
 export function filesSelectionContextMenuActions(
   selectedCount: number,
   capabilities: FilesContextMenuCapabilities,
 ): FilesContextMenuAction[] {
-  return (["rename", "permissions", "delete", "copy", "cut", "download"] as const).map((id) => ({
+  return selectionActionOrder.map((id) => ({
     id,
     label: actionLabels[id],
     disabled: filesContextMenuActionDisabled(id, selectedCount, capabilities),
+    dangerous: id === "delete",
   }));
 }
 

@@ -73,6 +73,25 @@ The default path is only a starting path. It is not a jail. Local and SFTP provi
 
 Files tool tabs cannot switch to another host or provider. Cross-host operations use Transfers, mirrors, or another workspace.
 
+Files views use the filesystem root as their model root, not the default path.
+The default path or home directory is the initial focus:
+
+- Linux and macOS local or SSH providers use `/` as the root and expand/focus
+  the default path or `$HOME` when the tool opens.
+- Windows local providers use a virtual root that contains local drive roots
+  and an asynchronously populated Network section. Local drive roots appear
+  immediately. Network/UNC enumeration must not block opening the ToolTab; if it
+  fails, only the Network section shows the failure and a retry affordance.
+- A manually entered UNC path remains valid even when asynchronous enumeration
+  does not discover it.
+
+The visible path/breadcrumb represents the current focus, not merely the
+original root. In Tree view, selecting a directory focuses that directory;
+selecting a file focuses its parent while the selection/detail state remains on
+the file. In Columns view, the focus is the rightmost effective directory in the
+column chain; selecting a file focuses the file's containing directory and adds
+a terminal preview column.
+
 ## Sessions And Cache
 
 Directory browsing sessions belong to the Files tool tab.
@@ -138,8 +157,23 @@ Tree view is a Finder-style outline table:
 - child rows are indented
 - all table columns remain available
 - selection and file operations work on visible rows
+- clicking a directory toggles expansion and selects/focuses that directory
+- double-clicking a directory is the same as clicking it; Tree view does not
+  enter a separate directory-page mode
+- the root remains part of the tree; opening a ToolTab expands the root-to-focus
+  path and scrolls the focus row into view without replacing the root with the
+  default path
 
 Directory expansion is lazy and uses the shared directory cache.
+
+Tree view supports a sticky parent layout similar to VS Code's sticky scroll for
+nested functions. When enabled, the currently visible rows' ancestor directories
+stay pinned above the scrolling table. Sticky rows are real directory row
+representations: they can be selected, right-clicked, and used as upload drop
+targets. Sticky layout is a global Files setting, enabled by default. The
+default visible ancestor count is three; settings expose a bounded level choice
+so users can reduce or increase the number of sticky rows without letting the
+sticky region consume the whole file list.
 
 ### Columns
 
@@ -147,14 +181,22 @@ Columns view is a Finder-style column browser:
 
 - each column represents one path level
 - selecting a directory opens the next column
-- selecting a file opens the preview as the third visible column by keeping the file's containing directory in the middle column
+- selecting a file opens a terminal preview column to the right of the file's
+  containing directory
 - double-clicking a directory keeps the current Columns window instead of entering that path
 - Enter opens a directory or preview
-- Backspace or Left moves toward the parent path
+- the full column chain remains horizontally scrollable, like Finder; the model
+  is not capped to three columns even though common window sizes may show around
+  three at a time
+- opening a deeper directory automatically scrolls the column strip to the
+  right so the newly opened column is visible
+- users can horizontally scroll left to inspect earlier columns without losing
+  the current selection
+- the preview column is a terminal column: it never creates another child column
+- switching within the same level replaces the affected right-side columns
+  without playing a forward/back navigation animation
 
 Column widths and horizontal scroll are view-local.
-
-The first implementation may ship a basic Columns view that shows the current path stack and the active directory's children, with full lazy sibling-column loading and preview-column behavior layered in after the core provider, transfer, and search paths are stable.
 
 ## Selection
 
@@ -174,28 +216,43 @@ Selection, active preview path, and range anchor are business state because they
 
 Right-clicking an already selected row preserves the current multi-selection and opens a context menu for that selection. Right-clicking an unselected row selects only that row before opening the context menu. Right-clicking empty space opens directory-level actions without changing the current selection.
 
+Columns view multi-selection is scoped to the active column. Ctrl/Cmd, Shift,
+and marquee selection affect only that active column; clicking another column
+clears the previous column selection and makes the clicked column active. Tree
+view may select entries across different directories because the tree is one
+expanded outline.
+
+Selection-scoped object actions do not stay permanently visible in the chrome.
+Download, Rename, Copy, Cut, Permissions, Copy Path, and Delete are exposed
+through the Files context menu and keyboard command paths, so the toolbar
+remains compact on narrow dock groups.
+
+The bottom status area shows selection summary such as `N items selected`.
+Total selected size is calculated asynchronously and omitted when it cannot be
+computed cheaply, especially on remote providers.
+
 ## Toolbar
 
-The Files toolbar includes navigation, view, and directory-level actions:
+The Files toolbar contains only directory-level or global view actions:
 
-- Up
-- Refresh
+- Upload
 - New Folder
-- Upload Files
-- Upload Folder
-- Paste
-- Search
+- Refresh
 - View mode toggle
-- Path
-- show hidden toggle
 
-Selection-scoped object actions do not belong in the toolbar. Rename, Permissions, Delete, Copy, Cut, and Download are exposed through the Files context menu and keyboard command paths instead.
+Selection-scoped object actions do not belong in the directory toolbar. Rename,
+Permissions, Copy Path, Delete, Copy, Cut, and Download are exposed through the
+Files context menu and keyboard command paths.
 
 Use icon buttons with tooltips. Enable actions based on provider capabilities and selection state.
 
-The global Files setting `files.toolbar_actions` controls which toolbar actions are shown and the display order. The setting is an ordered list of action ids. Unknown, repeated, or context-menu-only ids are ignored, and Nocturne uses the built-in default order when no configured id is usable. `view_mode` and `path` are toolbar items in the same ordered flow, so users can place or hide them like other toolbar controls.
+The global Files setting `files.toolbar_actions` controls which toolbar actions are shown and the display order. The setting is an ordered list of action ids. Unknown, repeated, legacy, or context-menu-only ids are ignored, and Nocturne uses the built-in default order when no configured id is usable. The supported directory-level ids are `upload`, `new_folder`, `refresh`, and `view_mode`.
 
-The breadcrumb/path control is a core toolbar control. It supports clickable path segments, manual path entry, and path copying.
+The breadcrumb/path control is a core Files chrome control, but it is not an
+optional toolbar action. It supports clickable path segments, manual path entry,
+and path copying. There is no Up toolbar button; navigating to a parent path is
+done through the breadcrumb, direct path entry, Tree ancestor rows, or Columns
+leftward selection.
 
 Hidden files are shown by default because remote and developer workflows often depend on dotfiles. The setting and toolbar can hide them.
 
@@ -215,8 +272,7 @@ The first implementation keeps an application-local clipboard of provider endpoi
 
 Operations:
 
-- upload files
-- upload folder
+- upload
 - download
 - rename
 - new folder
@@ -230,6 +286,35 @@ Rename only supports one selected item. Delete, Copy, Cut, Download, and Permiss
 The first release does not support Open Locally, Open Copy, or remote editing.
 
 Input operations such as New Folder, Rename, and Chmod use small Tauri dialog windows. Dangerous confirmations use native dialogs. Transfer conflicts are handled in the Transfers tool tab.
+
+Upload is a single entry point for files and directories; the UI must not split
+Upload Files and Upload Folder into separate toolbar actions. The upload target
+is resolved before transfer tasks are created:
+
+- If a Tree directory is selected, upload into that directory.
+- If a Tree file is selected, upload into the file's parent directory.
+- If Columns has a directory selected in the active column, upload into that
+  directory.
+- If Columns has a file selected, upload into that file's containing directory.
+- If Columns has no selected entry but has a focused directory column, upload
+  into that focused directory.
+- If a multi-selection has a single selected directory, upload into it.
+- If a multi-selection has a clear common parent directory, upload into that
+  common parent.
+- If an external drag/drop target is a directory row, column row, or sticky row,
+  upload into that directory.
+- If no target is clear, show a Finder-style target selection sheet. The sheet
+  starts at the current focus directory, or the Host default/home directory when
+  focus is unavailable. It must not silently choose the root.
+
+Drag/drop event handling is layered so external Tauri file drops do not fight
+with HTML pointer interactions:
+
+- dragging from empty file-list space starts marquee selection
+- dragging from selected rows is reserved for internal move/copy behavior
+- external file drops use Tauri WebView file-drop events
+- drop hover over a directory row/column/sticky row highlights only that
+  directory and shows a short upload-target hint, not a heavy insertion marker
 
 ## Delete And Trash
 
@@ -272,11 +357,14 @@ Preview cache is short-lived and keyed by provider, path, mtime, and size. It is
 
 Preview supports:
 
-- directory summary
 - text/code snippets
 - image preview
-- binary metadata
 - owner/group/permissions/size/modified metadata when available
+
+If a selected file cannot be rendered as text or image under the configured
+limits, the preview region is completely hidden. Do not keep an empty preview
+panel or a non-preview placeholder. Directory metadata belongs in selection
+details, not a persistent preview pane.
 
 ## Search
 

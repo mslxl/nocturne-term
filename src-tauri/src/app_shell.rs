@@ -114,6 +114,10 @@ const DEFAULT_WINDOW_WIDTH: f64 = 960.0;
 const DEFAULT_WINDOW_HEIGHT: f64 = 640.0;
 const MIN_WINDOW_WIDTH: f64 = 540.0;
 const MIN_WINDOW_HEIGHT: f64 = 360.0;
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+const DECORUM_TITLEBAR_REFRESH_ATTEMPTS: usize = 24;
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+const DECORUM_TITLEBAR_REFRESH_DELAY_MS: u64 = 100;
 static LAST_FOCUSED_MAIN_WINDOW: OnceLock<Mutex<String>> = OnceLock::new();
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 static DECORUM_TITLEBAR_WINDOWS: OnceLock<Mutex<std::collections::HashSet<String>>> =
@@ -1165,6 +1169,30 @@ where
 }
 
 #[cfg(any(target_os = "windows", target_os = "linux"))]
+fn apply_main_window_builder_chrome<'a, R, M>(
+    integrated: bool,
+    builder: WebviewWindowBuilder<'a, R, M>,
+) -> WebviewWindowBuilder<'a, R, M>
+where
+    R: Runtime,
+    M: Manager<R>,
+{
+    builder.decorations(!integrated)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+fn apply_main_window_builder_chrome<'a, R, M>(
+    _integrated: bool,
+    builder: WebviewWindowBuilder<'a, R, M>,
+) -> WebviewWindowBuilder<'a, R, M>
+where
+    R: Runtime,
+    M: Manager<R>,
+{
+    builder
+}
+
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 fn apply_decorum_titlebar(window: &WebviewWindow, integrated: bool) {
     if !integrated {
         if let Err(error) = window.set_decorations(true) {
@@ -1189,6 +1217,7 @@ fn apply_decorum_titlebar(window: &WebviewWindow, integrated: bool) {
         }
     };
     if !labels.insert(window.label().to_string()) {
+        schedule_decorum_titlebar_refresh(window);
         return;
     }
     if let Err(error) = window.create_overlay_titlebar() {
@@ -1204,24 +1233,48 @@ fn apply_decorum_titlebar(window: &WebviewWindow, integrated: bool) {
             );
         }
     } else {
-        if let Err(error) = window.emit("decorum-page-load", ()) {
-            log::warn!(
-                "failed to refresh decorum titlebar controls for {} after overlay setup: {error}",
-                window.label()
-            );
-        }
-        if let Err(error) = window.eval("document.dispatchEvent(new Event('DOMContentLoaded'));") {
-            log::warn!(
-                "failed to flush decorum titlebar DOMContentLoaded handlers for {}: {error}",
-                window.label()
-            );
-        }
+        schedule_decorum_titlebar_refresh(window);
     }
 }
 
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 fn apply_workspace_decorum_chrome(window: &WebviewWindow, integrated: bool) {
     apply_decorum_titlebar(window, integrated);
+}
+
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+fn schedule_decorum_titlebar_refresh(window: &WebviewWindow) {
+    let window = window.clone();
+    std::thread::spawn(move || {
+        for attempt in 0..DECORUM_TITLEBAR_REFRESH_ATTEMPTS {
+            if let Err(error) = window.emit("decorum-page-load", ()) {
+                log::warn!(
+                    "failed to request decorum titlebar refresh for {}: {error}",
+                    window.label()
+                );
+            }
+            let script = r#"
+                (() => {
+                    const controls = document.querySelectorAll("[data-tauri-decorum-tb] .decorum-tb-btn");
+                    if (controls.length >= 3) return true;
+                    document.dispatchEvent(new Event("DOMContentLoaded"));
+                    return document.querySelectorAll("[data-tauri-decorum-tb] .decorum-tb-btn").length >= 3;
+                })();
+            "#;
+            match window.eval(script) {
+                Ok(_) => {}
+                Err(error) => log::warn!(
+                    "failed to dispatch decorum titlebar bootstrap event for {}: {error}",
+                    window.label()
+                ),
+            }
+            if attempt + 1 < DECORUM_TITLEBAR_REFRESH_ATTEMPTS {
+                std::thread::sleep(std::time::Duration::from_millis(
+                    DECORUM_TITLEBAR_REFRESH_DELAY_MS,
+                ));
+            }
+        }
+    });
 }
 
 #[cfg(not(any(target_os = "windows", target_os = "linux")))]
@@ -1424,7 +1477,6 @@ pub(crate) fn open_workspace_floating_window(
         .min_inner_size(420.0, 320.0)
         .resizable(true)
         .center();
-    #[cfg(target_os = "macos")]
     let builder = apply_main_window_builder_chrome(integrated_titlebar_active(&app)?, builder);
     let window = builder.build().map_err(to_config_error)?;
     apply_workspace_decorum_chrome(&window, integrated_titlebar_active(&app)?);
@@ -2316,7 +2368,6 @@ fn open_main_window_route(app: &AppHandle, route: Option<&str>) -> Result<()> {
         .min_inner_size(MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT)
         .resizable(true)
         .center();
-    #[cfg(target_os = "macos")]
     let builder = apply_main_window_builder_chrome(integrated_titlebar_active(app)?, builder);
     let window = builder.build().map_err(to_config_error)?;
     apply_workspace_decorum_chrome(&window, integrated_titlebar_active(app)?);

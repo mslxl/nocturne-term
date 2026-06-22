@@ -36,11 +36,15 @@ test("files columns file preview third column", { timeout: 180_000 }, async () =
   const fixtureRoot = await createFilesFixture();
   const fixtureHostId = "018f6eb3-6f91-7410-bc43-f927b2236d97";
   const nativeDriverPath = optionalEnvPath("TAURI_TEST_NATIVE_DRIVER");
+  const nativeDriverPort = process.env.TAURI_TEST_NATIVE_DRIVER_PORT ?? "";
   const driverPort = Number(process.env.TAURI_TEST_DRIVER_PORT ?? "4444");
   const driverUrl = `http://127.0.0.1:${driverPort}`;
   const devUrl = process.env.TAURI_TEST_DEV_URL ?? "http://localhost:1420/";
   const devPort = Number(new URL(devUrl).port);
-  const nativeDriverArgs = nativeDriverPath ? ["--native-driver", nativeDriverPath] : [];
+  const nativeDriverArgs = [
+    ...(nativeDriverPath ? ["--native-driver", nativeDriverPath] : []),
+    ...(nativeDriverPort ? ["--native-port", nativeDriverPort] : []),
+  ];
 
   process.chdir(repoRoot);
   process.env.NOCTURNE_DEV_PORT = String(devPort);
@@ -86,30 +90,43 @@ test("files columns file preview third column", { timeout: 180_000 }, async () =
       return true;
     `);
     await waitUntil(async () => await columnsIncludeRows([["alpha"]]), pageSummary);
-    await clickColumnDirectory("alpha", 0);
+    await clickColumnDirectory("alpha");
     await waitUntil(async () => await columnsIncludeRows([["alpha"], ["beta"]]), pageSummary);
-    await clickColumnDirectory("beta", 1);
+    await clickColumnDirectory("beta");
     await waitUntil(async () => await columnsIncludeRows([["alpha"], ["beta"], ["gamma"]]), pageSummary);
-    await clickColumnDirectory("gamma", 2);
+    await clickColumnDirectory("gamma");
     await waitUntil(async () => await columnsIncludeRows([["beta"], ["gamma"], ["leaf.txt"]]), pageSummary);
-    await clickColumnFile("leaf.txt", 2);
+    await waitUntil(columnsMotionIdle, pageSummary);
+    const fileClick = await clickVisibleColumnFile("leaf.txt", 2);
+    if (!fileClick.path.endsWith("leaf.txt")) {
+      throw new Error(`Columns file click helper targeted the wrong row: ${JSON.stringify(fileClick, null, 2)}`);
+    }
+    await waitUntil(async () => {
+      const active = await execute(`
+        const row = document.querySelector('.columns-view .column-row.active-selected');
+        return row?.querySelector('.name-cell')?.textContent?.trim() ?? '';
+      `);
+      return active === "leaf.txt";
+    }, pageSummary, 3_000);
     await waitUntil(async () => {
       const measurement = await measureColumnsView();
       return measurement.previewColumnVisibleWidth >= 40;
     }, pageSummary);
 
     const measurement = await measureColumnsView();
+    const visibleColumns = measurement.columns.filter((column) => column.visibleWidth >= 40);
     const previewColumnIndex = measurement.columns.findIndex((column) => column.label === "Preview");
-    const ok = measurement.columnCount === 3 &&
-      previewColumnIndex === 2 &&
+    const visiblePreviewColumnIndex = visibleColumns.findIndex((column) => column.label === "Preview");
+    const ok = visibleColumns.length === 3 &&
+      visiblePreviewColumnIndex === 2 &&
       measurement.previewColumnVisibleWidth >= 40 &&
-      measurement.columns[0]?.rowNames.includes("gamma") &&
-      measurement.columns[1]?.rowNames.includes("leaf.txt") &&
-      !measurement.columns[2]?.rowNames.includes("leaf.txt");
+      visibleColumns[0]?.rowNames.includes("gamma") &&
+      visibleColumns[1]?.rowNames.includes("leaf.txt") &&
+      !visibleColumns[2]?.rowNames.includes("leaf.txt");
 
     if (!ok) {
       const screenshotPath = await saveScreenshot("files-columns-file-preview-third-column.png");
-      throw new Error(`Selecting a file did not render preview as the third Columns column\n${JSON.stringify({ previewColumnIndex, measurement }, null, 2)}\nscreenshot: ${screenshotPath}`);
+      throw new Error(`Selecting a file did not render preview as the third visible Columns column\n${JSON.stringify({ previewColumnIndex, visiblePreviewColumnIndex, visibleColumns, measurement }, null, 2)}\nscreenshot: ${screenshotPath}`);
     }
 
     console.log(
@@ -117,9 +134,10 @@ test("files columns file preview third column", { timeout: 180_000 }, async () =
         {
           columnCount: measurement.columnCount,
           previewColumnIndex,
+          visiblePreviewColumnIndex,
           previewColumnVisibleWidth: measurement.previewColumnVisibleWidth,
-          firstColumnText: measurement.columns[0]?.firstRowText ?? "",
-          secondColumnText: measurement.columns[1]?.firstRowText ?? "",
+          firstColumnText: visibleColumns[0]?.firstRowText ?? "",
+          secondColumnText: visibleColumns[1]?.firstRowText ?? "",
         },
         null,
         2,
@@ -163,7 +181,11 @@ test("files columns file preview third column", { timeout: 180_000 }, async () =
 
   async function columnsIncludeRows(expectedRowsByColumn) {
     const measurement = await measureColumnsView();
-    return expectedRowsByColumn.every((expectedRows, index) => expectedRows.every((row) => measurement.columns[index]?.rowNames.includes(row)));
+    const visibleColumns = measurement.columns.filter((column) => column.visibleWidth >= 40);
+    const columns = visibleColumns.length >= expectedRowsByColumn.length
+      ? visibleColumns.slice(-expectedRowsByColumn.length)
+      : measurement.columns.slice(-expectedRowsByColumn.length);
+    return expectedRowsByColumn.every((expectedRows, index) => expectedRows.every((row) => columns[index]?.rowNames.includes(row)));
   }
 
   async function measureColumnsView() {
@@ -196,24 +218,50 @@ test("files columns file preview third column", { timeout: 180_000 }, async () =
     `);
   }
 
-  async function clickColumnDirectory(name, columnIndex) {
-    const clicked = await execute(columnRowScript(name, columnIndex, "directory"));
+  async function columnsMotionIdle() {
+    return await execute(`
+      const content = document.querySelector('.columns-view .columns-content');
+      if (!content) return false;
+      const className = content.className ?? '';
+      return !className.includes('motion-forward') &&
+        !className.includes('motion-backward') &&
+        !className.includes('motion-resize') &&
+        !className.includes('motion-active') &&
+        !className.includes('motion-preparing') &&
+        !className.includes('motion-settling');
+    `);
+  }
+
+  async function clickColumnDirectory(name) {
+    const clicked = await execute(columnRowScript(name, "directory"));
     if (!clicked.clicked) {
-      throw new Error(`Columns view column ${columnIndex} did not contain directory ${name}: ${JSON.stringify(clicked, null, 2)}`);
+      throw new Error(`Columns view did not contain directory ${name}: ${JSON.stringify(clicked, null, 2)}`);
     }
   }
 
-  async function clickColumnFile(name, columnIndex) {
-    const clicked = await execute(columnRowScript(name, columnIndex, "file"));
+  async function clickVisibleColumnFile(name, visibleColumnIndex) {
+    const clicked = await execute(visibleColumnRowScript(name, visibleColumnIndex, "file"));
     if (!clicked.clicked) {
-      throw new Error(`Columns view column ${columnIndex} did not contain file ${name}: ${JSON.stringify(clicked, null, 2)}`);
+      throw new Error(`Columns view visible column ${visibleColumnIndex} did not contain file ${name}: ${JSON.stringify(clicked, null, 2)}`);
     }
+    return clicked;
   }
 
-  function columnRowScript(name, columnIndex, kind) {
+  function visibleColumnRowScript(name, visibleColumnIndex, kind) {
     return `
-      const currentPane = document.querySelector('.columns-view .columns-pane.current') ?? document.querySelector('.columns-view');
-      const column = currentPane?.querySelectorAll('.file-column')[${columnIndex}];
+      const columnsView = document.querySelector('.columns-view');
+      const viewRect = columnsView?.getBoundingClientRect();
+      const currentPane = columnsView?.querySelector('.columns-pane.current') ?? columnsView;
+      const columns = [...(currentPane?.querySelectorAll('.file-column') ?? [])]
+        .map((column) => {
+          const rect = column.getBoundingClientRect();
+          const visibleWidth = viewRect
+            ? Math.max(0, Math.min(rect.right, viewRect.right) - Math.max(rect.left, viewRect.left))
+            : 0;
+          return { column, visibleWidth };
+        })
+        .filter((item) => item.visibleWidth >= 40);
+      const column = columns[${visibleColumnIndex}]?.column;
       const rows = [...(column?.querySelectorAll('.column-row') ?? [])]
         .filter((row) => row.offsetParent !== null);
       const row = rows.find((item) =>
@@ -223,10 +271,54 @@ test("files columns file preview third column", { timeout: 180_000 }, async () =
       if (!row) {
         return {
           clicked: false,
-          rows: rows.map((item) => ({
-            kind: item.getAttribute('data-entry-kind'),
-            text: item.querySelector('.name-cell')?.textContent?.trim() ?? item.textContent?.trim() ?? '',
+          visibleColumnIndex: ${visibleColumnIndex},
+          visibleColumnCount: columns.length,
+          columns: columns.map((item) => ({
+            label: item.column.getAttribute('aria-label'),
+            visibleWidth: item.visibleWidth,
+            rows: [...item.column.querySelectorAll('.column-row')].map((rowItem) => ({
+              kind: rowItem.getAttribute('data-entry-kind'),
+              text: rowItem.querySelector('.name-cell')?.textContent?.trim() ?? rowItem.textContent?.trim() ?? '',
+            })),
           })),
+        };
+      }
+      const rect = row.getBoundingClientRect();
+      const clientX = rect.left + Math.min(24, Math.max(4, rect.width / 2));
+      const clientY = rect.top + rect.height / 2;
+      for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup", "click"]) {
+        const eventInit = { bubbles: true, cancelable: true, view: window, clientX, clientY, button: 0, buttons: type.endsWith("down") ? 1 : 0 };
+        row.dispatchEvent(type.startsWith("pointer")
+          ? new PointerEvent(type, { ...eventInit, pointerId: 1, pointerType: "mouse", isPrimary: true })
+          : new MouseEvent(type, eventInit));
+      }
+      return {
+        clicked: true,
+        path: row.getAttribute('data-entry-path'),
+        activeAfterClick: document.querySelector('.columns-view .column-row.active-selected')?.getAttribute('data-entry-path') ?? '',
+      };
+    `;
+  }
+
+  function columnRowScript(name, kind) {
+    return `
+      const currentPane = document.querySelector('.columns-view .columns-pane.current') ?? document.querySelector('.columns-view');
+      const columns = [...(currentPane?.querySelectorAll('.file-column') ?? [])];
+      const rowsByColumn = columns.map((column) => [...column.querySelectorAll('.column-row')].filter((row) => row.offsetParent !== null));
+      const rows = rowsByColumn.flat();
+      const row = rows.find((item) =>
+        item.getAttribute('data-entry-kind') === ${JSON.stringify(kind)} &&
+        item.querySelector('.name-cell')?.textContent?.trim() === ${JSON.stringify(name)}
+      );
+      if (!row) {
+        return {
+          clicked: false,
+          columns: rowsByColumn.map((columnRows) =>
+            columnRows.map((item) => ({
+              kind: item.getAttribute('data-entry-kind'),
+              text: item.querySelector('.name-cell')?.textContent?.trim() ?? item.textContent?.trim() ?? '',
+            }))
+          ),
         };
       }
       row.click();
@@ -348,6 +440,17 @@ test("files columns file preview third column", { timeout: 180_000 }, async () =
         title: document.title,
         url: location.href,
         columnsViewExists: document.querySelector('.columns-view') !== null,
+        activeRows: [...document.querySelectorAll('.columns-view .column-row.active-selected')].map((row) => ({
+          name: row.querySelector('.name-cell')?.textContent?.trim() ?? '',
+          path: row.getAttribute('data-entry-path') ?? '',
+          kind: row.getAttribute('data-entry-kind') ?? '',
+        })),
+        selectedRows: [...document.querySelectorAll('.columns-view .column-row.selected, .columns-view .column-row.multi-selected')].map((row) => ({
+          name: row.querySelector('.name-cell')?.textContent?.trim() ?? '',
+          path: row.getAttribute('data-entry-path') ?? '',
+          kind: row.getAttribute('data-entry-kind') ?? '',
+          className: row.className,
+        })),
         filesText: document.querySelector('.files-tooltab')?.textContent?.slice(0, 1000) ?? '',
       };
     `).then((summary) => JSON.stringify(summary, null, 2));

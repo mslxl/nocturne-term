@@ -109,8 +109,13 @@ standard system title bar.
 macOS uses the native overlay title bar and traffic-light positioning already
 used by the app. Windows and Linux use `tauri-plugin-decorum` with
 platform-default controls so Snap Layout and native window interactions remain
-available. If decorum fails to create its overlay, the app logs a warning and
-keeps the standard system title bar.
+available. Workspace windows start without the standard visual titlebar
+decoration while this setting is enabled, and the Workspace titlebar slot
+mounts the decorum controls after the WebView content loads. Dev URL / HMR
+launches such as `pnpm tauri dev` must also request decorum bootstrap from the
+mounted slot because the plugin's page-load event can arrive before Svelte has
+rendered the final titlebar. If decorum fails to create its overlay, the app
+logs a warning and keeps the standard system title bar.
 
 On Windows and Linux, decorum's overlay can replace the visual space where a
 traditional menu bar would normally sit. To keep the integrated visual effect
@@ -215,7 +220,9 @@ Settings should expose:
 - remote helper policy controls managed helper upload decisions, including Resource Monitor's `nocturne-resource-monitor-agent` and Files search's managed `rg` helper after probing for an existing remote `rg`
 - text preview size threshold, default 1 MiB
 - image preview size threshold, default 10 MiB
-- toolbar action visibility and order as one action id per line: `up`, `refresh`, `new_folder`, `paste`, `upload_files`, `upload_folder`, `search`, `view_mode`, `path`; selection-scoped file actions such as rename, permissions, delete, copy, cut, and download belong to the Files context menu and are ignored in toolbar settings
+- Tree sticky parent directories: enabled by default
+- Tree sticky parent directory levels: bounded choice, default 3
+- toolbar action visibility and order as one action id per line: `upload`, `new_folder`, `refresh`, `view_mode`; legacy navigation, paste, search, split upload, path, and selection-scoped file action ids are ignored
 - global transfer concurrency, default 3
 - per-host transfer concurrency, default 2
 

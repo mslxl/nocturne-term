@@ -352,7 +352,9 @@ clipboard_semantics = "windows" # windows | finder
 remote_helper_policy = "ask" # ask | never | allow
 text_preview_limit_bytes = 1048576
 image_preview_limit_bytes = 10485760
-toolbar_actions = ["up", "refresh", "new_folder", "paste", "upload_files", "upload_folder", "search", "view_mode", "path"]
+toolbar_actions = ["upload", "new_folder", "refresh", "view_mode"]
+tree_sticky_enabled = true
+tree_sticky_max_levels = 3
 
 [resources]
 default_refresh_interval = "2s" # 1s | 2s | 5s | 10s
@@ -438,9 +440,14 @@ layouts keep the standard system title bar.
 
 macOS uses the existing native overlay title bar and positions the traffic-light
 controls around the Workspace tabs. Windows and Linux use
-`tauri-plugin-decorum` with platform-default window controls. If decorum cannot
-create its overlay title bar, Nocturne logs a warning and falls back to the
-standard system title bar without blocking startup.
+`tauri-plugin-decorum` with platform-default window controls. Workspace windows
+are created without the standard visual titlebar decoration when integrated
+chrome is active, then decorum injects the window control buttons into the
+Workspace titlebar slot. In dev URL / HMR runs such as `pnpm tauri dev`, the
+Workspace slot also asks decorum to re-run its page-load bootstrap after the
+Svelte titlebar has mounted so the controls do not disappear due to load-order
+timing. If decorum cannot create its overlay title bar, Nocturne logs a warning
+and falls back to the standard system title bar without blocking startup.
 
 Windows and Linux integrated title bars keep app menu functionality by showing
 only the `File`, `Edit`, `View`, and `Window` root buttons in the WebView

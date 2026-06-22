@@ -3,24 +3,30 @@
  * Test content:
  *
  * Feature:
- * Verifies that the Finder-style Files Columns view keeps a stable three-column
- * window with visible content in a real Tauri WebView.
+ * Verifies that the Finder-style Files Columns view starts from the filesystem
+ * root, focuses the configured home/default directory, and keeps a stable
+ * three-column window with visible content in a real Tauri WebView.
  *
  * Operation:
  * Creates a temporary local file fixture with nested alpha, beta, and gamma
  * directories, configures a temporary Local Host as the default Workspace host,
  * starts the Vite dev server, starts tauri-driver, launches the Tauri
  * application provided by TAURI_TEST_APPLICATION, switches the Files ToolTab to
- * Columns view, clicks alpha in the first column, clicks beta in the second
- * column, clicks gamma in the third column while sampling animation frames,
- * measures the rendered Columns view, and captures a screenshot if the
- * measurement or motion sampling fails.
+ * Columns view, verifies that earlier root/path columns exist before the
+ * fixture directory column, verifies that the parent directory column includes
+ * both the fixture directory and a sibling directory, clicks alpha, beta, and
+ * gamma wherever those directories appear in the current column chain while
+ * sampling animation frames, measures the rendered Columns view, and captures
+ * a screenshot if the measurement or motion sampling fails.
  *
  * Expected:
- * Columns view opens directory children to the right, shifts the visible window
- * after the third directory click with measurable horizontal motion, never
- * renders an empty or missing column frame during the shift, and settles back to
- * exactly three directory columns visibly inside the Columns viewport.
+ * Columns view opens from root instead of using home as the model root, keeps
+ * Windows drive roots and parent directory siblings visible instead of
+ * collapsing the model to the configured default path, opens directory
+ * children to the right, shifts the visible window on the first directory
+ * click and after deeper clicks with measurable horizontal motion, never
+ * renders an empty or missing column frame during the shift, and settles with
+ * three useful directory columns visibly inside the Columns viewport.
  */
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
@@ -36,14 +42,19 @@ test("files columns view shows content", { timeout: 180_000 }, async () => {
   const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
   const appPath = requiredEnvPath("TAURI_TEST_APPLICATION");
   const isolatedAppConfig = await createIsolatedAppConfigEnv("files-columns-view-content");
-  const fixtureRoot = await createFilesFixture();
+  const fixture = await createFilesFixture();
+  const fixtureRoot = fixture.root;
   const fixtureHostId = "018f6eb3-6f91-7410-bc43-f927b2236d94";
   const nativeDriverPath = optionalEnvPath("TAURI_TEST_NATIVE_DRIVER");
+  const nativeDriverPort = process.env.TAURI_TEST_NATIVE_DRIVER_PORT ?? "";
   const driverPort = Number(process.env.TAURI_TEST_DRIVER_PORT ?? "4444");
   const driverUrl = `http://127.0.0.1:${driverPort}`;
   const devUrl = process.env.TAURI_TEST_DEV_URL ?? "http://localhost:1420/";
   const devPort = Number(new URL(devUrl).port);
-  const nativeDriverArgs = nativeDriverPath ? ["--native-driver", nativeDriverPath] : [];
+  const nativeDriverArgs = [
+    ...(nativeDriverPath ? ["--native-driver", nativeDriverPath] : []),
+    ...(nativeDriverPort ? ["--native-port", nativeDriverPort] : []),
+  ];
 
   process.chdir(repoRoot);
   process.env.NOCTURNE_DEV_PORT = String(devPort);
@@ -91,26 +102,48 @@ test("files columns view shows content", { timeout: 180_000 }, async () => {
     await waitUntil(async () => await execute("return document.querySelector('.columns-view') !== null;"), pageSummary);
     await waitUntil(async () => {
       const measurement = await measureColumnsView();
-      return measurement.columnCount >= 1 && measurement.columns[0]?.rowNames.includes("alpha");
+      return measurement.columnCount >= 2 && measurement.columns.some((column) => column.rowNames.includes("alpha"));
     }, pageSummary);
-    await clickColumnDirectory("alpha", 0);
+    const initialMeasurement = await measureColumnsView();
+    if (initialMeasurement.columns[0]?.rowNames.includes("alpha")) {
+      throw new Error(`Columns view used the fixture home/default directory as the root column instead of showing the filesystem root chain\n${JSON.stringify(initialMeasurement, null, 2)}`);
+    }
+    const rootChain = await assertRootChainContainsParentSibling();
+    if (!rootChain.hasVirtualRoot) {
+      throw new Error(`Columns view did not keep the filesystem virtual root as the first model column\n${JSON.stringify(rootChain, null, 2)}`);
+    }
+    if (!rootChain.hasDriveColumn) {
+      throw new Error(`Columns view did not show a Windows drive-root column such as C: or D:\n${JSON.stringify(rootChain, null, 2)}`);
+    }
+    if (!rootChain.driveColumnHasRootSiblings) {
+      throw new Error(`Columns view did not keep real drive-root children visible between the virtual root and default path\n${JSON.stringify(rootChain, null, 2)}`);
+    }
+    const firstMotion = await captureColumnDirectoryMotion("alpha", {
+      expectedRowsByColumn: [],
+      requireHorizontalTravel: true,
+    });
+    if (!firstMotion.ok) {
+      const screenshotPath = await saveScreenshot("files-columns-view-first-click-motion.png");
+      throw new Error(`${firstMotion.reason}\n${JSON.stringify(firstMotion, null, 2)}\nscreenshot: ${screenshotPath}`);
+    }
     await waitUntil(async () => {
       const measurement = await measureColumnsView();
-      return measurement.columnCount >= 2 && measurement.columns[1]?.rowNames.includes("beta");
+      return measurement.columns.some((column) => column.rowNames.includes("beta"));
     }, pageSummary);
-    await clickColumnDirectory("beta", 1);
+    await clickColumnDirectory("beta");
     await waitUntil(async () => {
       const measurement = await measureColumnsView();
-      return measurement.columnCount >= 3 && measurement.columns[2]?.rowNames.includes("gamma");
+      return measurement.columns.some((column) => column.rowNames.includes("gamma"));
     }, pageSummary);
-    const motion = await captureColumnDirectoryMotion("gamma", 2);
+    const motion = await captureColumnDirectoryMotion("gamma");
     if (!motion.ok) {
       const screenshotPath = await saveScreenshot("files-columns-view-motion.png");
       throw new Error(`${motion.reason}\n${JSON.stringify(motion, null, 2)}\nscreenshot: ${screenshotPath}`);
     }
     await waitUntil(async () => {
       const measurement = await measureColumnsView();
-      return measurement.columnCount === 3 && measurement.columns[2]?.rowNames.includes("leaf.txt");
+      const visibleColumns = measurement.columns.filter((column) => column.visibleWidth >= 40);
+      return visibleColumns.length >= 3 && visibleColumns.at(-1)?.rowNames.includes("leaf.txt");
     }, pageSummary);
 
     const measurement = await measureColumnsView();
@@ -122,6 +155,8 @@ test("files columns view shows content", { timeout: 180_000 }, async () => {
       `tauri files Columns view content test passed\n${JSON.stringify(
         {
           ...measurement.summary,
+          rootChain,
+          firstClickHorizontalTravel: firstMotion.horizontalTravel,
           horizontalTravel: motion.horizontalTravel,
           motionSampleCount: motion.sampleCount,
         },
@@ -136,17 +171,26 @@ test("files columns view shows content", { timeout: 180_000 }, async () => {
     stopProcess(tauriDriver);
     await devServer.close();
     await isolatedAppConfig.cleanup();
-    await rm(fixtureRoot, { recursive: true, force: true });
+    await rm(fixture.parent, { recursive: true, force: true });
   }
 
   async function createFilesFixture() {
-    const root = await mkdtemp(join(tmpdir(), "nocturne-files-columns-"));
+    const parent = await mkdtemp(join(tmpdir(), "nocturne-files-columns-parent-"));
+    const root = join(parent, "focus-root");
+    const sibling = join(parent, "parent-sibling");
+    await mkdir(root, { recursive: true });
+    await mkdir(sibling, { recursive: true });
     await mkdir(join(root, "alpha", "beta", "gamma"), { recursive: true });
     await writeFile(join(root, "alpha", "beta", "gamma", "leaf.txt"), "leaf content\n");
     await writeFile(join(root, "alpha", "beta", "beta-note.txt"), "beta content\n");
     await writeFile(join(root, "alpha", "readme.txt"), "alpha content\n");
     await writeFile(join(root, "sibling.txt"), "sibling content\n");
-    return root;
+    return {
+      parent,
+      root,
+      rootName: "focus-root",
+      siblingName: "parent-sibling",
+    };
   }
 
   async function configureFixtureHost() {
@@ -203,27 +247,24 @@ test("files columns view shows content", { timeout: 180_000 }, async () => {
       return {
         ok: columns.length >= 3 &&
           visibleRows > 0 &&
-          columns.length === 3 &&
-          columns[0].rowNames.includes('beta') &&
-          columns[1].rowNames.includes('gamma') &&
-          columns[2].rowNames.includes('leaf.txt') &&
-          visibleColumns.length >= 3,
+          visibleColumns.length >= 3 &&
+          visibleColumns.at(-3)?.rowNames.includes('beta') &&
+          visibleColumns.at(-2)?.rowNames.includes('gamma') &&
+          visibleColumns.at(-1)?.rowNames.includes('leaf.txt'),
         reason: columns.length === 0
           ? 'Columns view has no file-column sections'
           : columns.length < 3
             ? 'Columns view did not show three directory columns'
-          : columns.length > 3
-            ? 'Columns view added more than three columns after deeper navigation'
           : visibleRows === 0
             ? 'Columns view has no visible rows'
-            : !columns[0].rowNames.includes('beta')
+            : visibleColumns.length < 3
+              ? 'Columns view does not keep three directory columns visibly inside the viewport'
+            : !visibleColumns.at(-3)?.rowNames.includes('beta')
               ? 'Columns view did not shift the first visible column to alpha children'
-              : !columns[1].rowNames.includes('gamma')
+              : !visibleColumns.at(-2)?.rowNames.includes('gamma')
                 ? 'Columns view did not shift the second visible column to beta children'
-                : !columns[2].rowNames.includes('leaf.txt')
+                : !visibleColumns.at(-1)?.rowNames.includes('leaf.txt')
                   ? 'Columns view did not open gamma children in the third column'
-                  : visibleColumns.length < 3
-                    ? 'Columns view does not keep three directory columns visibly inside the viewport'
               : '',
         columnCount: columns.length,
         previewColumnVisibleWidth: previewColumn?.visibleWidth ?? 0,
@@ -231,12 +272,12 @@ test("files columns view shows content", { timeout: 180_000 }, async () => {
           columnCount: columns.length,
           visibleColumnCount: visibleColumns.length,
           visibleRows,
-          firstColumnRows: columns[0]?.rowCount ?? 0,
-          firstColumnText: columns[0]?.firstRowText ?? '',
-          secondColumnRows: columns[1]?.rowCount ?? 0,
-          secondColumnText: columns[1]?.firstRowText ?? '',
-          thirdColumnRows: columns[2]?.rowCount ?? 0,
-          thirdColumnText: columns[2]?.firstRowText ?? '',
+          firstColumnRows: visibleColumns.at(-3)?.rowCount ?? 0,
+          firstColumnText: visibleColumns.at(-3)?.firstRowText ?? '',
+          secondColumnRows: visibleColumns.at(-2)?.rowCount ?? 0,
+          secondColumnText: visibleColumns.at(-2)?.firstRowText ?? '',
+          thirdColumnRows: visibleColumns.at(-1)?.rowCount ?? 0,
+          thirdColumnText: visibleColumns.at(-1)?.firstRowText ?? '',
           previewColumnWidth: previewColumn?.width ?? 0,
           previewColumnVisibleWidth: previewColumn?.visibleWidth ?? 0,
           firstColumnSelected: columns[0]?.selectedRows ?? [],
@@ -246,46 +287,93 @@ test("files columns view shows content", { timeout: 180_000 }, async () => {
     `);
   }
 
-  async function clickColumnDirectory(name, columnIndex) {
+  async function clickColumnDirectory(name) {
     const clicked = await execute(`
       const currentPane = document.querySelector('.columns-view .columns-pane.current') ?? document.querySelector('.columns-view');
-      const column = currentPane?.querySelectorAll('.file-column')[${columnIndex}];
-      const rows = [...(column?.querySelectorAll('.column-row') ?? [])]
-        .filter((row) => row.offsetParent !== null);
-      const directory = rows.find((row) =>
-        row.getAttribute('data-entry-kind') === 'directory' &&
-        row.querySelector('.name-cell')?.textContent?.trim() === ${JSON.stringify(name)}
-      );
+      const columns = [...(currentPane?.querySelectorAll('.file-column') ?? [])];
+      const rowsByColumn = columns.map((column, index) => ({
+        index,
+        label: column.getAttribute('aria-label'),
+        rows: [...column.querySelectorAll('.column-row')].filter((row) => row.offsetParent !== null),
+      }));
+      let directory = null;
+      let matchedColumn = null;
+      for (const column of rowsByColumn) {
+        directory = column.rows.find((row) =>
+          row.getAttribute('data-entry-kind') === 'directory' &&
+          row.querySelector('.name-cell')?.textContent?.trim() === ${JSON.stringify(name)}
+        );
+        if (directory) {
+          matchedColumn = column;
+          break;
+        }
+      }
       if (!directory) {
         return {
           clicked: false,
-          rowCount: rows.length,
-          rows: rows.slice(0, 10).map((row) => ({
-            text: row.textContent?.trim() ?? '',
-            kind: row.getAttribute('data-entry-kind'),
-            path: row.getAttribute('data-entry-path'),
+          columns: rowsByColumn.map((column) => ({
+            index: column.index,
+            label: column.label,
+            rows: column.rows.slice(0, 10).map((row) => ({
+              text: row.textContent?.trim() ?? '',
+              kind: row.getAttribute('data-entry-kind'),
+              path: row.getAttribute('data-entry-path'),
+            })),
           })),
         };
       }
       directory.click();
       return {
         clicked: true,
+        columnIndex: matchedColumn?.index ?? -1,
+        columnLabel: matchedColumn?.label ?? '',
         text: directory.textContent?.trim() ?? '',
         path: directory.getAttribute('data-entry-path'),
       };
     `);
     if (!clicked.clicked) {
-      throw new Error(`Columns view column ${columnIndex} did not contain directory ${name}: ${JSON.stringify(clicked, null, 2)}`);
+      throw new Error(`Columns view did not contain directory ${name}: ${JSON.stringify(clicked, null, 2)}`);
     }
   }
 
-  async function captureColumnDirectoryMotion(name, columnIndex) {
+  async function assertRootChainContainsParentSibling() {
+    await waitUntil(async () => {
+      const measurement = await measureColumnsView();
+      return measurement.columns.some((column) =>
+        column.rowNames.includes(fixture.rootName) &&
+        column.rowNames.includes(fixture.siblingName)
+      );
+    }, pageSummary);
+    const measurement = await measureColumnsView();
+    const parentColumn = measurement.columns.find((column) =>
+      column.rowNames.includes(fixture.rootName) &&
+      column.rowNames.includes(fixture.siblingName)
+    );
+    if (!parentColumn) {
+      throw new Error(`Columns view did not preload the default path parent siblings\n${JSON.stringify(measurement, null, 2)}`);
+    }
+    const hasDriveColumn = measurement.columns.some((column) =>
+      column.rowNames.some((name) => /^[A-Z]:$/i.test(name))
+    );
+    const driveColumn = measurement.columns.find((column) => /^[A-Z]:$/i.test(String(column.label ?? "")));
+    return {
+      hasVirtualRoot: measurement.columns[0]?.label === "/",
+      hasDriveColumn,
+      driveColumnHasRootSiblings: Boolean(driveColumn && driveColumn.rowNames.length > 1 && !driveColumn.rowNames.includes(fixture.rootName)),
+      driveColumnRows: driveColumn?.rowNames.slice(0, 20) ?? [],
+      parentColumnRows: parentColumn.rowNames,
+      columnLabels: measurement.columns.map((column) => column.label),
+    };
+  }
+
+  async function captureColumnDirectoryMotion(name, options = {}) {
     return await executeAsync(`
       const done = arguments[arguments.length - 1];
+      const expectedRowsByColumn = ${JSON.stringify(options.expectedRowsByColumn ?? [["beta"], ["gamma"], ["leaf.txt"]])};
+      const requireHorizontalTravel = ${JSON.stringify(options.requireHorizontalTravel ?? true)};
       const view = document.querySelector('.columns-view');
       const currentPane = document.querySelector('.columns-view .columns-pane.current') ?? document.querySelector('.columns-view');
-      const column = currentPane?.querySelectorAll('.file-column')[${columnIndex}];
-      const rows = [...(column?.querySelectorAll('.column-row') ?? [])]
+      const rows = [...(currentPane?.querySelectorAll('.column-row') ?? [])]
         .filter((row) => row.offsetParent !== null);
       const directory = rows.find((row) =>
         row.getAttribute('data-entry-kind') === 'directory' &&
@@ -307,7 +395,7 @@ test("files columns view shows content", { timeout: 180_000 }, async () => {
         const content = columnsView?.querySelector('.columns-content');
         const viewRect = columnsView?.getBoundingClientRect();
         const contentRect = content?.getBoundingClientRect();
-        const columns = [...(columnsView?.querySelectorAll('.file-column') ?? [])].map((item) => {
+        const mapColumn = (item) => {
           const rect = item.getBoundingClientRect();
           const visibleWidth = viewRect
             ? Math.max(0, Math.min(rect.right, viewRect.right) - Math.max(rect.left, viewRect.left))
@@ -324,7 +412,10 @@ test("files columns view shows content", { timeout: 180_000 }, async () => {
             rowCount: rowNames.length,
             rowNames,
           };
-        });
+        };
+        const currentPane = columnsView?.querySelector('.columns-pane.current') ?? columnsView;
+        const columns = [...(currentPane?.querySelectorAll('.file-column') ?? [])].map(mapColumn);
+        const allColumns = [...(columnsView?.querySelectorAll('.file-column') ?? [])].map(mapColumn);
         samples.push({
           elapsed: performance.now() - started,
           viewExists: Boolean(columnsView),
@@ -337,8 +428,12 @@ test("files columns view shows content", { timeout: 180_000 }, async () => {
           columnCount: columns.length,
           visibleColumnCount: columns.filter((item) => item.visibleWidth >= 24).length,
           rowTotal: columns.reduce((total, item) => total + item.rowCount, 0),
+          allColumnCount: allColumns.length,
+          allVisibleColumnCount: allColumns.filter((item) => item.visibleWidth >= 24).length,
+          allRowTotal: allColumns.reduce((total, item) => total + item.rowCount, 0),
           labels: columns.map((item) => item.label),
           columns,
+          allColumns,
         });
       };
 
@@ -360,18 +455,25 @@ test("files columns view shows content", { timeout: 180_000 }, async () => {
           : 0;
         const emptyFrame = samples.find((item) =>
           !item.viewExists ||
-          item.columnCount === 0 ||
-          item.visibleColumnCount === 0 ||
-          item.rowTotal === 0
+          item.allColumnCount === 0 ||
+          item.allVisibleColumnCount === 0 ||
+          item.allRowTotal === 0
         );
         const final = samples[samples.length - 1];
-        const finalStable = final?.columnCount === 3 &&
-          final.columns[0]?.rowNames.includes('beta') &&
-          final.columns[1]?.rowNames.includes('gamma') &&
-          final.columns[2]?.rowNames.includes('leaf.txt');
+        const finalColumns = final?.columns ?? [];
+        const finalVisibleColumns = finalColumns.filter((column) => column.visibleWidth >= 24);
+        const finalColumnsForExpectation = finalVisibleColumns.length >= 3 ? finalVisibleColumns.slice(-3) : finalColumns.slice(-3);
+        const finalStable = expectedRowsByColumn.length === 0 || (
+          finalColumnsForExpectation.length >= expectedRowsByColumn.length &&
+          expectedRowsByColumn.every((expectedNames, index) => {
+            const column = finalColumnsForExpectation[finalColumnsForExpectation.length - expectedRowsByColumn.length + index];
+            return expectedNames.every((expectedName) => column?.rowNames.includes(expectedName));
+          })
+        );
+        const motionOk = !requireHorizontalTravel || horizontalTravel >= 24;
         done({
-          ok: horizontalTravel >= 24 && !emptyFrame && finalStable,
-          reason: horizontalTravel < 24
+          ok: motionOk && !emptyFrame && finalStable,
+          reason: !motionOk
             ? 'Columns view did not produce measurable horizontal slide motion'
             : emptyFrame
               ? 'Columns view flickered through an empty or missing frame'

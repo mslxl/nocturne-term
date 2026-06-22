@@ -766,6 +766,11 @@ export type TransferEndpoint = {
 
 export type TransferEndpointKind = "local" | "provider";
 
+export type TransferQueueChangedEvent = {
+	version: number,
+	snapshot: TransferQueueSnapshot,
+};
+
 export type TransferQueueSnapshot = {
 	version: number,
 	tasks: TransferTask[],
