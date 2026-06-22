@@ -905,7 +905,8 @@ fn deploy_resource_helper_if_needed(
                     .map_err(|_| invalid_error("resource helper deployment memory is poisoned"))?;
                 if !memory_guard.record_pending_prompt(&host.id, plan.manifest.clone()) {
                     return Ok(ResourceHelperDeploymentRuntime::Unavailable {
-                        reason: "Waiting for Resource Monitor helper upload confirmation".to_string(),
+                        reason: "Waiting for Resource Monitor helper upload confirmation"
+                            .to_string(),
                     });
                 }
             }
@@ -1465,7 +1466,11 @@ pub fn parse_linux_proc_stat_cpu(output: &str) -> Result<LocalResourceMetric> {
     let mut aggregate_percent = None;
     let mut core_percents = Vec::new();
 
-    for line in output.lines().map(str::trim).filter(|line| !line.is_empty()) {
+    for line in output
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+    {
         let Some((label, values)) = parse_linux_proc_stat_cpu_row(line)? else {
             continue;
         };
@@ -1477,8 +1482,9 @@ pub fn parse_linux_proc_stat_cpu(output: &str) -> Result<LocalResourceMetric> {
         }
     }
 
-    let aggregate_percent = aggregate_percent
-        .ok_or_else(|| invalid_error("Linux /proc/stat output did not include aggregate cpu row"))?;
+    let aggregate_percent = aggregate_percent.ok_or_else(|| {
+        invalid_error("Linux /proc/stat output did not include aggregate cpu row")
+    })?;
     Ok(normalize_cpu_metric(aggregate_percent, core_percents))
 }
 
@@ -1524,9 +1530,9 @@ fn linux_proc_stat_cpu_percent(values: &[u64], label: &str) -> Result<f64> {
 }
 
 fn is_linux_proc_stat_core_label(label: &str) -> bool {
-    label.strip_prefix("cpu").is_some_and(|suffix| {
-        !suffix.is_empty() && suffix.chars().all(|ch| ch.is_ascii_digit())
-    })
+    label
+        .strip_prefix("cpu")
+        .is_some_and(|suffix| !suffix.is_empty() && suffix.chars().all(|ch| ch.is_ascii_digit()))
 }
 
 pub fn parse_linux_free_b(output: &str) -> Result<Vec<LocalResourceMetric>> {
@@ -1654,10 +1660,11 @@ pub fn parse_unix_disk_df(has_filesystem_type: bool, output: &str) -> Result<Loc
         if is_pseudo_disk_mount(device_name, file_system) {
             continue;
         }
-        let total = parse_u64_field(parts.get(total_index), "df total blocks")?.saturating_mul(1024);
+        let total =
+            parse_u64_field(parts.get(total_index), "df total blocks")?.saturating_mul(1024);
         let used = parse_u64_field(parts.get(used_index), "df used blocks")?.saturating_mul(1024);
-        let available =
-            parse_u64_field(parts.get(available_index), "df available blocks")?.saturating_mul(1024);
+        let available = parse_u64_field(parts.get(available_index), "df available blocks")?
+            .saturating_mul(1024);
         if total == 0 {
             continue;
         }

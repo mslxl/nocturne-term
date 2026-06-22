@@ -5,7 +5,7 @@ use std::{
     net::{TcpListener, TcpStream},
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc::{self, Receiver, Sender},
         Arc, Mutex, OnceLock,
     },
@@ -37,12 +37,12 @@ use crate::{
         ConnectionProtocol, CreateHostTerminalSessionInput, ExistingTerminalSessionInput,
         LocalConnectionConfig, SshAuthTarget, SshConnectionConfig, SshCredentialChallenge,
         SshCredentialInput, SshCredentialKind, SshHostKeyChallenge, SshHostKeyChallengeKind,
-        SshWorkspaceChallenge, TabBarOrientation, TerminalColorSchemeVariant, TerminalCursorStyle,
-        TerminalExitEvent, TerminalInput, TerminalOutputBacklogInput, TerminalOutputEvent,
-        TerminalPadding, TerminalRenderer, TerminalSessionInfo, TerminalSessionOwnershipInput,
-        TerminalSettings, TerminalSettingsInput, TerminalSizeInput, TerminalTheme,
-        TerminalTransportKind, TerminalTransportState, TerminalTransportStateEvent,
-        WorkspaceSshVerificationResponse,
+        SshHostScopedChallenge, SshWorkspaceChallenge, TabBarOrientation,
+        TerminalColorSchemeVariant, TerminalCursorStyle, TerminalExitEvent, TerminalInput,
+        TerminalOutputBacklogInput, TerminalOutputEvent, TerminalPadding, TerminalRenderer,
+        TerminalSessionInfo, TerminalSessionOwnershipInput, TerminalSettings,
+        TerminalSettingsInput, TerminalSizeInput, TerminalTheme, TerminalTransportKind,
+        TerminalTransportState, TerminalTransportStateEvent, WorkspaceSshVerificationResponse,
     },
     workspace,
     workspace_ssh::{
@@ -800,11 +800,24 @@ pub(crate) struct SshWorkerInput {
     pub(crate) update_changed_host_key: bool,
     pub(crate) credential: Option<SshCredentialInput>,
     pub(crate) save_credential: bool,
+    pub(crate) verification_scope: SshVerificationScope,
+}
+
+#[derive(Clone)]
+pub(crate) enum SshVerificationScope {
+    Workspace,
+    HostPortForward { host_id: String },
 }
 
 struct PreparedSshSession {
     channel: Channel,
     jump_guards: Vec<thread::JoinHandle<()>>,
+}
+
+pub(crate) struct AuthenticatedSshSession {
+    pub(crate) session: Session,
+    pub(crate) jump_guards: Vec<thread::JoinHandle<()>>,
+    pub(crate) tcp_mode: TcpStream,
 }
 
 pub(crate) struct ProxyJumpChain {
@@ -851,6 +864,38 @@ fn run_ssh_worker(
 }
 
 fn prepare_ssh_session(input: &SshWorkerInput) -> Result<PreparedSshSession> {
+    let authenticated = connect_authenticated_ssh_session(input)?;
+    let mut channel = authenticated
+        .session
+        .channel_session()
+        .map_err(terminal_error)?;
+    channel
+        .request_pty(
+            "xterm-256color",
+            None,
+            Some((
+                input.size.cols as u32,
+                input.size.rows as u32,
+                input.size.pixel_width as u32,
+                input.size.pixel_height as u32,
+            )),
+        )
+        .map_err(terminal_error)?;
+    channel.shell().map_err(terminal_error)?;
+    authenticated
+        .tcp_mode
+        .set_nonblocking(true)
+        .map_err(terminal_error)?;
+    authenticated.session.set_blocking(false);
+    Ok(PreparedSshSession {
+        channel,
+        jump_guards: authenticated.jump_guards,
+    })
+}
+
+pub(crate) fn connect_authenticated_ssh_session(
+    input: &SshWorkerInput,
+) -> Result<AuthenticatedSshSession> {
     let mut jump_guards = Vec::new();
     let tcp = if let Some(proxy_jump_chain) = input.proxy_jump_chain.as_deref() {
         let chain = connect_proxy_jump_chain(input, proxy_jump_chain)?;
@@ -873,28 +918,13 @@ fn prepare_ssh_session(input: &SshWorkerInput) -> Result<PreparedSshSession> {
     session.handshake().map_err(terminal_error)?;
     update_ssh_input_transport_state(input, TerminalTransportState::VerifyingHostKey);
     verify_ssh_host_key(&session, &input)?;
+    update_ssh_input_transport_state(input, TerminalTransportState::Authenticating);
     authenticate_ssh_session(&session, input)?;
     update_ssh_input_transport_state(input, TerminalTransportState::Connected);
-
-    let mut channel = session.channel_session().map_err(terminal_error)?;
-    channel
-        .request_pty(
-            "xterm-256color",
-            None,
-            Some((
-                input.size.cols as u32,
-                input.size.rows as u32,
-                input.size.pixel_width as u32,
-                input.size.pixel_height as u32,
-            )),
-        )
-        .map_err(terminal_error)?;
-    channel.shell().map_err(terminal_error)?;
-    tcp_mode.set_nonblocking(true).map_err(terminal_error)?;
-    session.set_blocking(false);
-    Ok(PreparedSshSession {
-        channel,
+    Ok(AuthenticatedSshSession {
+        session,
         jump_guards,
+        tcp_mode,
     })
 }
 
@@ -972,6 +1002,7 @@ fn connect_proxy_jump_hop(
         update_changed_host_key: input.update_changed_host_key,
         credential: None,
         save_credential: input.save_credential,
+        verification_scope: input.verification_scope.clone(),
     };
     verify_ssh_host_key(&jump_session, &jump_input)?;
     authenticate_ssh_session(&jump_session, &jump_input)?;
@@ -996,20 +1027,42 @@ fn connect_proxy_jump_hop(
     Ok(ProxyBridge { stream, guard })
 }
 
-fn bridge_proxy_channel(mut local: TcpStream, mut remote: Channel) {
+pub(crate) fn bridge_proxy_channel(mut local: TcpStream, mut remote: Channel) {
+    bridge_proxy_channel_inner(&mut local, &mut remote, None);
+}
+
+pub(crate) fn bridge_proxy_channel_until_stopped(
+    mut local: TcpStream,
+    mut remote: Channel,
+    stop: Arc<AtomicBool>,
+) {
+    bridge_proxy_channel_inner(&mut local, &mut remote, Some(stop));
+}
+
+fn bridge_proxy_channel_inner(
+    local: &mut TcpStream,
+    remote: &mut Channel,
+    stop: Option<Arc<AtomicBool>>,
+) {
     let _ = local.set_nonblocking(true);
     let mut local_buffer = [0_u8; 8192];
     let mut remote_buffer = [0_u8; 8192];
     let mut pending_remote_writes = VecDeque::new();
     let mut pending_local_writes = VecDeque::new();
     loop {
+        if stop
+            .as_ref()
+            .is_some_and(|stop| stop.load(Ordering::SeqCst))
+        {
+            break;
+        }
         let mut progressed = false;
-        match drain_ssh_pending_writes(&mut remote, &mut pending_remote_writes) {
+        match drain_ssh_pending_writes(remote, &mut pending_remote_writes) {
             Ok(true) => progressed = true,
             Ok(false) => {}
             Err(_) => break,
         }
-        match drain_tcp_pending_writes(&mut local, &mut pending_local_writes) {
+        match drain_tcp_pending_writes(local, &mut pending_local_writes) {
             Ok(true) => progressed = true,
             Ok(false) => {}
             Err(_) => break,
@@ -1044,6 +1097,7 @@ fn bridge_proxy_channel(mut local: TcpStream, mut remote: Channel) {
             thread::sleep(Duration::from_millis(5));
         }
     }
+    let _ = local.shutdown(std::net::Shutdown::Both);
     let _ = remote.close();
 }
 
@@ -1268,15 +1322,11 @@ pub(crate) fn authenticate_ssh_session(session: &Session, input: &SshWorkerInput
         {
             return Ok(());
         }
-        let passphrase_key = WorkspaceCredentialKey::new(
-            &input.workspace_id,
-            &input.auth_target,
+        if let Some(passphrase) = read_scoped_temporary_credential(
+            input,
             SshCredentialKind::KeyPassphrase,
             input.ssh.identity_file.as_deref(),
-        );
-        if let Some(passphrase) = workspace_ssh_coordinator()
-            .read_workspace_encrypted_temporary_credential(&passphrase_key)?
-        {
+        )? {
             if session
                 .userauth_pubkey_file(username, None, path, Some(passphrase.as_str()))
                 .is_ok()
@@ -1284,9 +1334,12 @@ pub(crate) fn authenticate_ssh_session(session: &Session, input: &SshWorkerInput
             {
                 return Ok(());
             }
-            workspace_ssh_coordinator()
-                .remove_workspace_encrypted_temporary_credential(&passphrase_key)?;
-            let credential = request_credential_from_workspace(
+            remove_scoped_temporary_credential(
+                input,
+                SshCredentialKind::KeyPassphrase,
+                input.ssh.identity_file.as_deref(),
+            )?;
+            let credential = request_credential_from_scope(
                 input,
                 SshCredentialKind::KeyPassphrase,
                 input.ssh.identity_file.clone(),
@@ -1301,8 +1354,10 @@ pub(crate) fn authenticate_ssh_session(session: &Session, input: &SshWorkerInput
                 .is_ok()
                 && session.authenticated()
             {
-                workspace_ssh_coordinator().store_prompt_credential_after_success(
-                    passphrase_key,
+                store_scoped_temporary_credential(
+                    input,
+                    SshCredentialKind::KeyPassphrase,
+                    input.ssh.identity_file.as_deref(),
                     &credential.credential,
                 )?;
                 if credential.save_credential {
@@ -1336,8 +1391,10 @@ pub(crate) fn authenticate_ssh_session(session: &Session, input: &SshWorkerInput
                 .is_ok()
                 && session.authenticated()
             {
-                workspace_ssh_coordinator().store_prompt_credential_after_success(
-                    passphrase_key,
+                store_scoped_temporary_credential(
+                    input,
+                    SshCredentialKind::KeyPassphrase,
+                    input.ssh.identity_file.as_deref(),
                     input.credential.as_ref().unwrap(),
                 )?;
                 if input.save_credential {
@@ -1361,8 +1418,10 @@ pub(crate) fn authenticate_ssh_session(session: &Session, input: &SshWorkerInput
                 .is_ok()
                 && session.authenticated()
             {
-                workspace_ssh_coordinator().store_prompt_credential_after_success(
-                    passphrase_key,
+                store_scoped_temporary_credential(
+                    input,
+                    SshCredentialKind::KeyPassphrase,
+                    input.ssh.identity_file.as_deref(),
                     &SshCredentialInput {
                         kind: SshCredentialKind::KeyPassphrase,
                         value: passphrase,
@@ -1373,14 +1432,8 @@ pub(crate) fn authenticate_ssh_session(session: &Session, input: &SshWorkerInput
         }
     }
 
-    let password_key = WorkspaceCredentialKey::new(
-        &input.workspace_id,
-        &input.auth_target,
-        SshCredentialKind::Password,
-        None,
-    );
     if let Some(password) =
-        workspace_ssh_coordinator().read_workspace_encrypted_temporary_credential(&password_key)?
+        read_scoped_temporary_credential(input, SshCredentialKind::Password, None)?
     {
         if session
             .userauth_password(username, password.as_str())
@@ -1389,17 +1442,19 @@ pub(crate) fn authenticate_ssh_session(session: &Session, input: &SshWorkerInput
         {
             return Ok(());
         }
-        workspace_ssh_coordinator()
-            .remove_workspace_encrypted_temporary_credential(&password_key)?;
-        let credential =
-            request_credential_from_workspace(input, SshCredentialKind::Password, None)?;
+        remove_scoped_temporary_credential(input, SshCredentialKind::Password, None)?;
+        let credential = request_credential_from_scope(input, SshCredentialKind::Password, None)?;
         if session
             .userauth_password(username, credential.credential.value.as_str())
             .is_ok()
             && session.authenticated()
         {
-            workspace_ssh_coordinator()
-                .store_prompt_credential_after_success(password_key, &credential.credential)?;
+            store_scoped_temporary_credential(
+                input,
+                SshCredentialKind::Password,
+                None,
+                &credential.credential,
+            )?;
             if credential.save_credential {
                 write_ssh_secret_to_keyring(
                     &input.auth_target,
@@ -1427,8 +1482,10 @@ pub(crate) fn authenticate_ssh_session(session: &Session, input: &SshWorkerInput
             .value
             .as_str();
         if session.userauth_password(username, password).is_ok() && session.authenticated() {
-            workspace_ssh_coordinator().store_prompt_credential_after_success(
-                password_key,
+            store_scoped_temporary_credential(
+                input,
+                SshCredentialKind::Password,
+                None,
                 input.credential.as_ref().unwrap(),
             )?;
             if input.save_credential {
@@ -1446,8 +1503,10 @@ pub(crate) fn authenticate_ssh_session(session: &Session, input: &SshWorkerInput
         read_ssh_secret_from_keyring(&input.auth_target, SshCredentialKind::Password, None)
     {
         if session.userauth_password(username, &password).is_ok() && session.authenticated() {
-            workspace_ssh_coordinator().store_prompt_credential_after_success(
-                password_key,
+            store_scoped_temporary_credential(
+                input,
+                SshCredentialKind::Password,
+                None,
                 &SshCredentialInput {
                     kind: SshCredentialKind::Password,
                     value: password,
@@ -1459,7 +1518,7 @@ pub(crate) fn authenticate_ssh_session(session: &Session, input: &SshWorkerInput
 
     let methods = session.auth_methods(username).unwrap_or("");
     if input.ssh.identity_file.is_some() && methods.contains("publickey") {
-        let credential = request_credential_from_workspace(
+        let credential = request_credential_from_scope(
             input,
             SshCredentialKind::KeyPassphrase,
             input.ssh.identity_file.clone(),
@@ -1481,14 +1540,12 @@ pub(crate) fn authenticate_ssh_session(session: &Session, input: &SshWorkerInput
             .is_ok()
             && session.authenticated()
         {
-            let key = WorkspaceCredentialKey::new(
-                &input.workspace_id,
-                &input.auth_target,
+            store_scoped_temporary_credential(
+                input,
                 SshCredentialKind::KeyPassphrase,
                 input.ssh.identity_file.as_deref(),
-            );
-            workspace_ssh_coordinator()
-                .store_prompt_credential_after_success(key, &credential.credential)?;
+                &credential.credential,
+            )?;
             if credential.save_credential {
                 write_ssh_secret_to_keyring(
                     &input.auth_target,
@@ -1506,21 +1563,18 @@ pub(crate) fn authenticate_ssh_session(session: &Session, input: &SshWorkerInput
         ));
     }
     if methods.contains("password") || methods.contains("keyboard-interactive") {
-        let credential =
-            request_credential_from_workspace(input, SshCredentialKind::Password, None)?;
+        let credential = request_credential_from_scope(input, SshCredentialKind::Password, None)?;
         if session
             .userauth_password(username, credential.credential.value.as_str())
             .is_ok()
             && session.authenticated()
         {
-            let key = WorkspaceCredentialKey::new(
-                &input.workspace_id,
-                &input.auth_target,
+            store_scoped_temporary_credential(
+                input,
                 SshCredentialKind::Password,
                 None,
-            );
-            workspace_ssh_coordinator()
-                .store_prompt_credential_after_success(key, &credential.credential)?;
+                &credential.credential,
+            )?;
             if credential.save_credential {
                 write_ssh_secret_to_keyring(
                     &input.auth_target,
@@ -1565,7 +1619,80 @@ struct WorkspaceCredentialResponse {
     save_credential: bool,
 }
 
-fn request_credential_from_workspace(
+fn scoped_credential_key(
+    input: &SshWorkerInput,
+    kind: SshCredentialKind,
+    identity_file: Option<&str>,
+) -> WorkspaceCredentialKey {
+    WorkspaceCredentialKey::new(&input.workspace_id, &input.auth_target, kind, identity_file)
+}
+
+fn read_scoped_temporary_credential(
+    input: &SshWorkerInput,
+    kind: SshCredentialKind,
+    identity_file: Option<&str>,
+) -> Result<Option<zeroize::Zeroizing<String>>> {
+    match &input.verification_scope {
+        SshVerificationScope::Workspace => {
+            let key = scoped_credential_key(input, kind, identity_file);
+            workspace_ssh_coordinator().read_workspace_encrypted_temporary_credential(&key)
+        }
+        SshVerificationScope::HostPortForward { host_id } => {
+            crate::port_forwarding::read_host_port_forward_credential(
+                host_id,
+                &input.auth_target,
+                kind,
+                identity_file,
+            )
+        }
+    }
+}
+
+fn store_scoped_temporary_credential(
+    input: &SshWorkerInput,
+    kind: SshCredentialKind,
+    identity_file: Option<&str>,
+    credential: &SshCredentialInput,
+) -> Result<()> {
+    match &input.verification_scope {
+        SshVerificationScope::Workspace => {
+            let key = scoped_credential_key(input, kind, identity_file);
+            workspace_ssh_coordinator().store_prompt_credential_after_success(key, credential)
+        }
+        SshVerificationScope::HostPortForward { host_id } => {
+            crate::port_forwarding::store_host_port_forward_credential(
+                host_id,
+                &input.auth_target,
+                kind,
+                identity_file,
+                credential,
+            )
+        }
+    }
+}
+
+fn remove_scoped_temporary_credential(
+    input: &SshWorkerInput,
+    kind: SshCredentialKind,
+    identity_file: Option<&str>,
+) -> Result<()> {
+    match &input.verification_scope {
+        SshVerificationScope::Workspace => {
+            let key = scoped_credential_key(input, kind, identity_file);
+            workspace_ssh_coordinator().remove_workspace_encrypted_temporary_credential(&key)
+        }
+        SshVerificationScope::HostPortForward { host_id } => {
+            crate::port_forwarding::remove_host_port_forward_credential(
+                host_id,
+                &input.auth_target,
+                kind,
+                identity_file,
+            )
+        }
+    }
+}
+
+fn request_credential_from_scope(
     input: &SshWorkerInput,
     kind: SshCredentialKind,
     identity_file: Option<String>,
@@ -1579,11 +1706,18 @@ fn request_credential_from_workspace(
         input,
         TerminalTransportState::WaitingForWorkspaceVerification,
     );
-    let response =
-        match workspace_ssh_coordinator().request_verification(input.app.as_ref(), challenge) {
-            Ok(response) => response,
-            Err(error) => return Err(error),
-        };
+    let response = match &input.verification_scope {
+        SshVerificationScope::Workspace => {
+            workspace_ssh_coordinator().request_verification(input.app.as_ref(), challenge)?
+        }
+        SshVerificationScope::HostPortForward { host_id } => {
+            crate::port_forwarding::request_host_port_forward_ssh_verification(
+                input.app.as_ref(),
+                host_id,
+                workspace_challenge_to_host_scoped(challenge)?,
+            )?
+        }
+    };
     update_ssh_input_transport_state(input, TerminalTransportState::Authenticating);
     match response {
         WorkspaceSshVerificationResponse::Credential {
@@ -1599,6 +1733,19 @@ fn request_credential_from_workspace(
         WorkspaceSshVerificationResponse::HostKey { .. } => Err(terminal_error(format!(
             "{message}: received a host-key response for a credential challenge"
         ))),
+    }
+}
+
+fn workspace_challenge_to_host_scoped(
+    challenge: SshWorkspaceChallenge,
+) -> Result<SshHostScopedChallenge> {
+    match challenge {
+        SshWorkspaceChallenge::Credential { challenge } => {
+            Ok(SshHostScopedChallenge::Credential { challenge })
+        }
+        SshWorkspaceChallenge::HostKey { challenge } => {
+            Ok(SshHostScopedChallenge::HostKey { challenge })
+        }
     }
 }
 
@@ -1621,7 +1768,7 @@ pub(crate) fn verify_ssh_host_key(session: &Session, input: &SshWorkerInput) -> 
             algorithm: algorithm.clone(),
             fingerprint: fingerprint.clone(),
         };
-        let response = request_host_key_from_workspace(input, challenge)?;
+        let response = request_host_key_from_scope(input, challenge)?;
         if !response.update_changed_host_key {
             return Err(terminal_error("SSH host key changed. Connection canceled."));
         }
@@ -1638,7 +1785,7 @@ pub(crate) fn verify_ssh_host_key(session: &Session, input: &SshWorkerInput) -> 
             algorithm: algorithm.clone(),
             fingerprint: fingerprint.clone(),
         };
-        let response = request_host_key_from_workspace(input, challenge)?;
+        let response = request_host_key_from_scope(input, challenge)?;
         if !response.accept_new_host_key {
             return Err(terminal_error(
                 "SSH host key was not trusted. Connection canceled.",
@@ -1656,7 +1803,7 @@ struct WorkspaceHostKeyResponse {
     update_changed_host_key: bool,
 }
 
-fn request_host_key_from_workspace(
+fn request_host_key_from_scope(
     input: &SshWorkerInput,
     challenge: SshHostKeyChallenge,
 ) -> Result<WorkspaceHostKeyResponse> {
@@ -1664,10 +1811,19 @@ fn request_host_key_from_workspace(
         input,
         TerminalTransportState::WaitingForWorkspaceVerification,
     );
-    let response = workspace_ssh_coordinator().request_verification(
-        input.app.as_ref(),
-        SshWorkspaceChallenge::HostKey { challenge },
-    )?;
+    let response = match &input.verification_scope {
+        SshVerificationScope::Workspace => workspace_ssh_coordinator().request_verification(
+            input.app.as_ref(),
+            SshWorkspaceChallenge::HostKey { challenge },
+        )?,
+        SshVerificationScope::HostPortForward { host_id } => {
+            crate::port_forwarding::request_host_port_forward_ssh_verification(
+                input.app.as_ref(),
+                host_id,
+                SshHostScopedChallenge::HostKey { challenge },
+            )?
+        }
+    };
     update_ssh_input_transport_state(input, TerminalTransportState::VerifyingHostKey);
     match response {
         WorkspaceSshVerificationResponse::HostKey {
@@ -1917,6 +2073,7 @@ fn create_ssh_host_terminal_session(
         update_changed_host_key: input.update_changed_host_key,
         credential: input.credential,
         save_credential: input.save_credential,
+        verification_scope: SshVerificationScope::Workspace,
     };
     let (command_tx, command_rx) = mpsc::channel();
     let session = Arc::new(TerminalSession {
@@ -2058,8 +2215,6 @@ pub(crate) fn close_terminal_session(session_id: String) -> Result<()> {
 mod tests {
     use super::*;
     use crate::config::parse_toml;
-    use tempfile::tempdir;
-
     #[test]
     fn parses_uniform_terminal_padding() {
         let config = parse_toml(
@@ -2224,322 +2379,6 @@ mod tests {
         assert_eq!(config[1].username.as_deref(), Some("ops"));
         assert_eq!(config[1].hostname, "second.example.com");
         assert_eq!(config[1].port, 2200);
-    }
-
-    #[test]
-    #[ignore = "requires Docker; run with cargo test ssh_proxy_jump_multi_hop_reaches_target_through_docker -- --ignored"]
-    fn ssh_proxy_jump_multi_hop_reaches_target_through_docker() {
-        let fixture = DockerSshFixture::start();
-        let config_path = fixture.root.path().join("ssh_config");
-        std::fs::write(
-            &config_path,
-            &format!(
-                r#"
-                Host jump1
-                  HostName 127.0.0.1
-                  Port {}
-                  User root
-
-                Host jump2
-                  HostName {}
-                  User root
-
-                Host target
-                  HostName {}
-                  User root
-                  ProxyJump jump1,jump2
-                "#,
-                fixture.jump1_port, fixture.jump2_name, fixture.target_name
-            ),
-        )
-        .expect("write OpenSSH config");
-        let proxy_jump_chain =
-            crate::config::resolve_openssh_proxy_jump_chain(&config_path, "jump1,jump2")
-                .expect("resolve OpenSSH ProxyJump aliases");
-        assert_eq!(proxy_jump_chain[0].hostname, "127.0.0.1");
-        assert_eq!(proxy_jump_chain[0].port, fixture.jump1_port);
-        assert_eq!(proxy_jump_chain[1].hostname, fixture.jump2_name);
-
-        let input = SshWorkerInput {
-            app: None,
-            session_id: "docker-proxy-jump-test".to_string(),
-            workspace_id: "workspace-docker".to_string(),
-            source_tool_tab_id: Some("tool-terminal-docker".to_string()),
-            display_name: "docker target".to_string(),
-            auth_target: connection_host_auth_target(
-                "docker-target",
-                "docker target",
-                "root",
-                &fixture.target_name,
-                22,
-            ),
-            ssh: SshConnectionConfig {
-                hostname: fixture.target_name.clone(),
-                port: 22,
-                username: Some("root".to_string()),
-                identity_file: None,
-                proxy_jump: Some("jump1,jump2".to_string()),
-                forward_agent: false,
-                server_alive_interval: None,
-            },
-            proxy_jump_chain: Some(proxy_jump_chain),
-            username: "root".to_string(),
-            size: PtySize {
-                rows: 24,
-                cols: 80,
-                pixel_width: 800,
-                pixel_height: 600,
-            },
-            trust_path: fixture.root.path().join("known-hosts.toml"),
-            accept_new_host_key: true,
-            update_changed_host_key: false,
-            credential: None,
-            save_credential: false,
-        };
-        for target in [
-            proxy_jump_auth_target("root", "127.0.0.1", fixture.jump1_port),
-            proxy_jump_auth_target("root", &fixture.jump2_name, 22),
-            input.auth_target.clone(),
-        ] {
-            workspace_ssh_coordinator()
-                .store_prompt_credential_after_success(
-                    WorkspaceCredentialKey::new(
-                        &input.workspace_id,
-                        &target,
-                        SshCredentialKind::Password,
-                        None,
-                    ),
-                    &SshCredentialInput {
-                        kind: SshCredentialKind::Password,
-                        value: "nocturne".to_string(),
-                    },
-                )
-                .expect("store Workspace encrypted temporary credential for Docker SSH hop");
-        }
-        let mut prepared = prepare_ssh_session(&input).expect("connect through two jump hosts");
-        prepared
-            .channel
-            .write_all(b"printf 'nocturne-docker-target\\n'; exit\n")
-            .expect("write shell command");
-
-        let output = read_ssh_channel_until(&mut prepared.channel, "nocturne-docker-target");
-        assert!(
-            output.contains("nocturne-docker-target"),
-            "expected target marker in SSH shell output, got: {output:?}"
-        );
-    }
-
-    struct DockerSshFixture {
-        root: tempfile::TempDir,
-        network: String,
-        image: String,
-        jump1_name: String,
-        jump2_name: String,
-        target_name: String,
-        jump1_port: u16,
-    }
-
-    impl DockerSshFixture {
-        fn start() -> Self {
-            require_docker();
-            let root = tempdir().expect("temp dir");
-            let suffix = format!(
-                "{}-{}",
-                std::process::id(),
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .expect("system clock after unix epoch")
-                    .as_millis()
-            );
-            let image = format!("nocturne-ssh-test:{suffix}");
-            let network = format!("nocturne-ssh-test-{suffix}");
-            write_dockerfile(root.path());
-            docker([
-                "build",
-                "-q",
-                "-t",
-                &image,
-                root.path().to_string_lossy().as_ref(),
-            ]);
-            docker(["network", "create", &network]);
-
-            let jump1_name = format!("nocturne-jump1-{suffix}");
-            let jump2_name = format!("nocturne-jump2-{suffix}");
-            let target_name = format!("nocturne-target-{suffix}");
-            docker([
-                "run",
-                "-d",
-                "--rm",
-                "--name",
-                &jump1_name,
-                "--network",
-                &network,
-                "-p",
-                "127.0.0.1::22",
-                &image,
-            ]);
-            docker([
-                "run",
-                "-d",
-                "--rm",
-                "--name",
-                &jump2_name,
-                "--network",
-                &network,
-                &image,
-            ]);
-            docker([
-                "run",
-                "-d",
-                "--rm",
-                "--name",
-                &target_name,
-                "--network",
-                &network,
-                &image,
-            ]);
-            wait_for_ssh_container(&jump1_name);
-            wait_for_ssh_container(&jump2_name);
-            wait_for_ssh_container(&target_name);
-            let jump1_port = docker_output([
-                "inspect",
-                "-f",
-                "{{(index (index .NetworkSettings.Ports \"22/tcp\") 0).HostPort}}",
-                &jump1_name,
-            ])
-            .trim()
-            .parse::<u16>()
-            .expect("mapped jump host port");
-
-            Self {
-                root,
-                network,
-                image,
-                jump1_name,
-                jump2_name,
-                target_name,
-                jump1_port,
-            }
-        }
-    }
-
-    impl Drop for DockerSshFixture {
-        fn drop(&mut self) {
-            let _ = std::process::Command::new("docker")
-                .args([
-                    "rm",
-                    "-f",
-                    &self.jump1_name,
-                    &self.jump2_name,
-                    &self.target_name,
-                ])
-                .output();
-            let _ = std::process::Command::new("docker")
-                .args(["network", "rm", &self.network])
-                .output();
-            let _ = std::process::Command::new("docker")
-                .args(["image", "rm", "-f", &self.image])
-                .output();
-        }
-    }
-
-    fn write_dockerfile(root: &Path) {
-        let dockerfile = r#"
-FROM alpine:3.20
-RUN apk add --no-cache openssh-server \
-  && ssh-keygen -A \
-  && echo 'root:nocturne' | chpasswd \
-  && sed -i 's/^#*PasswordAuthentication .*/PasswordAuthentication yes/' /etc/ssh/sshd_config \
-  && sed -i 's/^#*PermitRootLogin .*/PermitRootLogin yes/' /etc/ssh/sshd_config \
-  && sed -i 's/^#*AllowTcpForwarding .*/AllowTcpForwarding yes/' /etc/ssh/sshd_config
-EXPOSE 22
-CMD ["/usr/sbin/sshd", "-D", "-e"]
-"#;
-        std::fs::write(root.join("Dockerfile"), dockerfile).expect("write Dockerfile");
-    }
-
-    fn require_docker() {
-        let status = std::process::Command::new("docker")
-            .arg("version")
-            .status()
-            .expect("Docker is required for this ignored integration test");
-        assert!(
-            status.success(),
-            "Docker is required for this integration test"
-        );
-    }
-
-    fn docker<const N: usize>(args: [&str; N]) {
-        let output = std::process::Command::new("docker")
-            .args(args)
-            .output()
-            .expect("run docker");
-        assert!(
-            output.status.success(),
-            "docker command failed\nstdout:\n{}\nstderr:\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-
-    fn docker_output<const N: usize>(args: [&str; N]) -> String {
-        let output = std::process::Command::new("docker")
-            .args(args)
-            .output()
-            .expect("run docker");
-        assert!(
-            output.status.success(),
-            "docker command failed\nstdout:\n{}\nstderr:\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-        String::from_utf8(output.stdout).expect("docker stdout is utf8")
-    }
-
-    fn wait_for_ssh_container(name: &str) {
-        for _ in 0..50 {
-            let output = std::process::Command::new("docker")
-                .args([
-                    "exec",
-                    name,
-                    "sh",
-                    "-lc",
-                    "test -S /var/run/docker.sock || pgrep sshd >/dev/null",
-                ])
-                .output()
-                .expect("docker exec");
-            if output.status.success() {
-                return;
-            }
-            thread::sleep(Duration::from_millis(100));
-        }
-        panic!("sshd did not become ready in {name}");
-    }
-
-    fn read_ssh_channel_until(channel: &mut Channel, marker: &str) -> String {
-        let started = std::time::Instant::now();
-        let mut output = Vec::new();
-        let mut buffer = [0_u8; 4096];
-        while started.elapsed() < Duration::from_secs(15) {
-            match channel.read(&mut buffer) {
-                Ok(0) => {
-                    if channel.eof() {
-                        break;
-                    }
-                }
-                Ok(size) => {
-                    output.extend_from_slice(&buffer[..size]);
-                    let text = String::from_utf8_lossy(&output);
-                    if text.contains(marker) {
-                        return text.into_owned();
-                    }
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
-                Err(error) => panic!("failed to read SSH channel: {error}"),
-            }
-            thread::sleep(Duration::from_millis(20));
-        }
-        String::from_utf8_lossy(&output).into_owned()
     }
 
     #[test]

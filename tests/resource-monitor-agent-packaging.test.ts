@@ -23,6 +23,10 @@
  * static CRT linking to avoid shipping extra runtime files to remote Hosts,
  * and release assets are uploaded with deterministic same-tag names so a
  * missing bundled helper can only be downloaded from the current app release.
+ * The Linux runtime GPU collection entry point also wires every supported
+ * in-process source into the same normalizer, including DRM/sysfs, NVIDIA
+ * procfs, and NVML, so CI cross-target builds catch signature drift before
+ * release packaging.
  */
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
@@ -154,6 +158,8 @@ describe("Resource Monitor agent packaging", () => {
     assert.doesNotMatch(helperSource, /std::process::Command/);
     assert.doesNotMatch(helperSource, /nvidia-smi/);
     assert.match(helperSource, /Path::new\("\/sys"\)/);
+    assert.match(helperSource, /collect_linux_nvidia_procfs_gpu_devices_from_root\(Path::new\("\/"\)\)/);
+    assert.match(helperSource, /collect_linux_nvml_gpu_devices\(\)/);
     assert.match(helperSource, /join\("class"\)\.join\("drm"\)/);
     assert.match(helperSource, /mem_info_vram_used/);
     assert.match(helperSource, /PdhAddEnglishCounterW/);

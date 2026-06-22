@@ -319,6 +319,7 @@ fn collect_gpu_metric() -> ResourceMonitorAgentMetric {
     {
         return collect_linux_gpu_metric_from_sources(
             collect_linux_drm_gpu_devices_from_root(Path::new("/sys")),
+            collect_linux_nvidia_procfs_gpu_devices_from_root(Path::new("/")),
             collect_linux_nvml_gpu_devices(),
         );
     }

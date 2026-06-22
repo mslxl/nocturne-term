@@ -85,8 +85,8 @@ test("workspace non terminal layout memory", { timeout: 180_000 }, async () => {
     await waitUntil(async () => {
       const state = await activeWorkspaceDockState();
       return state.workspaceCount === 1 &&
-        state.toolSlots.some((slot) => slot.kind === "resources" && slot.groupRole === "sidebar") &&
-        state.toolSlots.some((slot) => slot.kind === "transfers" && slot.groupRole === "sidebar") &&
+        state.toolSlots.some((slot) => slot.kind === "resources" && slot.groupRole === "side_panel") &&
+        state.toolSlots.some((slot) => slot.kind === "transfers" && slot.groupRole === "side_panel") &&
         state.toolSlots.some((slot) => slot.kind === "terminal" && slot.groupRole === "content");
     }, async () => `initial Resource Monitor default layout did not mount\n${await pageSummary()}`);
 

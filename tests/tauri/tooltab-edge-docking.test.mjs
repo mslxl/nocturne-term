@@ -92,10 +92,10 @@ test("tooltab edge docking", { timeout: 180_000 }, async () => {
 
     await waitUntil(async () => {
       const state = await dockState();
-      return state.groups.some((group) => group.role === "sidebar" && group.kinds.includes("files")) &&
+      return state.groups.some((group) => group.role === "side_panel" && group.kinds.includes("files")) &&
         state.groups.some((group) => group.role === "content" && group.kinds.includes("terminal")) &&
         state.groups.some((group) =>
-          group.role === "sidebar" &&
+          group.role === "side_panel" &&
           group.kinds.includes("resources") &&
           group.kinds.includes("transfers")
         );
@@ -107,14 +107,14 @@ test("tooltab edge docking", { timeout: 180_000 }, async () => {
       const state = await dockState();
       const content = contentGroup(state);
       return Boolean(content?.kinds.includes("files")) &&
-        !state.groups.some((group) => group.role === "sidebar" && group.kinds.includes("files"));
+        !state.groups.some((group) => group.role === "side_panel" && group.kinds.includes("files"));
     }, async () => `Files ToolTab did not move into the content Dock group\n${await pageSummary()}`);
 
     const leftEdgePreview = await dragToolKindToWorkspaceEdge("files", "left");
     assertPreview(leftEdgePreview, "workspace_edge", "left");
     await waitUntil(async () => {
       const state = await dockState();
-      const sidebar = state.groups.find((group) => group.role === "sidebar" && group.kinds.includes("files"));
+      const sidebar = state.groups.find((group) => group.role === "side_panel" && group.kinds.includes("files"));
       const content = contentGroup(state);
       return Boolean(sidebar && content && sidebar.rect.left < content.rect.left && !content.kinds.includes("files"));
     }, async () => `Files ToolTab did not dock to the left Workspace edge\n${await pageSummary()}`);
@@ -125,7 +125,7 @@ test("tooltab edge docking", { timeout: 180_000 }, async () => {
       const state = await dockState();
       const content = contentGroup(state);
       return Boolean(content?.kinds.includes("transfers")) &&
-        !state.groups.some((group) => group.role === "sidebar" && group.kinds.includes("transfers"));
+        !state.groups.some((group) => group.role === "side_panel" && group.kinds.includes("transfers"));
     }, async () => `Transfers ToolTab did not move into the content Dock group\n${await pageSummary()}`);
 
     const rightEdgePreview = await dragToolKindToWorkspaceEdge("transfers", "right");
@@ -133,7 +133,7 @@ test("tooltab edge docking", { timeout: 180_000 }, async () => {
     await waitUntil(async () => {
       const state = await dockState();
       const content = contentGroup(state);
-      const rightSidebar = state.groups.find((group) => group.role === "sidebar" && group.kinds.includes("transfers"));
+      const rightSidebar = state.groups.find((group) => group.role === "side_panel" && group.kinds.includes("transfers"));
       return Boolean(content && rightSidebar && rightSidebar.rect.left > content.rect.left && !content.kinds.includes("transfers"));
     }, async () => `Transfers ToolTab did not dock to the right Workspace edge\n${await pageSummary()}`);
 

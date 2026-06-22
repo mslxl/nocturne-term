@@ -5,13 +5,16 @@ export type DefaultWorkspaceToolIds = {
   terminalToolId: ToolTabId;
   resourcesToolId: ToolTabId;
   transfersToolId: ToolTabId;
+  portsToolId: ToolTabId;
   filesSlotId: DisplaySlotId;
   terminalSlotId: DisplaySlotId;
   resourcesSlotId: DisplaySlotId;
   transfersSlotId: DisplaySlotId;
+  portsSlotId: DisplaySlotId;
   filesGroupId: DockGroupId;
   terminalGroupId: DockGroupId;
   rightGroupId: DockGroupId;
+  portsGroupId: DockGroupId;
 };
 
 export type DefaultWorkspaceLayoutInput = {
@@ -30,13 +33,16 @@ export function defaultWorkspaceToolIds(suffix: string): DefaultWorkspaceToolIds
     terminalToolId: `tool-terminal-${suffix}`,
     resourcesToolId: `tool-resources-${suffix}`,
     transfersToolId: `tool-transfers-${suffix}`,
+    portsToolId: `tool-ports-${suffix}`,
     filesSlotId: `slot-files-${suffix}`,
     terminalSlotId: `slot-terminal-${suffix}`,
     resourcesSlotId: `slot-resources-${suffix}`,
     transfersSlotId: `slot-transfers-${suffix}`,
+    portsSlotId: `slot-ports-${suffix}`,
     filesGroupId: `group-files-${suffix}`,
     terminalGroupId: `group-terminal-${suffix}`,
     rightGroupId: `group-resources-transfers-${suffix}`,
+    portsGroupId: `group-ports-${suffix}`,
   };
 }
 
@@ -55,35 +61,50 @@ export function defaultWorkspaceLayoutSnapshot(input: DefaultWorkspaceLayoutInpu
           ids.terminalToolId,
           ids.resourcesToolId,
           ids.transfersToolId,
+          ids.portsToolId,
         ],
         layout: {
           kind: "split",
-          direction: "row",
-          ratios: [0.24, 0.52, 0.24],
+          direction: "column",
+          ratios: [0.7, 0.3],
           children: [
             {
-              kind: "group",
-              id: ids.filesGroupId,
-              role: "sidebar",
-              activeSlotId: ids.filesSlotId,
-              slots: [{ kind: "owned", id: ids.filesSlotId, toolTabId: ids.filesToolId }],
-            },
-            {
-              kind: "group",
-              id: ids.terminalGroupId,
-              role: "content",
-              activeSlotId: ids.terminalSlotId,
-              slots: [{ kind: "owned", id: ids.terminalSlotId, toolTabId: ids.terminalToolId }],
-            },
-            {
-              kind: "group",
-              id: ids.rightGroupId,
-              role: "sidebar",
-              activeSlotId: ids.resourcesSlotId,
-              slots: [
-                { kind: "owned", id: ids.resourcesSlotId, toolTabId: ids.resourcesToolId },
-                { kind: "owned", id: ids.transfersSlotId, toolTabId: ids.transfersToolId },
+              kind: "split",
+              direction: "row",
+              ratios: [0.24, 0.52, 0.24],
+              children: [
+                {
+                  kind: "group",
+                  id: ids.filesGroupId,
+                  role: "side_panel",
+                  activeSlotId: ids.filesSlotId,
+                  slots: [{ kind: "owned", id: ids.filesSlotId, toolTabId: ids.filesToolId }],
+                },
+                {
+                  kind: "group",
+                  id: ids.terminalGroupId,
+                  role: "content",
+                  activeSlotId: ids.terminalSlotId,
+                  slots: [{ kind: "owned", id: ids.terminalSlotId, toolTabId: ids.terminalToolId }],
+                },
+                {
+                  kind: "group",
+                  id: ids.rightGroupId,
+                  role: "side_panel",
+                  activeSlotId: ids.resourcesSlotId,
+                  slots: [
+                    { kind: "owned", id: ids.resourcesSlotId, toolTabId: ids.resourcesToolId },
+                    { kind: "owned", id: ids.transfersSlotId, toolTabId: ids.transfersToolId },
+                  ],
+                },
               ],
+            },
+            {
+              kind: "group",
+              id: ids.portsGroupId,
+              role: "side_panel",
+              activeSlotId: ids.portsSlotId,
+              slots: [{ kind: "owned", id: ids.portsSlotId, toolTabId: ids.portsToolId }],
             },
           ],
         },
@@ -117,6 +138,13 @@ export function defaultWorkspaceLayoutSnapshot(input: DefaultWorkspaceLayoutInpu
         ownerWorkspaceId: input.workspaceId,
         hostId: input.hostId,
         title: "Transfers",
+      },
+      {
+        id: ids.portsToolId,
+        kind: "ports",
+        ownerWorkspaceId: input.workspaceId,
+        hostId: input.hostId,
+        title: "Ports",
       },
     ],
     floatingWindows: [],

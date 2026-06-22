@@ -14,7 +14,7 @@
   import { setFilesClipboard } from "$lib/files/clipboard.svelte";
   import { basename, buildFilesColumnsView, columnsForPath, columnsForVisiblePane, type FilesColumnView } from "$lib/files/columns";
   import { filesSelectionContextMenuActions, type FilesContextMenuAction, type FilesContextMenuActionId } from "$lib/files/context-menu";
-  import { filesToolSelection, resetFilesToolSelection } from "$lib/files/selection.svelte";
+  import { filesToolSelection, filesToolViewState, resetFilesToolSelection } from "$lib/files/selection.svelte";
   import { selectFilesContextTarget, selectFilesEntry, selectFilesMarquee } from "$lib/files/selection";
   import { DEFAULT_FILES_TOOLBAR_ACTION_IDS, normalizeFilesToolbarActionIds, type FilesToolbarActionId } from "$lib/files/toolbar-actions";
   import { resolveFilesUploadTarget } from "$lib/files/upload-target";
@@ -67,12 +67,14 @@
     treeStickyEnabled = true,
     treeStickyMaxLevels = 3,
   }: Props = $props();
-  let path = $state<string | null>(null);
   // This component is keyed by ToolTab id by the workspace renderer, so the initial id is stable for this instance.
   // svelte-ignore state_referenced_locally
   const selection = filesToolSelection(toolTab.id);
-  let lastSelectedEntry = $state<FileEntry | null>(null);
-  let viewMode = $state<"tree" | "columns">("tree");
+  // svelte-ignore state_referenced_locally
+  const viewState = filesToolViewState(toolTab.id);
+  let path = $derived(viewState.path);
+  let lastSelectedEntry = $derived(viewState.lastSelectedEntry);
+  let viewMode = $derived(viewState.viewMode ?? defaultViewMode);
   let viewModeInitialized = false;
   let searchOpen = $state(false);
   let searchQuery = $state("");
@@ -81,7 +83,7 @@
   let searchFollowSymlinks = $state(false);
   let searchResult = $state<FileSearchResult | null>(null);
   let searchLoading = $state(false);
-  let previewPath = $state("");
+  let previewPath = $derived(viewState.previewPath);
   let dragHover = $state(false);
   let operationError = $state("");
   let contextMenu = $state<{
@@ -102,11 +104,11 @@
     width: number;
     height: number;
   } | null>(null);
-  let expandedTreePaths = $state<Record<string, boolean>>({});
-  let userCollapsedTreePaths = $state<Record<string, boolean>>({});
-  let treeChildrenByPath = $state<Record<string, FileEntry[]>>({});
+  let expandedTreePaths = $derived(viewState.expandedTreePaths);
+  let userCollapsedTreePaths = $derived(viewState.userCollapsedTreePaths);
+  let treeChildrenByPath = $derived(viewState.treeChildrenByPath);
   let treeLoadingByPath = $state<Record<string, boolean>>({});
-  let treeErrorByPath = $state<Record<string, string>>({});
+  let treeErrorByPath = $derived(viewState.treeErrorByPath);
   const directoryChildrenLoadPromises = new Map<string, Promise<void>>();
   let filesRoot: HTMLElement | null = null;
   let columnsPanes = $state<ColumnsPane[]>([]);
@@ -123,7 +125,7 @@
   } | null>(null);
   let pendingUploadSource = $state<"dialog" | "drop" | null>(null);
   let pendingDroppedPaths = $state<string[]>([]);
-  let firstVisibleTreePath = $state("");
+  let firstVisibleTreePath = $derived(viewState.firstVisibleTreePath);
   let externalDropTargetPath = $state<string | null>(null);
   type FilesColumn = FilesColumnView<FileEntry>;
   type ColumnsMotion = "idle" | "forward" | "backward" | "resize";
@@ -150,7 +152,7 @@
   let pendingColumnsScrollOffsets: ReadonlyMap<string, { scrollTop: number; anchorPath: string | null }> | null = null;
   let pendingColumnsFocusWindowPath: string | null = null;
   let pendingColumnsReplaceWithoutMotionPath: string | null = null;
-  let filesResult = $state<FileListResult | undefined>(undefined);
+  let filesResult = $derived(viewState.filesResult);
   let filesLoading = $state(false);
   let filesError = $state<unknown>(null);
   let filesLoadGeneration = 0;
@@ -392,7 +394,7 @@
 
   $effect(() => {
     if (!path && result?.provider.current_path) {
-      path = result.provider.current_path;
+      viewState.path = result.provider.current_path;
     }
     if (!initialDirectoryFocusPath && result?.provider.current_path) {
       initialDirectoryFocusPath = normalizeFilePath(result.provider.current_path);
@@ -407,7 +409,7 @@
       collapsedPaths: recordKeySet(userCollapsedTreePaths),
     });
     if (plan.expandPaths.every((directoryPath) => expandedTreePaths[directoryPath])) return;
-    expandedTreePaths = {
+    viewState.expandedTreePaths = {
       ...Object.fromEntries(plan.expandPaths.map((directoryPath) => [directoryPath, true])),
       ...expandedTreePaths,
     };
@@ -430,7 +432,7 @@
 
   $effect(() => {
     if (viewModeInitialized) return;
-    viewMode = defaultViewMode;
+    if (!viewState.viewMode) viewState.viewMode = defaultViewMode;
     viewModeInitialized = true;
   });
 
@@ -493,8 +495,8 @@
 
   async function refreshAfterMutation() {
     resetFilesToolSelection(toolTab.id);
-    lastSelectedEntry = null;
-    previewPath = "";
+    viewState.lastSelectedEntry = null;
+    viewState.previewPath = "";
     searchResult = null;
     await refresh();
   }
@@ -523,7 +525,7 @@
         staleTime: options.force ? 0 : 8_000,
       });
       if (generation !== filesLoadGeneration) return;
-      filesResult = next;
+      viewState.filesResult = next;
       filesLoading = false;
     } catch (error) {
       if (generation !== filesLoadGeneration) return;
@@ -595,9 +597,9 @@
   function openEntry(entry: FileEntry) {
     applySingleEntrySelection(entry);
     if (entry.kind !== "directory") return;
-    path = entry.path;
+    viewState.path = entry.path;
     searchResult = null;
-    previewPath = "";
+    viewState.previewPath = "";
   }
 
   function openColumnsEntry(entry: FileEntry) {
@@ -621,12 +623,12 @@
     if (entry.kind !== "directory") return;
     const normalizedPath = normalizeFilePath(entry.path);
     const willExpand = !expandedTreePaths[normalizedPath];
-    expandedTreePaths = { ...expandedTreePaths, [normalizedPath]: willExpand };
+    viewState.expandedTreePaths = { ...expandedTreePaths, [normalizedPath]: willExpand };
     if (willExpand) {
       const { [normalizedPath]: _expandedAgain, ...remainingCollapsedPaths } = userCollapsedTreePaths;
-      userCollapsedTreePaths = remainingCollapsedPaths;
+      viewState.userCollapsedTreePaths = remainingCollapsedPaths;
     } else {
-      userCollapsedTreePaths = { ...userCollapsedTreePaths, [normalizedPath]: true };
+      viewState.userCollapsedTreePaths = { ...userCollapsedTreePaths, [normalizedPath]: true };
     }
     if (!willExpand || treeChildrenByPath[normalizedPath] || treeLoadingByPath[normalizedPath]) {
       return;
@@ -666,7 +668,7 @@
   async function doReloadDirectoryChildren(directoryPath: string, normalizedDirectoryPath: string) {
     treeLoadingByPath = { ...treeLoadingByPath, [normalizedDirectoryPath]: true };
     const { [normalizedDirectoryPath]: _previousError, ...remainingErrors } = treeErrorByPath;
-    treeErrorByPath = remainingErrors;
+    viewState.treeErrorByPath = remainingErrors;
     try {
       const childResult = await unwrapCommand(
         commands.listFiles({
@@ -674,12 +676,12 @@
           ...providerCommandAuth(),
         }),
       );
-      treeChildrenByPath = {
+      viewState.treeChildrenByPath = {
         ...treeChildrenByPath,
         [normalizedDirectoryPath]: childResult.entries,
       };
     } catch (error) {
-      treeErrorByPath = {
+      viewState.treeErrorByPath = {
         ...treeErrorByPath,
         [normalizedDirectoryPath]: error instanceof Error ? error.message : String(error),
       };
@@ -712,9 +714,9 @@
       activePath: match.path,
       anchorPath: match.path,
     });
-    lastSelectedEntry = null;
+    viewState.lastSelectedEntry = null;
     if (match.kind !== "directory") return;
-    path = match.path;
+    viewState.path = match.path;
     clearSearch();
   }
 
@@ -736,19 +738,19 @@
       const shouldLoadBeforeSelection = shouldLoadColumnsDirectoryBeforeSelection(entry, columnsMotionHint);
       if (shouldLoadBeforeSelection) {
         searchResult = null;
-        previewPath = "";
+        viewState.previewPath = "";
         applyEntrySelection(entry, visiblePaths, event);
-        path = entry.path;
+        viewState.path = entry.path;
         await loadDirectoryChildren(entry);
       } else {
         applyEntrySelection(entry, visiblePaths, event);
         if (viewMode === "columns" && entry.kind === "directory") {
-          path = entry.path;
+          viewState.path = entry.path;
         }
       }
       if (viewMode === "columns" && entry.kind === "directory" && !shouldLoadBeforeSelection) {
         searchResult = null;
-        previewPath = "";
+        viewState.previewPath = "";
         await loadDirectoryChildren(entry);
       }
     } finally {
@@ -772,8 +774,8 @@
       activePath: entry.path,
       anchorPath: entry.path,
     });
-    lastSelectedEntry = entry;
-    previewPath = entry.kind === "file" || entry.kind === "symlink" ? entry.path : "";
+    viewState.lastSelectedEntry = entry;
+    viewState.previewPath = entry.kind === "file" || entry.kind === "symlink" ? entry.path : "";
   }
 
   function applyEntrySelection(entry: FileEntry, visiblePaths: readonly string[], event?: MouseEvent) {
@@ -785,8 +787,8 @@
       shiftKey: event?.shiftKey,
     });
     applySelection(next);
-    lastSelectedEntry = entry;
-    previewPath = entry.kind === "file" || entry.kind === "symlink" ? entry.path : "";
+    viewState.lastSelectedEntry = entry;
+    viewState.previewPath = entry.kind === "file" || entry.kind === "symlink" ? entry.path : "";
   }
 
   function applySelection(next: typeof selection) {
@@ -1592,7 +1594,7 @@
     for (const row of rows) {
       const rect = row.getBoundingClientRect();
       if (rect.bottom > rootRect.top + 2 && rect.top < rootRect.bottom - 2) {
-        firstVisibleTreePath = row.getAttribute("data-entry-path") ?? "";
+        viewState.firstVisibleTreePath = row.getAttribute("data-entry-path") ?? "";
         return;
       }
     }
@@ -2056,8 +2058,8 @@
     event.preventDefault();
     const next = selectFilesContextTarget(selection, entry.path);
     applySelection(next);
-    lastSelectedEntry = entry;
-    previewPath = entry.kind === "file" || entry.kind === "symlink" ? entry.path : "";
+    viewState.lastSelectedEntry = entry;
+    viewState.previewPath = entry.kind === "file" || entry.kind === "symlink" ? entry.path : "";
     contextMenu = {
       x: event.clientX,
       y: event.clientY,
@@ -2187,8 +2189,8 @@
     const next = selectFilesMarquee(selection, paths);
     applySelection(next);
     const activeEntry = findEntryByPath(next.activePath);
-    lastSelectedEntry = activeEntry;
-    previewPath = activeEntry && (activeEntry.kind === "file" || activeEntry.kind === "symlink") ? activeEntry.path : "";
+    viewState.lastSelectedEntry = activeEntry;
+    viewState.previewPath = activeEntry && (activeEntry.kind === "file" || activeEntry.kind === "symlink") ? activeEntry.path : "";
     recordMarqueeDiagnostic("commit", event, event.target instanceof HTMLElement ? event.target : null, { paths });
     marquee = null;
     removeMarqueeWindowListeners();
@@ -2304,8 +2306,8 @@
       {#each visibleToolbarActionIds as actionId (actionId)}
         {#if actionId === "view_mode"}
         <div class="view-toggle" role="group" aria-label="View mode">
-          <button class:active={viewMode === "tree"} type="button" title="Tree view" aria-label="Tree view" onclick={() => (viewMode = "tree")}>☰</button>
-          <button class:active={viewMode === "columns"} type="button" title="Columns view" aria-label="Columns view" onclick={() => (viewMode = "columns")}>▥</button>
+          <button class:active={viewMode === "tree"} type="button" title="Tree view" aria-label="Tree view" onclick={() => (viewState.viewMode = "tree")}>☰</button>
+          <button class:active={viewMode === "columns"} type="button" title="Columns view" aria-label="Columns view" onclick={() => (viewState.viewMode = "columns")}>▥</button>
         </div>
         {:else}
         <button

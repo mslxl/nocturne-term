@@ -29,6 +29,7 @@ const filesSourceUrl = new URL("../src-tauri/src/files.rs", import.meta.url);
 const terminalTabsSourceUrl = new URL("../src/lib/terminal/tabs.ts", import.meta.url);
 const terminalTypesSourceUrl = new URL("../src-tauri/src/types.rs", import.meta.url);
 const transfersSourceUrl = new URL("../src-tauri/src/transfers.rs", import.meta.url);
+const portForwardingSourceUrl = new URL("../src-tauri/src/port_forwarding.rs", import.meta.url);
 
 describe("Workspace SSH verification coordinator wiring", () => {
   it("emits Files/SFTP challenges through the Workspace prompt event", async () => {
@@ -48,6 +49,17 @@ describe("Workspace SSH verification coordinator wiring", () => {
     assert.match(pageSource, /commands\.submitWorkspaceSshVerification\(\{/);
     assert.doesNotMatch(pageSource, /sshChallengeFromConfigError/);
     assert.doesNotMatch(pageSource, /kind\s*!==\s*"SshWorkspaceChallenge"/);
+  });
+
+  it("uses a Host-scoped verification event for Port Forwarding prompts", async () => {
+    const pageSource = await readFile(pageSourceUrl, "utf8");
+    const portForwardingSource = await readFile(portForwardingSourceUrl, "utf8");
+
+    assert.match(pageSource, /listen<PortForwardSshVerificationRequiredEvent>\("port-forwarding:\/\/ssh-verification-required"/);
+    assert.match(pageSource, /commands\.submitPortForwardSshVerification\(\{/);
+    assert.match(portForwardingSource, /PortForwardSshVerificationRequiredEvent/);
+    assert.match(portForwardingSource, /submit_port_forward_ssh_verification/);
+    assert.match(portForwardingSource, /host_scoped_ssh_coordinator\(\)\.request_verification/);
   });
 
   it("exposes Terminal waiting state while backend verification is pending", async () => {

@@ -5,7 +5,7 @@ import { invoke as __TAURI_INVOKE } from "@tauri-apps/api/core";
 /** Commands */
 export const commands = {
 	getConfigRoot: () => typedError<ConfigRootInfo, ConfigError>(__TAURI_INVOKE("get_config_root")),
-	getConfigSnapshot: () => typedError<AppConfigSnapshot, ConfigError>(__TAURI_INVOKE("get_config_snapshot")),
+	getConfigSnapshot: () => typedError<AppConfigSnapshot_Serialize, ConfigError>(__TAURI_INVOKE("get_config_snapshot")),
 	getResourceSettings: () => typedError<ResourceSettings, ConfigError>(__TAURI_INVOKE("get_resource_settings")),
 	collectResourceMonitorSnapshot: (input: ResourceMonitorCollectInput) => typedError<ResourceMonitorSnapshot, ConfigError>(__TAURI_INVOKE("collect_resource_monitor_snapshot", { input })),
 	getTerminalSettings: () => typedError<TerminalSettings, ConfigError>(__TAURI_INVOKE("get_terminal_settings")),
@@ -43,8 +43,17 @@ export const commands = {
 	createTransferTask: (input: TransferCreateInput) => typedError<TransferQueueSnapshot, ConfigError>(__TAURI_INVOKE("create_transfer_task", { input })),
 	cancelTransferTask: (input: TransferTaskInput) => typedError<TransferQueueSnapshot, ConfigError>(__TAURI_INVOKE("cancel_transfer_task", { input })),
 	retryTransferTask: (input: TransferTaskInput) => typedError<TransferQueueSnapshot, ConfigError>(__TAURI_INVOKE("retry_transfer_task", { input })),
-	getWorkspaceLayoutSnapshot: () => typedError<WorkspaceLayoutSnapshot, ConfigError>(__TAURI_INVOKE("get_workspace_layout_snapshot")),
-	workspaceDispatch: (input: WorkspaceDispatchInput) => typedError<WorkspaceLayoutSnapshot, ConfigError>(__TAURI_INVOKE("workspace_dispatch", { input })),
+	getPortForwardSnapshot: (hostId: string) => typedError<PortForwardSnapshot_Serialize, ConfigError>(__TAURI_INVOKE("get_port_forward_snapshot", { hostId })),
+	createOrUpdatePortForwardRule: (input: PortForwardRuleInput_Deserialize) => typedError<PortForwardSnapshot_Serialize, ConfigError>(__TAURI_INVOKE("create_or_update_port_forward_rule", { input })),
+	updatePortForwardDraft: (input: PortForwardDraftInput) => typedError<PortForwardSnapshot_Serialize, ConfigError>(__TAURI_INVOKE("update_port_forward_draft", { input })),
+	clearPortForwardDraft: (hostId: string) => typedError<PortForwardSnapshot_Serialize, ConfigError>(__TAURI_INVOKE("clear_port_forward_draft", { hostId })),
+	checkPortForwardNonLoopbackRisk: (input: PortForwardNonLoopbackRiskInput_Deserialize) => typedError<PortForwardNonLoopbackRisk, ConfigError>(__TAURI_INVOKE("check_port_forward_non_loopback_risk", { input })),
+	startPortForwardRule: (input: PortForwardRuleIdInput) => typedError<PortForwardSnapshot_Serialize, ConfigError>(__TAURI_INVOKE("start_port_forward_rule", { input })),
+	stopPortForwardRule: (input: PortForwardRuleIdInput) => typedError<PortForwardSnapshot_Serialize, ConfigError>(__TAURI_INVOKE("stop_port_forward_rule", { input })),
+	deletePortForwardRule: (input: PortForwardRuleIdInput) => typedError<PortForwardSnapshot_Serialize, ConfigError>(__TAURI_INVOKE("delete_port_forward_rule", { input })),
+	submitPortForwardSshVerification: (input: PortForwardSshVerificationSubmitInput) => typedError<null, ConfigError>(__TAURI_INVOKE("submit_port_forward_ssh_verification", { input })),
+	getWorkspaceLayoutSnapshot: () => typedError<WorkspaceLayoutSnapshot_Serialize, ConfigError>(__TAURI_INVOKE("get_workspace_layout_snapshot")),
+	workspaceDispatch: (input: WorkspaceDispatchInput) => typedError<WorkspaceLayoutSnapshot_Serialize, ConfigError>(__TAURI_INVOKE("workspace_dispatch", { input })),
 	submitWorkspaceSshVerification: (input: WorkspaceSshVerificationSubmitInput) => typedError<null, ConfigError>(__TAURI_INVOKE("submit_workspace_ssh_verification", { input })),
 	listProfiles: () => typedError<ProfileEntry[], ConfigError>(__TAURI_INVOKE("list_profiles")),
 	readProfile: (name: string) => typedError<ProfileConfigDocument, ConfigError>(__TAURI_INVOKE("read_profile", { name })),
@@ -54,12 +63,12 @@ export const commands = {
 	setActiveProfile: (name: string) => typedError<ConfigRootInfo, ConfigError>(__TAURI_INVOKE("set_active_profile", { name })),
 	readMainConfig: () => typedError<MainConfigDocument, ConfigError>(__TAURI_INVOKE("read_main_config")),
 	updateMainConfig: (document: MainConfigDocument) => typedError<MainConfigDocument, ConfigError>(__TAURI_INVOKE("update_main_config", { document })),
-	readConnectionHost: (id: string) => typedError<ConnectionHostEntry, ConfigError>(__TAURI_INVOKE("read_connection_host", { id })),
-	listConnectionHosts: () => typedError<ConnectionHostEntry[], ConfigError>(__TAURI_INVOKE("list_connection_hosts")),
-	createConnectionHost: (input: ConnectionHostDocumentInput) => typedError<ConnectionHostEntry, ConfigError>(__TAURI_INVOKE("create_connection_host", { input })),
-	updateConnectionHost: (input: ConnectionHostDocumentInput) => typedError<ConnectionHostEntry, ConfigError>(__TAURI_INVOKE("update_connection_host", { input })),
+	readConnectionHost: (id: string) => typedError<ConnectionHostEntry_Serialize, ConfigError>(__TAURI_INVOKE("read_connection_host", { id })),
+	listConnectionHosts: () => typedError<ConnectionHostEntry_Serialize[], ConfigError>(__TAURI_INVOKE("list_connection_hosts")),
+	createConnectionHost: (input: ConnectionHostDocumentInput_Deserialize) => typedError<ConnectionHostEntry_Serialize, ConfigError>(__TAURI_INVOKE("create_connection_host", { input })),
+	updateConnectionHost: (input: ConnectionHostDocumentInput_Deserialize) => typedError<ConnectionHostEntry_Serialize, ConfigError>(__TAURI_INVOKE("update_connection_host", { input })),
 	deleteConnectionHost: (id: string) => typedError<null, ConfigError>(__TAURI_INVOKE("delete_connection_host", { id })),
-	repairConnectionHostId: (id: string) => typedError<ConnectionHostEntry, ConfigError>(__TAURI_INVOKE("repair_connection_host_id", { id })),
+	repairConnectionHostId: (id: string) => typedError<ConnectionHostEntry_Serialize, ConfigError>(__TAURI_INVOKE("repair_connection_host_id", { id })),
 	listSshKnownHosts: () => typedError<string[], ConfigError>(__TAURI_INVOKE("list_ssh_known_hosts")),
 	setHostDirsCommand: (input: HostDirsInput) => typedError<ConfigRootInfo, ConfigError>(__TAURI_INVOKE("set_host_dirs_command", { input })),
 	setOpensshConfigFilesCommand: (input: HostDirsInput) => typedError<ConfigRootInfo, ConfigError>(__TAURI_INVOKE("set_openssh_config_files_command", { input })),
@@ -79,13 +88,24 @@ export const commands = {
 };
 
 /* Types */
-export type AppConfigSnapshot = {
+export type AppConfigSnapshot = AppConfigSnapshot_Serialize | AppConfigSnapshot_Deserialize;
+
+export type AppConfigSnapshot_Deserialize = {
 	root: ConfigRootInfo,
 	main_config: MainConfigDocument,
 	profile_config: ProfileConfigDocument,
 	effective_config: EffectiveConfigDocument,
 	profiles: ProfileEntry[],
-	hosts: ConnectionHostEntry[],
+	hosts: ConnectionHostEntry_Deserialize[],
+};
+
+export type AppConfigSnapshot_Serialize = {
+	root: ConfigRootInfo,
+	main_config: MainConfigDocument,
+	profile_config: ProfileConfigDocument,
+	effective_config: EffectiveConfigDocument,
+	profiles: ProfileEntry[],
+	hosts: ConnectionHostEntry_Serialize[],
 };
 
 export type AppMenuPopupInput = {
@@ -145,7 +165,25 @@ export type ConnectionHostDiagnostic = {
 	message: string,
 };
 
-export type ConnectionHostDocument = {
+export type ConnectionHostDocument = ConnectionHostDocument_Serialize | ConnectionHostDocument_Deserialize;
+
+export type ConnectionHostDocumentInput = ConnectionHostDocumentInput_Serialize | ConnectionHostDocumentInput_Deserialize;
+
+export type ConnectionHostDocumentInput_Deserialize = {
+	id: string | null,
+	directory: string | null,
+	folder: string | null,
+	document: ConnectionHostDocument_Deserialize,
+};
+
+export type ConnectionHostDocumentInput_Serialize = {
+	id: string | null,
+	directory: string | null,
+	folder: string | null,
+	document: ConnectionHostDocument_Serialize,
+};
+
+export type ConnectionHostDocument_Deserialize = {
 	version: number,
 	id: string,
 	name: string,
@@ -153,25 +191,45 @@ export type ConnectionHostDocument = {
 	icon: ConnectionHostIcon | null,
 	files: HostFilesConfig | null,
 	resources: HostResourceConfig | null,
+	port_forwards?: PortForwardRule_Deserialize[],
 	protocol: ConnectionProtocol,
 	local: LocalConnectionConfig | null,
 	ssh: SshConnectionConfig | null,
 	telnet: TelnetConnectionConfig | null,
 };
 
-export type ConnectionHostDocumentInput = {
-	id: string | null,
-	directory: string | null,
+export type ConnectionHostDocument_Serialize = {
+	version: number,
+	id: string,
+	name: string,
 	folder: string | null,
-	document: ConnectionHostDocument,
+	icon: ConnectionHostIcon | null,
+	files: HostFilesConfig | null,
+	resources: HostResourceConfig | null,
+	port_forwards?: PortForwardRule_Serialize[],
+	protocol: ConnectionProtocol,
+	local: LocalConnectionConfig | null,
+	ssh: SshConnectionConfig | null,
+	telnet: TelnetConnectionConfig | null,
 };
 
-export type ConnectionHostEntry = {
+export type ConnectionHostEntry = ConnectionHostEntry_Serialize | ConnectionHostEntry_Deserialize;
+
+export type ConnectionHostEntry_Deserialize = {
 	id: string,
 	path: string | null,
 	source: ConnectionHostSource,
 	read_only: boolean,
-	document: ConnectionHostDocument,
+	document: ConnectionHostDocument_Deserialize,
+	diagnostics: ConnectionHostDiagnostic[],
+};
+
+export type ConnectionHostEntry_Serialize = {
+	id: string,
+	path: string | null,
+	source: ConnectionHostSource,
+	read_only: boolean,
+	document: ConnectionHostDocument_Serialize,
 	diagnostics: ConnectionHostDiagnostic[],
 };
 
@@ -430,6 +488,166 @@ export type PaneMenuEvent = {
 	pane_id: string,
 };
 
+export type PortForwardDirection = "local_to_remote" | "remote_to_local";
+
+export type PortForwardDraft = {
+	name: string,
+	direction: PortForwardDirection,
+	local_address: string,
+	local_port: string,
+	remote_address: string,
+	remote_port: string,
+	persistence: PortForwardPersistence,
+	connect_on_host_open: boolean,
+};
+
+export type PortForwardDraftInput = {
+	host_id: string,
+	draft: PortForwardDraft,
+};
+
+export type PortForwardEvent = {
+	sequence: string,
+	occurred_at_unix_ms: string,
+	level: PortForwardEventLevel,
+	message: string,
+};
+
+export type PortForwardEventLevel = "debug" | "info" | "warn" | "error";
+
+export type PortForwardNonLoopbackConfirmation = {
+	semantic_key: PortForwardSemanticKey,
+	confirmed_at_unix_ms: string,
+};
+
+export type PortForwardNonLoopbackRisk = {
+	requires_confirmation: boolean,
+	listen_address: string,
+	reasons: string[],
+};
+
+export type PortForwardNonLoopbackRiskInput = PortForwardNonLoopbackRiskInput_Serialize | PortForwardNonLoopbackRiskInput_Deserialize;
+
+export type PortForwardNonLoopbackRiskInput_Deserialize = {
+	rule: PortForwardRule_Deserialize,
+};
+
+export type PortForwardNonLoopbackRiskInput_Serialize = {
+	rule: PortForwardRule_Serialize,
+};
+
+export type PortForwardPersistence = "just_this_time" | "saved";
+
+export type PortForwardRule = PortForwardRule_Serialize | PortForwardRule_Deserialize;
+
+export type PortForwardRuleIdInput = {
+	host_id: string,
+	rule_id: string,
+};
+
+export type PortForwardRuleInput = PortForwardRuleInput_Serialize | PortForwardRuleInput_Deserialize;
+
+export type PortForwardRuleInput_Deserialize = {
+	host_id: string,
+	rule: PortForwardRule_Deserialize,
+	persistence: PortForwardPersistence,
+};
+
+export type PortForwardRuleInput_Serialize = {
+	host_id: string,
+	rule: PortForwardRule_Serialize,
+	persistence: PortForwardPersistence,
+};
+
+export type PortForwardRuleSnapshot = PortForwardRuleSnapshot_Serialize | PortForwardRuleSnapshot_Deserialize;
+
+export type PortForwardRuleSnapshot_Deserialize = {
+	rule: PortForwardRule_Deserialize,
+	runtime: PortForwardRuntimeRule,
+};
+
+export type PortForwardRuleSnapshot_Serialize = {
+	rule: PortForwardRule_Serialize,
+	runtime: PortForwardRuntimeRule,
+};
+
+export type PortForwardRuleStatus = "stopped" | "starting" | "running" | "reconnecting" | "failed" | "needs_confirmation";
+
+export type PortForwardRule_Deserialize = {
+	id: string,
+	name: string,
+	direction: PortForwardDirection,
+	local_address: string,
+	local_port: number,
+	remote_address: string,
+	remote_port: number,
+	connect_on_host_open?: boolean,
+	non_loopback_confirmations?: PortForwardNonLoopbackConfirmation[],
+};
+
+export type PortForwardRule_Serialize = {
+	id: string,
+	name: string,
+	direction: PortForwardDirection,
+	local_address: string,
+	local_port: number,
+	remote_address: string,
+	remote_port: number,
+	connect_on_host_open: boolean,
+	non_loopback_confirmations?: PortForwardNonLoopbackConfirmation[],
+};
+
+export type PortForwardRuntimeRule = {
+	rule_id: string,
+	persistence: PortForwardPersistence,
+	status: PortForwardRuleStatus,
+	intended_running: boolean,
+	active_connections: number,
+	effective_local_port: number | null,
+	effective_remote_port: number | null,
+	warning: string | null,
+	error: string | null,
+	events: PortForwardEvent[],
+};
+
+export type PortForwardSemanticKey = {
+	direction: PortForwardDirection,
+	local_address: string,
+	local_port: number,
+	remote_address: string,
+	remote_port: number,
+};
+
+export type PortForwardSnapshot = PortForwardSnapshot_Serialize | PortForwardSnapshot_Deserialize;
+
+export type PortForwardSnapshot_Deserialize = {
+	host_id: string,
+	supported: boolean,
+	unsupported_reason: string | null,
+	rules: PortForwardRuleSnapshot_Deserialize[],
+	draft: PortForwardDraft | null,
+};
+
+export type PortForwardSnapshot_Serialize = {
+	host_id: string,
+	supported: boolean,
+	unsupported_reason: string | null,
+	rules: PortForwardRuleSnapshot_Serialize[],
+	draft: PortForwardDraft | null,
+};
+
+export type PortForwardSshVerificationRequiredEvent = {
+	host_id: string,
+	verification_id: string,
+	challenge: SshHostScopedChallenge,
+};
+
+export type PortForwardSshVerificationSubmitInput = {
+	host_id: string,
+	verification_id: string,
+	response: WorkspaceSshVerificationResponse,
+};
+
 export type ProfileConfigDocument = {
 	root: ConfigTable,
 };
@@ -563,6 +781,8 @@ export type SshHostKeyChallenge = {
 };
 
 export type SshHostKeyChallengeKind = "unknown" | "changed";
+
+export type SshHostScopedChallenge = { kind: "credential"; challenge: SshCredentialChallenge } | { kind: "host_key"; challenge: SshHostKeyChallenge };
 
 export type SshWorkspaceChallenge = { kind: "credential"; challenge: SshCredentialChallenge } | { kind: "host_key"; challenge: SshHostKeyChallenge };
 
@@ -796,10 +1016,18 @@ export type TransferTaskInput = {
 
 export type TransferTaskStatus = "queued" | "running" | "failed" | "completed" | "canceled";
 
-export type WorkspaceChangedEvent = {
+export type WorkspaceChangedEvent = WorkspaceChangedEvent_Serialize | WorkspaceChangedEvent_Deserialize;
+
+export type WorkspaceChangedEvent_Deserialize = {
 	version: number,
 	reason: string,
-	snapshot: WorkspaceLayoutSnapshot,
+	snapshot: WorkspaceLayoutSnapshot_Deserialize,
+};
+
+export type WorkspaceChangedEvent_Serialize = {
+	version: number,
+	reason: string,
+	snapshot: WorkspaceLayoutSnapshot_Serialize,
 };
 
 export type WorkspaceDispatchInput = {
@@ -809,25 +1037,50 @@ export type WorkspaceDispatchInput = {
 
 export type WorkspaceDockDirection = "row" | "column";
 
-export type WorkspaceDockGroupRole = "content" | "sidebar" | "panel";
+export type WorkspaceDockGroupRole = WorkspaceDockGroupRole_Serialize | WorkspaceDockGroupRole_Deserialize;
 
-export type WorkspaceDockLayout = { kind: "split"; direction: WorkspaceDockDirection; children: WorkspaceDockLayout[]; ratios: (number | null)[] } | { kind: "group"; id: string; role: WorkspaceDockGroupRole; slots: WorkspaceToolSlot[]; active_slot_id: string };
+export type WorkspaceDockGroupRole_Deserialize = "content" | "side_panel" | "sidebar" | "panel";
+
+export type WorkspaceDockGroupRole_Serialize = "content" | "side_panel";
+
+export type WorkspaceDockLayout = WorkspaceDockLayout_Serialize | WorkspaceDockLayout_Deserialize;
+
+export type WorkspaceDockLayout_Deserialize = ({ kind: "split"; direction: WorkspaceDockDirection; children: WorkspaceDockLayout_Deserialize[]; ratios: (number | null)[] }) & { active_slot_id?: never; id?: never; role?: never; slots?: never } | ({ kind: "group"; id: string; role: WorkspaceDockGroupRole_Deserialize; slots: WorkspaceToolSlot[]; active_slot_id: string }) & { children?: never; direction?: never; ratios?: never };
+
+export type WorkspaceDockLayout_Serialize = ({ kind: "split"; direction: WorkspaceDockDirection; children: WorkspaceDockLayout_Serialize[]; ratios: (number | null)[] }) & { active_slot_id?: never; id?: never; role?: never; slots?: never } | ({ kind: "group"; id: string; role: WorkspaceDockGroupRole_Serialize; slots: WorkspaceToolSlot[]; active_slot_id: string }) & { children?: never; direction?: never; ratios?: never };
 
 export type WorkspaceDockSide = "left" | "right" | "up" | "down";
 
-export type WorkspaceFloatingWindowState = {
+export type WorkspaceFloatingWindowState = WorkspaceFloatingWindowState_Serialize | WorkspaceFloatingWindowState_Deserialize;
+
+export type WorkspaceFloatingWindowState_Deserialize = {
 	id: string,
-	layout: WorkspaceDockLayout,
+	layout: WorkspaceDockLayout_Deserialize,
+};
+
+export type WorkspaceFloatingWindowState_Serialize = {
+	id: string,
+	layout: WorkspaceDockLayout_Serialize,
 };
 
 export type WorkspaceIntent = { kind: "create_workspace"; host_id: string } | { kind: "activate_workspace"; workspace_id: string } | { kind: "rename_workspace"; workspace_id: string; title: string } | { kind: "close_workspace"; workspace_id: string } | { kind: "close_other_workspaces"; workspace_id: string } | { kind: "close_workspaces_to_right"; workspace_id: string } | { kind: "activate_tool_slot"; workspace_id: string; slot_id: string } | { kind: "close_tool_slot"; workspace_id: string; slot_id: string } | { kind: "close_other_tool_slots"; workspace_id: string; slot_id: string } | { kind: "close_tool_slots_to_right"; workspace_id: string; slot_id: string } | { kind: "mirror_tool_tab"; source_tool_tab_id: string; target_workspace_id: string; target_group_id: string } | { kind: "float_tool_slot"; workspace_id: string; slot_id: string } | { kind: "close_floating_window"; floating_window_id: string } | { kind: "move_tool_slot_to_group"; workspace_id: string; slot_id: string; target_group_id: string } | { kind: "move_tool_slot_to_split"; workspace_id: string; slot_id: string; target_slot_id: string; side: WorkspaceDockSide } | { kind: "move_tool_slot_to_workspace_edge"; workspace_id: string; slot_id: string; side: WorkspaceDockSide } | { kind: "split_tool_slot"; workspace_id: string; target_slot_id: string; tool_tab_id: string; side: WorkspaceDockSide } | { kind: "create_terminal_tool_tab"; workspace_id: string; target_group_id: string | null } | { kind: "open_resource_monitor_tool_tab"; workspace_id: string; target_group_id: string | null };
 
-export type WorkspaceLayoutSnapshot = {
+export type WorkspaceLayoutSnapshot = WorkspaceLayoutSnapshot_Serialize | WorkspaceLayoutSnapshot_Deserialize;
+
+export type WorkspaceLayoutSnapshot_Deserialize = {
 	version: number,
 	active_workspace_id: string,
-	workspaces: WorkspaceTabState[],
+	workspaces: WorkspaceTabState_Deserialize[],
 	tool_tabs: WorkspaceToolTab[],
-	floating_windows: WorkspaceFloatingWindowState[],
+	floating_windows: WorkspaceFloatingWindowState_Deserialize[],
+};
+
+export type WorkspaceLayoutSnapshot_Serialize = {
+	version: number,
+	active_workspace_id: string,
+	workspaces: WorkspaceTabState_Serialize[],
+	tool_tabs: WorkspaceToolTab[],
+	floating_windows: WorkspaceFloatingWindowState_Serialize[],
 };
 
 export type WorkspaceSshVerificationRequiredEvent = {
@@ -844,15 +1097,25 @@ export type WorkspaceSshVerificationSubmitInput = {
 	response: WorkspaceSshVerificationResponse,
 };
 
-export type WorkspaceTabState = {
+export type WorkspaceTabState = WorkspaceTabState_Serialize | WorkspaceTabState_Deserialize;
+
+export type WorkspaceTabState_Deserialize = {
 	id: string,
 	host_id: string,
 	title: string,
 	owned_tool_tab_ids: string[],
-	layout: WorkspaceDockLayout,
+	layout: WorkspaceDockLayout_Deserialize,
 };
 
-export type WorkspaceToolKind = "files" | "terminal" | "transfers" | "resources";
+export type WorkspaceTabState_Serialize = {
+	id: string,
+	host_id: string,
+	title: string,
+	owned_tool_tab_ids: string[],
+	layout: WorkspaceDockLayout_Serialize,
+};
+
+export type WorkspaceToolKind = "files" | "terminal" | "transfers" | "resources" | "ports";
 
 export type WorkspaceToolSlot = { kind: "owned"; id: string; tool_tab_id: string } | { kind: "mirror"; id: string; tool_tab_id: string; owner_workspace_id: string } | { kind: "floating_placeholder"; id: string; tool_tab_id: string; floating_window_id: string } | { kind: "closed_source"; id: string; previous_title: string; owner_workspace_title: string };
 

@@ -10,13 +10,14 @@
  * cannot be fully covered by pure view-model tests.
  *
  * Expected:
- * Tree sticky rows are driven by the first visible tree row instead of only the
- * selected path, external file drops resolve a concrete directory row target
- * and show lightweight row highlighting, selection actions stay in the context
- * menu without a top selection action bar, marquee selection starts only from
- * empty list space, and Columns navigation schedules deterministic horizontal
- * scrolling to a pending focused column window when the user clicks the left
- * visible column, otherwise falling back to the last three visible columns.
+ * Tree sticky rows are driven by persisted per-ToolTab view state and the first
+ * visible tree row instead of only the selected path, external file drops
+ * resolve a concrete directory row target and show lightweight row highlighting,
+ * selection actions stay in the context menu without a top selection action bar,
+ * marquee selection starts only from empty list space, and Columns navigation
+ * schedules deterministic horizontal scrolling to a pending focused column
+ * window when the user clicks the left visible column, otherwise falling back to
+ * the last three visible columns.
  */
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
@@ -29,10 +30,13 @@ describe("Files ToolTab Finder-style UI source", () => {
   it("uses visible tree range, row drop targets, and active-window Columns scrolling", () => {
     const source = readFileSync(sourcePath, "utf8");
 
-    assert.match(source, /let\s+firstVisibleTreePath\s*=\s*\$state\(""\);/);
+    assert.match(source, /filesToolViewState/);
+    assert.match(source, /const\s+viewState\s*=\s*filesToolViewState\(toolTab\.id\);/);
+    assert.match(source, /let\s+firstVisibleTreePath\s*=\s*\$derived\(viewState\.firstVisibleTreePath\);/);
     assert.match(source, /firstVisiblePath:\s*firstVisibleTreePath\s*\|\|\s*selectedPath/);
     assert.match(source, /function\s+installTreeVisibleScrollListener\(\)/);
     assert.match(source, /function\s+updateFirstVisibleTreePath\(\)/);
+    assert.match(source, /viewState\.firstVisibleTreePath\s*=\s*row\.getAttribute\("data-entry-path"\)\s*\?\?\s*"";/);
 
     assert.match(source, /let\s+externalDropTargetPath\s*=\s*\$state<string\s*\|\s*null>\(null\);/);
     assert.match(source, /function\s+directoryDropTargetFromPosition\(x:\s*number\s*\|\s*undefined,\s*y:\s*number\s*\|\s*undefined\)/);

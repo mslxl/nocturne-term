@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashSet},
     env, fs,
     io::Write,
     path::{Component, Path, PathBuf},
@@ -22,8 +22,8 @@ use crate::{
         ConfigValue, ConnectionDiagnosticSeverity, ConnectionHostDiagnostic,
         ConnectionHostDocument, ConnectionHostDocumentInput, ConnectionHostEntry,
         ConnectionHostIcon, ConnectionHostSource, EffectiveConfigDocument, HostDirsInput,
-        LocalConnectionConfig, MainConfigDocument, ProfileConfigDocument, ProfileDocumentInput,
-        ProfileEntry, SshConnectionConfig, TabBarOrientation,
+        LocalConnectionConfig, MainConfigDocument, PortForwardRule, ProfileConfigDocument,
+        ProfileDocumentInput, ProfileEntry, SshConnectionConfig, TabBarOrientation,
     },
 };
 
@@ -800,6 +800,7 @@ fn default_local_host_document() -> ConnectionHostDocument {
         }),
         files: None,
         resources: None,
+        port_forwards: Vec::new(),
         protocol: crate::types::ConnectionProtocol::Local,
         local: Some(LocalConnectionConfig::default()),
         ssh: None,
@@ -833,6 +834,7 @@ fn validate_connection_host_document(document: &ConnectionHostDocument) -> Resul
     if let Some(icon) = &document.icon {
         validate_connection_host_icon(icon)?;
     }
+    validate_port_forward_rules(&document.port_forwards)?;
     match document.protocol {
         crate::types::ConnectionProtocol::Local => {
             let Some(local) = &document.local else {
@@ -862,6 +864,76 @@ fn validate_connection_host_document(document: &ConnectionHostDocument) -> Resul
             }
             Ok(())
         }
+    }
+}
+
+fn validate_port_forward_rules(rules: &[PortForwardRule]) -> Result<()> {
+    let mut ids = HashSet::new();
+    let mut semantic_keys = HashSet::new();
+    for rule in rules {
+        validate_port_forward_rule(rule)?;
+        if !ids.insert(rule.id.clone()) {
+            return Err(invalid_error(format!(
+                "duplicate port forward rule id {}",
+                rule.id
+            )));
+        }
+        let key = port_forward_semantic_key(rule);
+        if !semantic_keys.insert(key) {
+            return Err(invalid_error(format!(
+                "duplicate port forward rule connection semantics for {}:{} and {}:{}",
+                rule.local_address.trim(),
+                rule.local_port,
+                rule.remote_address.trim(),
+                rule.remote_port
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_port_forward_rule(rule: &PortForwardRule) -> Result<()> {
+    Uuid::parse_str(&rule.id)
+        .map_err(|_| invalid_error(format!("port forward rule id must be a UUID: {}", rule.id)))?;
+    validate_port_forward_address("local address", &rule.local_address)?;
+    validate_port_forward_address("remote address", &rule.remote_address)?;
+    for confirmation in &rule.non_loopback_confirmations {
+        if confirmation.semantic_key != port_forward_semantic_key(rule) {
+            return Err(invalid_error(format!(
+                "port forward rule {} has stale non-loopback confirmation",
+                rule.id
+            )));
+        }
+        if confirmation.confirmed_at_unix_ms.trim().is_empty() {
+            return Err(invalid_error(
+                "port forward non-loopback confirmation timestamp cannot be empty",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_port_forward_address(label: &str, address: &str) -> Result<()> {
+    if address.trim().is_empty() {
+        return Err(invalid_error(format!(
+            "port forward {label} cannot be empty"
+        )));
+    }
+    if address.trim() != address {
+        return Err(invalid_error(format!(
+            "port forward {label} cannot contain leading or trailing whitespace"
+        )));
+    }
+    Ok(())
+}
+
+fn port_forward_semantic_key(rule: &PortForwardRule) -> crate::types::PortForwardSemanticKey {
+    crate::types::PortForwardSemanticKey {
+        direction: rule.direction,
+        local_address: rule.local_address.trim().to_string(),
+        local_port: rule.local_port,
+        remote_address: rule.remote_address.trim().to_string(),
+        remote_port: rule.remote_port,
     }
 }
 
@@ -1540,6 +1612,7 @@ fn parsed_to_openssh_hosts(parsed: ParsedOpenSshConfig, path: &Path) -> Vec<Conn
                     }),
                     files: None,
                     resources: None,
+                    port_forwards: Vec::new(),
                     protocol: crate::types::ConnectionProtocol::Ssh,
                     local: None,
                     ssh: Some(SshConnectionConfig {
@@ -2497,6 +2570,27 @@ pub(crate) fn connection_host_by_id(
         .ok_or_else(|| missing_error(format!("connection host {id} not found")))
 }
 
+pub(crate) fn update_connection_host_port_forwards<R, F>(
+    app: &AppHandle<R>,
+    id: &str,
+    update: F,
+) -> Result<ConnectionHostEntry>
+where
+    R: Runtime,
+    F: FnOnce(&mut Vec<PortForwardRule>) -> Result<()>,
+{
+    let root = ensure_layout(app)?;
+    let state = load_state(Path::new(&root.state_path))?;
+    let root_path = Path::new(&root.root_dir);
+    let path = connection_host_path_from_id(root_path, &state.active_profile, id)?;
+    let base = connection_host_base_dir_for_path(root_path, &state.active_profile, &path)?;
+    let mut document = read_connection_host_document_from_path(&path)?;
+    update(&mut document.port_forwards)?;
+    write_connection_host_document(&path, &document)?;
+    emit_change(app);
+    Ok(connection_host_entry_from_path(&base, path, document))
+}
+
 pub(crate) fn default_connection_host_id(app: &AppHandle<impl Runtime>) -> Result<String> {
     let root = root_paths(app)?;
     let configured = root.default_host;
@@ -2512,7 +2606,10 @@ pub(crate) fn default_connection_host_id(app: &AppHandle<impl Runtime>) -> Resul
 mod tests {
     use super::*;
     use crate::error::ConfigError;
-    use crate::types::{ConnectionProtocol, TelnetConnectionConfig};
+    use crate::types::{
+        ConnectionProtocol, PortForwardDirection, PortForwardNonLoopbackConfirmation,
+        PortForwardRule, PortForwardSemanticKey, TelnetConnectionConfig,
+    };
     use tempfile::tempdir;
 
     #[test]
@@ -2587,6 +2684,7 @@ mod tests {
             }),
             files: None,
             resources: None,
+            port_forwards: Vec::new(),
             telnet: None,
         };
 
@@ -2603,6 +2701,162 @@ mod tests {
             Some(ConnectionHostIcon::Catalog { ref name }) if name == "devicon:amazonwebservices"
         ));
         assert_eq!(read.ssh.expect("ssh").hostname, "prod.example.com");
+    }
+
+    #[test]
+    fn connection_host_round_trips_saved_port_forwards() {
+        let dir = tempdir().expect("temp dir");
+        let id = "018f6eb3-6f91-7410-bc43-f927b2236d94";
+        let path = dir.path().join(format!("{id}.toml"));
+        let rule = test_port_forward_rule(
+            "018f6eb3-6f91-7410-bc43-f927b2236d95",
+            PortForwardDirection::LocalToRemote,
+            "127.0.0.1",
+            15432,
+            "db.internal",
+            5432,
+        );
+        let document = test_ssh_host_document(id, "Production API", vec![rule.clone()]);
+
+        write_connection_host_document(&path, &document).expect("write host");
+        let read = read_connection_host_document_from_path(&path).expect("read host");
+        let text = fs::read_to_string(&path).expect("host toml");
+
+        assert!(text.contains("[[port_forwards]]"));
+        assert!(text.contains("direction = \"local_to_remote\""));
+        assert_eq!(read.port_forwards.len(), 1);
+        assert_eq!(read.port_forwards[0].id, rule.id);
+        assert_eq!(read.port_forwards[0].name, "Postgres");
+        assert_eq!(read.port_forwards[0].local_address, "127.0.0.1");
+        assert_eq!(read.port_forwards[0].local_port, 15432);
+        assert_eq!(read.port_forwards[0].remote_address, "db.internal");
+        assert_eq!(read.port_forwards[0].remote_port, 5432);
+        assert!(read.port_forwards[0].connect_on_host_open);
+    }
+
+    #[test]
+    fn connection_host_preserves_port_forwards_for_unsupported_protocols() {
+        let dir = tempdir().expect("temp dir");
+        let id = "018f6eb3-6f91-7410-bc43-f927b2236d94";
+        let path = dir.path().join(format!("{id}.toml"));
+        let mut document = ConnectionHostDocument {
+            version: 1,
+            id: id.to_string(),
+            name: "Local With Saved Forwards".to_string(),
+            folder: None,
+            icon: None,
+            files: None,
+            resources: None,
+            port_forwards: vec![test_port_forward_rule(
+                "018f6eb3-6f91-7410-bc43-f927b2236d95",
+                PortForwardDirection::RemoteToLocal,
+                "127.0.0.1",
+                3000,
+                "127.0.0.1",
+                0,
+            )],
+            protocol: ConnectionProtocol::Local,
+            local: Some(LocalConnectionConfig::default()),
+            ssh: None,
+            telnet: None,
+        };
+
+        write_connection_host_document(&path, &document).expect("write local host");
+        document.protocol = ConnectionProtocol::Telnet;
+        document.local = None;
+        document.telnet = Some(TelnetConnectionConfig {
+            hostname: "router.internal".to_string(),
+            port: 23,
+        });
+        write_connection_host_document(&path, &document).expect("write telnet host");
+        let read = read_connection_host_document_from_path(&path).expect("read telnet host");
+
+        assert_eq!(read.protocol, ConnectionProtocol::Telnet);
+        assert_eq!(read.port_forwards.len(), 1);
+        assert_eq!(
+            read.port_forwards[0].direction,
+            PortForwardDirection::RemoteToLocal
+        );
+        assert_eq!(read.port_forwards[0].remote_port, 0);
+    }
+
+    #[test]
+    fn connection_host_validation_rejects_duplicate_port_forward_semantics() {
+        let first = test_port_forward_rule(
+            "018f6eb3-6f91-7410-bc43-f927b2236d95",
+            PortForwardDirection::LocalToRemote,
+            "127.0.0.1",
+            15432,
+            "db.internal",
+            5432,
+        );
+        let mut second = first.clone();
+        second.id = "018f6eb3-6f91-7410-bc43-f927b2236d96".to_string();
+        second.name = "Different Label".to_string();
+        let document = test_ssh_host_document(
+            "018f6eb3-6f91-7410-bc43-f927b2236d94",
+            "Production API",
+            vec![first, second],
+        );
+
+        let error = validate_connection_host_document(&document)
+            .expect_err("duplicate port forward semantics");
+
+        assert!(format!("{error}").contains("duplicate port forward rule connection semantics"));
+    }
+
+    #[test]
+    fn connection_host_validation_requires_explicit_port_forward_addresses() {
+        let rule = test_port_forward_rule(
+            "018f6eb3-6f91-7410-bc43-f927b2236d95",
+            PortForwardDirection::LocalToRemote,
+            "",
+            15432,
+            "db.internal",
+            5432,
+        );
+        let document = test_ssh_host_document(
+            "018f6eb3-6f91-7410-bc43-f927b2236d94",
+            "Production API",
+            vec![rule],
+        );
+
+        let error =
+            validate_connection_host_document(&document).expect_err("missing local address");
+
+        assert!(format!("{error}").contains("port forward local address cannot be empty"));
+    }
+
+    #[test]
+    fn connection_host_validation_invalidates_stale_port_forward_confirmations() {
+        let mut rule = test_port_forward_rule(
+            "018f6eb3-6f91-7410-bc43-f927b2236d95",
+            PortForwardDirection::LocalToRemote,
+            "0.0.0.0",
+            15432,
+            "db.internal",
+            5432,
+        );
+        rule.non_loopback_confirmations
+            .push(PortForwardNonLoopbackConfirmation {
+                semantic_key: PortForwardSemanticKey {
+                    direction: PortForwardDirection::LocalToRemote,
+                    local_address: "127.0.0.1".to_string(),
+                    local_port: 15432,
+                    remote_address: "db.internal".to_string(),
+                    remote_port: 5432,
+                },
+                confirmed_at_unix_ms: "1781881401000".to_string(),
+            });
+        let document = test_ssh_host_document(
+            "018f6eb3-6f91-7410-bc43-f927b2236d94",
+            "Production API",
+            vec![rule],
+        );
+
+        let error = validate_connection_host_document(&document).expect_err("stale confirmation");
+
+        assert!(format!("{error}").contains("stale non-loopback confirmation"));
     }
 
     #[test]
@@ -2639,6 +2893,7 @@ mod tests {
             }),
             files: None,
             resources: None,
+            port_forwards: Vec::new(),
             telnet: None,
         };
         write_connection_host_document(
@@ -2685,6 +2940,7 @@ mod tests {
             ssh: None,
             files: None,
             resources: None,
+            port_forwards: Vec::new(),
             telnet: None,
         };
 
@@ -2709,6 +2965,7 @@ mod tests {
             ssh: None,
             files: None,
             resources: None,
+            port_forwards: Vec::new(),
             telnet: None,
         };
 
@@ -2733,6 +2990,7 @@ mod tests {
             ssh: None,
             files: None,
             resources: None,
+            port_forwards: Vec::new(),
             telnet: None,
         };
 
@@ -2775,6 +3033,7 @@ mod tests {
             }),
             files: None,
             resources: None,
+            port_forwards: Vec::new(),
             telnet: None,
         };
         let second = ConnectionHostDocument {
@@ -2790,6 +3049,7 @@ mod tests {
             ssh: None,
             files: None,
             resources: None,
+            port_forwards: Vec::new(),
             telnet: Some(TelnetConnectionConfig {
                 hostname: "192.0.2.1".to_string(),
                 port: 23,
@@ -3021,5 +3281,57 @@ mod tests {
             .diagnostics
             .iter()
             .any(|diagnostic| diagnostic.code == "unsupported_match_exec"));
+    }
+
+    fn test_ssh_host_document(
+        id: &str,
+        name: &str,
+        port_forwards: Vec<PortForwardRule>,
+    ) -> ConnectionHostDocument {
+        ConnectionHostDocument {
+            version: 1,
+            id: id.to_string(),
+            name: name.to_string(),
+            folder: None,
+            icon: Some(ConnectionHostIcon::Catalog {
+                name: "devicon:ssh".to_string(),
+            }),
+            files: None,
+            resources: None,
+            port_forwards,
+            protocol: ConnectionProtocol::Ssh,
+            local: None,
+            ssh: Some(SshConnectionConfig {
+                hostname: "prod.example.com".to_string(),
+                port: 22,
+                username: Some("deploy".to_string()),
+                identity_file: None,
+                proxy_jump: None,
+                forward_agent: false,
+                server_alive_interval: None,
+            }),
+            telnet: None,
+        }
+    }
+
+    fn test_port_forward_rule(
+        id: &str,
+        direction: PortForwardDirection,
+        local_address: &str,
+        local_port: u16,
+        remote_address: &str,
+        remote_port: u16,
+    ) -> PortForwardRule {
+        PortForwardRule {
+            id: id.to_string(),
+            name: "Postgres".to_string(),
+            direction,
+            local_address: local_address.to_string(),
+            local_port,
+            remote_address: remote_address.to_string(),
+            remote_port,
+            connect_on_host_open: true,
+            non_loopback_confirmations: Vec::new(),
+        }
     }
 }

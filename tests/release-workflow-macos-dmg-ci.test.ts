@@ -21,11 +21,10 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
 describe("release workflow macOS DMG CI mode", () => {
-  const workflow = readFileSync(".github/workflows/release.yml", "utf8");
+  const workflow = readFileSync(".github/workflows/release.yml", "utf8").replace(/\r\n/g, "\n");
 
   it("passes Tauri CI mode for each macOS DMG build", () => {
-    const buildJob = workflow.match(/\n  build:\n[\s\S]*?(?=\n  [a-zA-Z0-9_-]+:|\n\S|$)/)?.[0];
-    assert.ok(buildJob, "release workflow must contain the app build job");
+    const buildJob = extractWorkflowJob(workflow, "build");
 
     const macosDmgEntries = [...buildJob.matchAll(/label:\s*(macOS[^\n]+)[\s\S]*?args:\s*([^\n]+)/g)]
       .map((match) => ({ label: match[1].trim(), args: match[2].trim() }))
@@ -47,3 +46,13 @@ describe("release workflow macOS DMG CI mode", () => {
     assert.match(workflow, /target\/\$\{\{\s*matrix\.rust-target\s*\}\}\/release\/bundle\/dmg/);
   });
 });
+
+function extractWorkflowJob(workflow: string, jobName: string): string {
+  const marker = `\n  ${jobName}:\n`;
+  const start = workflow.indexOf(marker);
+  assert.notEqual(start, -1, `release workflow must contain the ${jobName} job`);
+  const bodyStart = start + 1;
+  const rest = workflow.slice(bodyStart + marker.length - 1);
+  const nextJob = rest.search(/\n  [a-zA-Z0-9_-]+:\n    /);
+  return nextJob === -1 ? workflow.slice(bodyStart) : workflow.slice(bodyStart, bodyStart + marker.length - 1 + nextJob);
+}

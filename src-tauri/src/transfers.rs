@@ -1069,10 +1069,7 @@ mod tests {
             .join("child.txt")
             .to_string_lossy()
             .into_owned();
-        assert_eq!(
-            join_endpoint_path(&local, "child.txt"),
-            expected_local
-        );
+        assert_eq!(join_endpoint_path(&local, "child.txt"), expected_local);
         assert_eq!(join_endpoint_path(&sftp, "child.txt"), "/var/www/child.txt");
     }
 

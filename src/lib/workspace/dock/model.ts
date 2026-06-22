@@ -6,9 +6,9 @@ export type FloatingWindowId = string;
 
 export type DockDirection = "row" | "column";
 export type DockSide = "left" | "right" | "up" | "down";
-export type DockGroupRole = "content" | "sidebar" | "panel";
+export type DockGroupRole = "content" | "side_panel";
 
-export type ToolTabKind = "files" | "terminal" | "transfers" | "resources";
+export type ToolTabKind = "files" | "terminal" | "transfers" | "resources" | "ports";
 
 export type ToolTab = {
   id: ToolTabId;
@@ -92,7 +92,7 @@ export function createDockGroup(
   activeSlotId: DisplaySlotId,
 ): DockGroup {
   if (!id.trim()) throw new Error("dock group id cannot be empty");
-  if (!["content", "sidebar", "panel"].includes(role)) throw new Error(`dock group ${id} has invalid role ${role}`);
+  if (!["content", "side_panel"].includes(role)) throw new Error(`dock group ${id} has invalid role ${role}`);
   if (slots.length === 0 && role !== "content") throw new Error(`dock group ${id} must contain at least one slot`);
   assertUnique(slots.map((slot) => slot.id), "display slot");
   if (slots.length > 0 && !slots.some((slot) => slot.id === activeSlotId)) {
@@ -224,9 +224,6 @@ function validateWorkspace(workspace: WorkspaceTab, toolTabsById: Map<ToolTabId,
     }
   }
   validateDockLayout(workspace.layout, toolTabsById);
-  if (!listDockGroups(workspace.layout).some((group) => group.role === "content")) {
-    throw new Error(`workspace ${workspace.id} must contain at least one content dock group`);
-  }
 }
 
 function validateDockLayout(layout: DockLayout, toolTabsById: Map<ToolTabId, ToolTab>) {

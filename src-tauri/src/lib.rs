@@ -3,6 +3,7 @@ mod config;
 mod error;
 mod files;
 mod logging;
+mod port_forwarding;
 mod resources;
 mod ssh_trust;
 mod terminal;
@@ -39,24 +40,22 @@ pub use resources::{
     normalize_cpu_metric_for_test, normalize_memory_metric_for_test,
     normalize_resource_monitor_agent_metric_for_test, normalize_windows_gpu_pdh_samples_for_test,
     parse_linux_free_b_for_test, parse_linux_nvidia_smi_csv_for_test,
-    parse_linux_proc_stat_cpu_for_test, parse_macos_disk_df_for_test,
-    parse_macos_memory_for_test, parse_remote_uname_for_test,
-    parse_remote_windows_platform_for_test, parse_resource_monitor_agent_ndjson_for_test,
-    parse_unix_disk_df_for_test, parse_windows_disk_for_test, parse_windows_memory_for_test,
-    plan_resource_helper_upload_for_test,
-    remote_provider_mode_for_host_resources_for_test,
+    parse_linux_proc_stat_cpu_for_test, parse_macos_disk_df_for_test, parse_macos_memory_for_test,
+    parse_remote_uname_for_test, parse_remote_windows_platform_for_test,
+    parse_resource_monitor_agent_ndjson_for_test, parse_unix_disk_df_for_test,
+    parse_windows_disk_for_test, parse_windows_memory_for_test,
+    plan_resource_helper_upload_for_test, remote_provider_mode_for_host_resources_for_test,
     remote_system_command_plan_for_test, remote_system_provider_runs_off_command_thread_for_test,
     resolve_resource_target_for_test, resource_helper_candidate_paths_for_test,
     resource_helper_resource_path_for_test, resource_settings_from_config_for_test,
-    LocalDiskMountMetric, LocalGpuDeviceMetric, LocalResourceMetric, LocalResourceMetricAvailability,
-    LocalResourceMetricDetails, LocalResourceMetricKind, LocalResourceSnapshot, NocturneBuildInfo,
-    RemoteResourceTargetDetection, RemoteSystemCommandPlan, ResourceHelperBytesSource,
-    ResourceHelperDeploymentDecision, ResourceHelperDeploymentMemory,
-    ResourceHelperDeploymentStatus, ResourceHelperDownloadPlan, ResourceHelperManifest,
-    ResourceHelperPolicy, ResourceHelperUploadPlan, ResourceMonitorAgentDiskMount,
-    ResourceMonitorAgentEvent,
-    ResourceMonitorAgentGpuDevice, ResourceMonitorAgentMetric, WindowsGpuAdapterInfo,
-    WindowsGpuPdhSample,
+    LocalDiskMountMetric, LocalGpuDeviceMetric, LocalResourceMetric,
+    LocalResourceMetricAvailability, LocalResourceMetricDetails, LocalResourceMetricKind,
+    LocalResourceSnapshot, NocturneBuildInfo, RemoteResourceTargetDetection,
+    RemoteSystemCommandPlan, ResourceHelperBytesSource, ResourceHelperDeploymentDecision,
+    ResourceHelperDeploymentMemory, ResourceHelperDeploymentStatus, ResourceHelperDownloadPlan,
+    ResourceHelperManifest, ResourceHelperPolicy, ResourceHelperUploadPlan,
+    ResourceMonitorAgentDiskMount, ResourceMonitorAgentEvent, ResourceMonitorAgentGpuDevice,
+    ResourceMonitorAgentMetric, WindowsGpuAdapterInfo, WindowsGpuPdhSample,
 };
 pub use types::*;
 pub use types::{HostResourceConfig, RemoteResourceTargetArch, RemoteResourceTargetOs};
@@ -100,6 +99,15 @@ pub fn run() {
             transfers::create_transfer_task,
             transfers::cancel_transfer_task,
             transfers::retry_transfer_task,
+            port_forwarding::get_port_forward_snapshot,
+            port_forwarding::create_or_update_port_forward_rule,
+            port_forwarding::update_port_forward_draft,
+            port_forwarding::clear_port_forward_draft,
+            port_forwarding::check_port_forward_non_loopback_risk,
+            port_forwarding::start_port_forward_rule,
+            port_forwarding::stop_port_forward_rule,
+            port_forwarding::delete_port_forward_rule,
+            port_forwarding::submit_port_forward_ssh_verification,
             workspace::get_workspace_layout_snapshot,
             workspace::workspace_dispatch,
             workspace_ssh::submit_workspace_ssh_verification,
@@ -139,8 +147,10 @@ pub fn run() {
         .typ::<types::WorkspaceChangedEvent>()
         .typ::<types::WorkspaceSshVerificationRequiredEvent>()
         .typ::<types::TransferQueueChangedEvent>()
+        .typ::<types::PortForwardSshVerificationRequiredEvent>()
         .typ::<types::WorkspaceDockGroupRole>()
-        .typ::<types::WorkspaceDockLayout>();
+        .typ::<types::WorkspaceDockLayout>()
+        .typ::<types::PortForwardSnapshot>();
 
     #[cfg(debug_assertions)]
     builder

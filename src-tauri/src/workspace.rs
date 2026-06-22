@@ -7,12 +7,13 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter, Runtime};
+use tauri::{AppHandle, Emitter};
 use uuid::Uuid;
 
 use crate::{
     config::{connection_host_by_id, default_connection_host_id, root_paths},
     error::{invalid_error, io_error, missing_error, parse_error, Result},
+    port_forwarding::{close_host_port_forward_runtime, start_saved_port_forwards_for_host_open},
     types::{
         ConnectionProtocol, WorkspaceChangedEvent, WorkspaceDispatchInput, WorkspaceDockDirection,
         WorkspaceDockGroupRole, WorkspaceDockLayout, WorkspaceDockSide,
@@ -64,6 +65,7 @@ pub(crate) fn workspace_dispatch(
     }
     let reason = intent_name(&input.intent).to_string();
     apply_intent(&app, &mut snapshot, input.intent)?;
+    normalize_snapshot_group_roles(&mut snapshot);
     snapshot.version = snapshot
         .version
         .checked_add(1)
@@ -89,12 +91,13 @@ pub(crate) fn workspace_dispatch(
     Ok(snapshot)
 }
 
-pub(crate) fn close_floating_window_by_id<R: Runtime>(
-    app: &AppHandle<R>,
+pub(crate) fn close_floating_window_by_id(
+    app: &AppHandle,
     floating_window_id: &str,
 ) -> Result<WorkspaceLayoutSnapshot> {
     let mut snapshot = current_snapshot(app)?;
     close_floating_window(&mut snapshot, floating_window_id)?;
+    normalize_snapshot_group_roles(&mut snapshot);
     snapshot.version = snapshot
         .version
         .checked_add(1)
@@ -120,8 +123,8 @@ pub(crate) fn close_floating_window_by_id<R: Runtime>(
     Ok(snapshot)
 }
 
-pub(crate) fn owned_workspace_tool_host<R: Runtime>(
-    app: &AppHandle<R>,
+pub(crate) fn owned_workspace_tool_host(
+    app: &AppHandle,
     workspace_id: &str,
     tool_tab_id: &str,
     expected_kind: WorkspaceToolKind,
@@ -161,7 +164,7 @@ pub(crate) fn owned_workspace_tool_host<R: Runtime>(
     Ok(workspace.host_id.clone())
 }
 
-fn current_snapshot<R: Runtime>(app: &AppHandle<R>) -> Result<WorkspaceLayoutSnapshot> {
+fn current_snapshot(app: &AppHandle) -> Result<WorkspaceLayoutSnapshot> {
     {
         let store = workspace_store();
         let guard = store
@@ -182,13 +185,13 @@ fn current_snapshot<R: Runtime>(app: &AppHandle<R>) -> Result<WorkspaceLayoutSna
     Ok(snapshot)
 }
 
-fn load_snapshot<R: Runtime>(app: &AppHandle<R>) -> Result<WorkspaceLayoutSnapshot> {
+fn load_snapshot(app: &AppHandle) -> Result<WorkspaceLayoutSnapshot> {
     let snapshot = default_snapshot(app)?;
     save_snapshot(app, &snapshot)?;
     Ok(snapshot)
 }
 
-fn save_snapshot<R: Runtime>(app: &AppHandle<R>, snapshot: &WorkspaceLayoutSnapshot) -> Result<()> {
+fn save_snapshot(app: &AppHandle, snapshot: &WorkspaceLayoutSnapshot) -> Result<()> {
     let path = workspace_state_path(app)?;
     ensure_parent(&path)?;
     write_atomic(
@@ -200,25 +203,29 @@ fn save_snapshot<R: Runtime>(app: &AppHandle<R>, snapshot: &WorkspaceLayoutSnaps
     )
 }
 
-fn workspace_state_path<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf> {
+fn workspace_state_path(app: &AppHandle) -> Result<PathBuf> {
     Ok(PathBuf::from(root_paths(app)?.root_dir).join(WORKSPACE_STATE_FILE))
 }
 
-fn default_snapshot<R: Runtime>(app: &AppHandle<R>) -> Result<WorkspaceLayoutSnapshot> {
+fn default_snapshot(app: &AppHandle) -> Result<WorkspaceLayoutSnapshot> {
     let host_id = default_connection_host_id(app)?;
     let host = connection_host_by_id(app, &host_id)?;
+    start_saved_port_forwards_for_host_open(app, &host)?;
     let workspace_id = new_id("workspace");
     let files_tool_id = new_id("tool-files");
     let terminal_tool_id = new_id("tool-terminal");
     let resources_tool_id = new_id("tool-resources");
     let transfers_tool_id = new_id("tool-transfers");
+    let ports_tool_id = new_id("tool-ports");
     let files_slot_id = new_id("slot-files");
     let terminal_slot_id = new_id("slot-terminal");
     let resources_slot_id = new_id("slot-resources");
     let transfers_slot_id = new_id("slot-transfers");
+    let ports_slot_id = new_id("slot-ports");
     let files_group_id = new_id("group-files");
     let terminal_group_id = new_id("group-terminal");
     let right_group_id = new_id("group-resources-transfers");
+    let ports_group_id = new_id("group-ports");
     let title = host.document.name.clone();
     let default_files_path = host
         .document
@@ -239,45 +246,61 @@ fn default_snapshot<R: Runtime>(app: &AppHandle<R>) -> Result<WorkspaceLayoutSna
                 terminal_tool_id.clone(),
                 resources_tool_id.clone(),
                 transfers_tool_id.clone(),
+                ports_tool_id.clone(),
             ],
             layout: WorkspaceDockLayout::Split {
-                direction: WorkspaceDockDirection::Row,
+                direction: WorkspaceDockDirection::Column,
                 children: vec![
-                    WorkspaceDockLayout::Group {
-                        id: files_group_id,
-                        role: WorkspaceDockGroupRole::Sidebar,
-                        slots: vec![WorkspaceToolSlot::Owned {
-                            id: files_slot_id.clone(),
-                            tool_tab_id: files_tool_id.clone(),
-                        }],
-                        active_slot_id: files_slot_id,
-                    },
-                    WorkspaceDockLayout::Group {
-                        id: terminal_group_id,
-                        role: WorkspaceDockGroupRole::Content,
-                        slots: vec![WorkspaceToolSlot::Owned {
-                            id: terminal_slot_id.clone(),
-                            tool_tab_id: terminal_tool_id.clone(),
-                        }],
-                        active_slot_id: terminal_slot_id,
-                    },
-                    WorkspaceDockLayout::Group {
-                        id: right_group_id,
-                        role: WorkspaceDockGroupRole::Sidebar,
-                        slots: vec![
-                            WorkspaceToolSlot::Owned {
-                                id: resources_slot_id.clone(),
-                                tool_tab_id: resources_tool_id.clone(),
+                    WorkspaceDockLayout::Split {
+                        direction: WorkspaceDockDirection::Row,
+                        children: vec![
+                            WorkspaceDockLayout::Group {
+                                id: files_group_id,
+                                role: WorkspaceDockGroupRole::SidePanel,
+                                slots: vec![WorkspaceToolSlot::Owned {
+                                    id: files_slot_id.clone(),
+                                    tool_tab_id: files_tool_id.clone(),
+                                }],
+                                active_slot_id: files_slot_id,
                             },
-                            WorkspaceToolSlot::Owned {
-                                id: transfers_slot_id.clone(),
-                                tool_tab_id: transfers_tool_id.clone(),
+                            WorkspaceDockLayout::Group {
+                                id: terminal_group_id,
+                                role: WorkspaceDockGroupRole::Content,
+                                slots: vec![WorkspaceToolSlot::Owned {
+                                    id: terminal_slot_id.clone(),
+                                    tool_tab_id: terminal_tool_id.clone(),
+                                }],
+                                active_slot_id: terminal_slot_id,
+                            },
+                            WorkspaceDockLayout::Group {
+                                id: right_group_id,
+                                role: WorkspaceDockGroupRole::SidePanel,
+                                slots: vec![
+                                    WorkspaceToolSlot::Owned {
+                                        id: resources_slot_id.clone(),
+                                        tool_tab_id: resources_tool_id.clone(),
+                                    },
+                                    WorkspaceToolSlot::Owned {
+                                        id: transfers_slot_id.clone(),
+                                        tool_tab_id: transfers_tool_id.clone(),
+                                    },
+                                ],
+                                active_slot_id: resources_slot_id,
                             },
                         ],
-                        active_slot_id: resources_slot_id,
+                        ratios: vec![0.24, 0.52, 0.24],
+                    },
+                    WorkspaceDockLayout::Group {
+                        id: ports_group_id,
+                        role: WorkspaceDockGroupRole::SidePanel,
+                        slots: vec![WorkspaceToolSlot::Owned {
+                            id: ports_slot_id.clone(),
+                            tool_tab_id: ports_tool_id.clone(),
+                        }],
+                        active_slot_id: ports_slot_id,
                     },
                 ],
-                ratios: vec![0.24, 0.52, 0.24],
+                ratios: vec![0.7, 0.3],
             },
         }],
         tool_tabs: vec![
@@ -305,17 +328,24 @@ fn default_snapshot<R: Runtime>(app: &AppHandle<R>) -> Result<WorkspaceLayoutSna
             WorkspaceToolTab {
                 id: transfers_tool_id,
                 kind: WorkspaceToolKind::Transfers,
+                owner_workspace_id: workspace_id.clone(),
+                host_id: host_id.clone(),
+                title: "Transfers".to_string(),
+            },
+            WorkspaceToolTab {
+                id: ports_tool_id,
+                kind: WorkspaceToolKind::Ports,
                 owner_workspace_id: workspace_id,
                 host_id,
-                title: "Transfers".to_string(),
+                title: "Ports".to_string(),
             },
         ],
         floating_windows: Vec::new(),
     })
 }
 
-fn apply_intent<R: Runtime>(
-    app: &AppHandle<R>,
+fn apply_intent(
+    app: &AppHandle,
     snapshot: &mut WorkspaceLayoutSnapshot,
     intent: WorkspaceIntent,
 ) -> Result<()> {
@@ -412,24 +442,28 @@ fn apply_intent<R: Runtime>(
     }
 }
 
-fn create_workspace<R: Runtime>(
-    app: &AppHandle<R>,
+fn create_workspace(
+    app: &AppHandle,
     snapshot: &mut WorkspaceLayoutSnapshot,
     host_id: String,
 ) -> Result<()> {
     let host = connection_host_by_id(app, &host_id)?;
+    start_saved_port_forwards_for_host_open(app, &host)?;
     let workspace_id = new_id("workspace");
     let files_tool_id = new_id("tool-files");
     let terminal_tool_id = new_id("tool-terminal");
     let resources_tool_id = new_id("tool-resources");
     let transfers_tool_id = new_id("tool-transfers");
+    let ports_tool_id = new_id("tool-ports");
     let files_slot_id = new_id("slot-files");
     let terminal_slot_id = new_id("slot-terminal");
     let resources_slot_id = new_id("slot-resources");
     let transfers_slot_id = new_id("slot-transfers");
+    let ports_slot_id = new_id("slot-ports");
     let files_group_id = new_id("group-files");
     let terminal_group_id = new_id("group-terminal");
     let right_group_id = new_id("group-resources-transfers");
+    let ports_group_id = new_id("group-ports");
     let title = unique_workspace_title(snapshot, &host.document.name);
     let default_files_path = host
         .document
@@ -443,10 +477,12 @@ fn create_workspace<R: Runtime>(
         terminal_tool_id: terminal_tool_id.clone(),
         resources_tool_id: resources_tool_id.clone(),
         transfers_tool_id: transfers_tool_id.clone(),
+        ports_tool_id: ports_tool_id.clone(),
         files_slot_id: files_slot_id.clone(),
         terminal_slot_id: terminal_slot_id.clone(),
         resources_slot_id: resources_slot_id.clone(),
         transfers_slot_id: transfers_slot_id.clone(),
+        ports_slot_id: ports_slot_id.clone(),
     };
     let layout_plan =
         remembered_workspace_layout(snapshot, &snapshot.active_workspace_id, &tool_ids)?
@@ -455,6 +491,7 @@ fn create_workspace<R: Runtime>(
                     files_group_id,
                     terminal_group_id,
                     right_group_id,
+                    ports_group_id,
                     &tool_ids,
                 )
             });
@@ -495,8 +532,17 @@ fn create_workspace<R: Runtime>(
             id: transfers_tool_id,
             kind: WorkspaceToolKind::Transfers,
             owner_workspace_id: workspace_id.clone(),
-            host_id,
+            host_id: host_id.clone(),
             title: "Transfers".to_string(),
+        });
+    }
+    if layout_plan.used.ports {
+        snapshot.tool_tabs.push(WorkspaceToolTab {
+            id: ports_tool_id,
+            kind: WorkspaceToolKind::Ports,
+            owner_workspace_id: workspace_id.clone(),
+            host_id,
+            title: "Ports".to_string(),
         });
     }
     snapshot.active_workspace_id = workspace_id;
@@ -508,10 +554,12 @@ struct NewWorkspaceToolIds {
     terminal_tool_id: String,
     resources_tool_id: String,
     transfers_tool_id: String,
+    ports_tool_id: String,
     files_slot_id: String,
     terminal_slot_id: String,
     resources_slot_id: String,
     transfers_slot_id: String,
+    ports_slot_id: String,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -520,6 +568,7 @@ struct NewWorkspaceToolUsage {
     terminal: bool,
     resources: bool,
     transfers: bool,
+    ports: bool,
 }
 
 struct NewWorkspaceLayoutPlan {
@@ -532,6 +581,7 @@ fn default_new_workspace_layout(
     files_group_id: String,
     terminal_group_id: String,
     right_group_id: String,
+    ports_group_id: String,
     ids: &NewWorkspaceToolIds,
 ) -> NewWorkspaceLayoutPlan {
     NewWorkspaceLayoutPlan {
@@ -540,51 +590,68 @@ fn default_new_workspace_layout(
             ids.terminal_tool_id.clone(),
             ids.resources_tool_id.clone(),
             ids.transfers_tool_id.clone(),
+            ids.ports_tool_id.clone(),
         ],
         layout: WorkspaceDockLayout::Split {
-            direction: WorkspaceDockDirection::Row,
+            direction: WorkspaceDockDirection::Column,
             children: vec![
-                WorkspaceDockLayout::Group {
-                    id: files_group_id,
-                    role: WorkspaceDockGroupRole::Sidebar,
-                    slots: vec![WorkspaceToolSlot::Owned {
-                        id: ids.files_slot_id.clone(),
-                        tool_tab_id: ids.files_tool_id.clone(),
-                    }],
-                    active_slot_id: ids.files_slot_id.clone(),
-                },
-                WorkspaceDockLayout::Group {
-                    id: terminal_group_id,
-                    role: WorkspaceDockGroupRole::Content,
-                    slots: vec![WorkspaceToolSlot::Owned {
-                        id: ids.terminal_slot_id.clone(),
-                        tool_tab_id: ids.terminal_tool_id.clone(),
-                    }],
-                    active_slot_id: ids.terminal_slot_id.clone(),
-                },
-                WorkspaceDockLayout::Group {
-                    id: right_group_id,
-                    role: WorkspaceDockGroupRole::Sidebar,
-                    slots: vec![
-                        WorkspaceToolSlot::Owned {
-                            id: ids.resources_slot_id.clone(),
-                            tool_tab_id: ids.resources_tool_id.clone(),
+                WorkspaceDockLayout::Split {
+                    direction: WorkspaceDockDirection::Row,
+                    children: vec![
+                        WorkspaceDockLayout::Group {
+                            id: files_group_id,
+                            role: WorkspaceDockGroupRole::SidePanel,
+                            slots: vec![WorkspaceToolSlot::Owned {
+                                id: ids.files_slot_id.clone(),
+                                tool_tab_id: ids.files_tool_id.clone(),
+                            }],
+                            active_slot_id: ids.files_slot_id.clone(),
                         },
-                        WorkspaceToolSlot::Owned {
-                            id: ids.transfers_slot_id.clone(),
-                            tool_tab_id: ids.transfers_tool_id.clone(),
+                        WorkspaceDockLayout::Group {
+                            id: terminal_group_id,
+                            role: WorkspaceDockGroupRole::Content,
+                            slots: vec![WorkspaceToolSlot::Owned {
+                                id: ids.terminal_slot_id.clone(),
+                                tool_tab_id: ids.terminal_tool_id.clone(),
+                            }],
+                            active_slot_id: ids.terminal_slot_id.clone(),
+                        },
+                        WorkspaceDockLayout::Group {
+                            id: right_group_id,
+                            role: WorkspaceDockGroupRole::SidePanel,
+                            slots: vec![
+                                WorkspaceToolSlot::Owned {
+                                    id: ids.resources_slot_id.clone(),
+                                    tool_tab_id: ids.resources_tool_id.clone(),
+                                },
+                                WorkspaceToolSlot::Owned {
+                                    id: ids.transfers_slot_id.clone(),
+                                    tool_tab_id: ids.transfers_tool_id.clone(),
+                                },
+                            ],
+                            active_slot_id: ids.resources_slot_id.clone(),
                         },
                     ],
-                    active_slot_id: ids.resources_slot_id.clone(),
+                    ratios: vec![0.24, 0.52, 0.24],
+                },
+                WorkspaceDockLayout::Group {
+                    id: ports_group_id,
+                    role: WorkspaceDockGroupRole::SidePanel,
+                    slots: vec![WorkspaceToolSlot::Owned {
+                        id: ids.ports_slot_id.clone(),
+                        tool_tab_id: ids.ports_tool_id.clone(),
+                    }],
+                    active_slot_id: ids.ports_slot_id.clone(),
                 },
             ],
-            ratios: vec![0.24, 0.52, 0.24],
+            ratios: vec![0.7, 0.3],
         },
         used: NewWorkspaceToolUsage {
             files: true,
             terminal: true,
             resources: true,
             transfers: true,
+            ports: true,
         },
     }
 }
@@ -752,6 +819,10 @@ fn remap_remembered_slot(
             used.transfers = true;
             Some((ids.transfers_slot_id.clone(), ids.transfers_tool_id.clone()))
         }
+        WorkspaceToolKind::Ports if !used.ports => {
+            used.ports = true;
+            Some((ids.ports_slot_id.clone(), ids.ports_tool_id.clone()))
+        }
         _ => None,
     };
     Ok(next.map(|(id, tool_tab_id)| WorkspaceToolSlot::Owned { id, tool_tab_id }))
@@ -829,6 +900,9 @@ fn remembered_owned_tool_tab_ids(
     if used.transfers {
         tool_ids.push(ids.transfers_tool_id.clone());
     }
+    if used.ports {
+        tool_ids.push(ids.ports_tool_id.clone());
+    }
     tool_ids
 }
 
@@ -858,10 +932,10 @@ fn close_workspace(snapshot: &mut WorkspaceLayoutSnapshot, workspace_id: &str) -
     if snapshot.workspaces.len() == 1 {
         return Err(invalid_error("cannot close the last workspace"));
     }
-    let closing_workspace_title = require_workspace(snapshot, workspace_id)?.title.clone();
-    let owned_tool_tab_ids = require_workspace(snapshot, workspace_id)?
-        .owned_tool_tab_ids
-        .clone();
+    let closing = require_workspace(snapshot, workspace_id)?;
+    let closing_host_id = closing.host_id.clone();
+    let closing_workspace_title = closing.title.clone();
+    let owned_tool_tab_ids = closing.owned_tool_tab_ids.clone();
     let closing_tool_titles = snapshot
         .tool_tabs
         .iter()
@@ -897,7 +971,7 @@ fn close_workspace(snapshot: &mut WorkspaceLayoutSnapshot, workspace_id: &str) -
             .ok_or_else(|| invalid_error("workspace list is empty after close"))?;
         snapshot.active_workspace_id = next.id.clone();
     }
-    workspace_ssh_coordinator().remove_workspace(workspace_id)?;
+    after_workspace_closed(snapshot, workspace_id, &closing_host_id)?;
     Ok(())
 }
 
@@ -947,7 +1021,9 @@ fn close_workspace_without_last_guard(
     if snapshot.workspaces.len() == 1 {
         return Err(invalid_error("cannot close the last workspace"));
     }
-    let closing_workspace_title = require_workspace(snapshot, workspace_id)?.title.clone();
+    let closing = require_workspace(snapshot, workspace_id)?;
+    let closing_host_id = closing.host_id.clone();
+    let closing_workspace_title = closing.title.clone();
     let owned_tool_tab_ids = require_workspace(snapshot, workspace_id)?
         .owned_tool_tab_ids
         .clone();
@@ -986,7 +1062,23 @@ fn close_workspace_without_last_guard(
             .ok_or_else(|| invalid_error("workspace list is empty after close"))?;
         snapshot.active_workspace_id = next.id.clone();
     }
+    after_workspace_closed(snapshot, workspace_id, &closing_host_id)?;
+    Ok(())
+}
+
+fn after_workspace_closed(
+    snapshot: &WorkspaceLayoutSnapshot,
+    workspace_id: &str,
+    host_id: &str,
+) -> Result<()> {
     workspace_ssh_coordinator().remove_workspace(workspace_id)?;
+    if !snapshot
+        .workspaces
+        .iter()
+        .any(|workspace| workspace.host_id == host_id)
+    {
+        close_host_port_forward_runtime(host_id)?;
+    }
     Ok(())
 }
 
@@ -1376,7 +1468,7 @@ fn split_workspace_edge(
     let inserted_id = workspace_slot_id(&inserted_slot).to_string();
     let inserted = WorkspaceDockLayout::Group {
         id: new_id("group"),
-        role: WorkspaceDockGroupRole::Sidebar,
+        role: WorkspaceDockGroupRole::SidePanel,
         slots: vec![inserted_slot],
         active_slot_id: inserted_id,
     };
@@ -2266,6 +2358,41 @@ fn normalize_ratio_len(ratios: &[f64], len: usize) -> Result<Vec<f64>> {
     Ok(vec![1.0 / len as f64; len])
 }
 
+fn normalize_snapshot_group_roles(snapshot: &mut WorkspaceLayoutSnapshot) {
+    for workspace in &mut snapshot.workspaces {
+        normalize_workspace_group_roles(&mut workspace.layout);
+    }
+    for window in &mut snapshot.floating_windows {
+        set_all_group_roles(&mut window.layout, WorkspaceDockGroupRole::Content);
+    }
+}
+
+fn normalize_workspace_group_roles(layout: &mut WorkspaceDockLayout) {
+    match layout {
+        WorkspaceDockLayout::Group { role, slots, .. } => {
+            if slots.is_empty() {
+                *role = WorkspaceDockGroupRole::Content;
+            }
+        }
+        WorkspaceDockLayout::Split { children, .. } => {
+            for child in children {
+                normalize_workspace_group_roles(child);
+            }
+        }
+    }
+}
+
+fn set_all_group_roles(layout: &mut WorkspaceDockLayout, next_role: WorkspaceDockGroupRole) {
+    match layout {
+        WorkspaceDockLayout::Group { role, .. } => *role = next_role,
+        WorkspaceDockLayout::Split { children, .. } => {
+            for child in children {
+                set_all_group_roles(child, next_role);
+            }
+        }
+    }
+}
+
 fn validate_snapshot(snapshot: &WorkspaceLayoutSnapshot) -> Result<()> {
     if !snapshot
         .workspaces
@@ -2279,12 +2406,6 @@ fn validate_snapshot(snapshot: &WorkspaceLayoutSnapshot) -> Result<()> {
     }
     for workspace in &snapshot.workspaces {
         validate_layout(&workspace.layout, snapshot)?;
-        if !has_group_role(&workspace.layout, WorkspaceDockGroupRole::Content) {
-            return Err(invalid_error(format!(
-                "workspace {} must contain at least one content dock group",
-                workspace.id
-            )));
-        }
         for tool_tab_id in &workspace.owned_tool_tab_ids {
             let tool_tab = snapshot
                 .tool_tabs
@@ -2309,6 +2430,20 @@ fn validate_snapshot(snapshot: &WorkspaceLayoutSnapshot) -> Result<()> {
         if resource_tool_tab_count > 1 {
             return Err(invalid_error(format!(
                 "workspace {} cannot own more than one Resource Monitor ToolTab",
+                workspace.id
+            )));
+        }
+        let ports_tool_tab_count = snapshot
+            .tool_tabs
+            .iter()
+            .filter(|tool_tab| {
+                tool_tab.owner_workspace_id == workspace.id
+                    && matches!(tool_tab.kind, WorkspaceToolKind::Ports)
+            })
+            .count();
+        if ports_tool_tab_count > 1 {
+            return Err(invalid_error(format!(
+                "workspace {} cannot own more than one Ports ToolTab",
                 workspace.id
             )));
         }
@@ -2686,7 +2821,7 @@ mod tests {
         );
         assert_eq!(
             find_group_role(&workspace.layout, "group-files-a"),
-            Some(WorkspaceDockGroupRole::Sidebar)
+            Some(WorkspaceDockGroupRole::SidePanel)
         );
         assert_eq!(
             collect_slots(&workspace.layout)
@@ -2726,8 +2861,50 @@ mod tests {
             collect_group_roles(&workspace.layout),
             vec![
                 WorkspaceDockGroupRole::Content,
-                WorkspaceDockGroupRole::Sidebar
+                WorkspaceDockGroupRole::SidePanel
             ]
+        );
+    }
+
+    #[test]
+    fn normalize_snapshot_preserves_explicit_content_group_with_bottom_panel() {
+        let mut snapshot = test_split_snapshot();
+        snapshot.tool_tabs.push(WorkspaceToolTab {
+            id: "ports-a".to_string(),
+            kind: WorkspaceToolKind::Ports,
+            owner_workspace_id: "workspace-a".to_string(),
+            host_id: "host-a".to_string(),
+            title: "Ports".to_string(),
+        });
+        let workspace = require_workspace_mut(&mut snapshot, "workspace-a").unwrap();
+        workspace.owned_tool_tab_ids.push("ports-a".to_string());
+        workspace.layout = WorkspaceDockLayout::Split {
+            direction: WorkspaceDockDirection::Column,
+            ratios: vec![0.7, 0.3],
+            children: vec![
+                workspace.layout.clone(),
+                WorkspaceDockLayout::Group {
+                    id: "group-ports-a".to_string(),
+                    role: WorkspaceDockGroupRole::SidePanel,
+                    active_slot_id: "slot-ports-a".to_string(),
+                    slots: vec![WorkspaceToolSlot::Owned {
+                        id: "slot-ports-a".to_string(),
+                        tool_tab_id: "ports-a".to_string(),
+                    }],
+                },
+            ],
+        };
+
+        normalize_snapshot_group_roles(&mut snapshot);
+
+        let workspace = require_workspace(&snapshot, "workspace-a").unwrap();
+        assert_eq!(
+            find_group_role(&workspace.layout, "group-terminal-a"),
+            Some(WorkspaceDockGroupRole::Content)
+        );
+        assert_eq!(
+            find_group_role(&workspace.layout, "group-ports-a"),
+            Some(WorkspaceDockGroupRole::SidePanel)
         );
     }
 
@@ -2773,7 +2950,7 @@ mod tests {
             let WorkspaceDockLayout::Group { role, slots, .. } = inserted_child else {
                 panic!("expected inserted edge group");
             };
-            assert_eq!(*role, WorkspaceDockGroupRole::Sidebar);
+            assert_eq!(*role, WorkspaceDockGroupRole::SidePanel);
             assert_eq!(
                 slots.iter().map(workspace_slot_id).collect::<Vec<_>>(),
                 vec!["slot-files-a"]
@@ -2833,6 +3010,83 @@ mod tests {
         assert_eq!(*role, WorkspaceDockGroupRole::Content);
         assert!(slots.is_empty());
         assert!(active_slot_id.is_empty());
+    }
+
+    #[test]
+    fn closing_one_of_multiple_same_host_workspaces_keeps_host_port_forwards_alive() {
+        let host_id = "host-same-port-forward-close";
+        let rule_id = "018f6eb3-6f91-7410-bc43-f927b2236da0";
+        crate::port_forwarding::set_port_forward_rule_status_for_test(
+            host_id,
+            rule_id,
+            crate::types::PortForwardRuleStatus::Running,
+        )
+        .expect("seed running Host port forward");
+        let mut snapshot = WorkspaceLayoutSnapshot {
+            version: 1,
+            active_workspace_id: "workspace-a".to_string(),
+            workspaces: vec![
+                WorkspaceTabState {
+                    id: "workspace-a".to_string(),
+                    host_id: host_id.to_string(),
+                    title: "Production".to_string(),
+                    owned_tool_tab_ids: vec!["files-a".to_string()],
+                    layout: single_owned_content_group("group-a", "slot-files-a", "files-a"),
+                },
+                WorkspaceTabState {
+                    id: "workspace-b".to_string(),
+                    host_id: host_id.to_string(),
+                    title: "Production 2".to_string(),
+                    owned_tool_tab_ids: vec!["files-b".to_string()],
+                    layout: single_owned_content_group("group-b", "slot-files-b", "files-b"),
+                },
+                WorkspaceTabState {
+                    id: "workspace-c".to_string(),
+                    host_id: "host-other".to_string(),
+                    title: "Other".to_string(),
+                    owned_tool_tab_ids: vec!["files-c".to_string()],
+                    layout: single_owned_content_group("group-c", "slot-files-c", "files-c"),
+                },
+            ],
+            tool_tabs: vec![
+                WorkspaceToolTab {
+                    id: "files-a".to_string(),
+                    kind: WorkspaceToolKind::Files,
+                    owner_workspace_id: "workspace-a".to_string(),
+                    host_id: host_id.to_string(),
+                    title: "/home/a".to_string(),
+                },
+                WorkspaceToolTab {
+                    id: "files-b".to_string(),
+                    kind: WorkspaceToolKind::Files,
+                    owner_workspace_id: "workspace-b".to_string(),
+                    host_id: host_id.to_string(),
+                    title: "/home/b".to_string(),
+                },
+                WorkspaceToolTab {
+                    id: "files-c".to_string(),
+                    kind: WorkspaceToolKind::Files,
+                    owner_workspace_id: "workspace-c".to_string(),
+                    host_id: "host-other".to_string(),
+                    title: "/home/c".to_string(),
+                },
+            ],
+            floating_windows: Vec::new(),
+        };
+
+        close_workspace(&mut snapshot, "workspace-a").expect("close first same-Host workspace");
+
+        assert!(
+            crate::port_forwarding::host_port_forward_close_requires_confirmation(host_id)
+                .expect("Host runtime should remain while another same-Host Workspace is open")
+        );
+
+        close_workspace(&mut snapshot, "workspace-b").expect("close final same-Host workspace");
+
+        assert!(
+            !crate::port_forwarding::host_port_forward_close_requires_confirmation(host_id)
+                .expect("Host runtime should be cleared after final same-Host Workspace closes")
+        );
     }
 
     #[test]
@@ -2997,12 +3251,12 @@ mod tests {
     }
 
     #[test]
-    fn validate_snapshot_rejects_workspace_without_content_group() {
+    fn validate_snapshot_allows_workspace_without_content_group() {
         let mut snapshot = test_snapshot();
         let workspace = require_workspace_mut(&mut snapshot, "workspace-a").unwrap();
         workspace.layout = WorkspaceDockLayout::Group {
             id: "group-a".to_string(),
-            role: WorkspaceDockGroupRole::Sidebar,
+            role: WorkspaceDockGroupRole::SidePanel,
             active_slot_id: "slot-files-a".to_string(),
             slots: vec![WorkspaceToolSlot::Owned {
                 id: "slot-files-a".to_string(),
@@ -3010,15 +3264,7 @@ mod tests {
             }],
         };
 
-        let error =
-            validate_snapshot(&snapshot).expect_err("workspace without content group should fail");
-
-        assert!(
-            error
-                .to_string()
-                .contains("must contain at least one content dock group"),
-            "unexpected error: {error}"
-        );
+        validate_snapshot(&snapshot).expect("workspace without content group should be valid");
     }
 
     #[test]
@@ -3030,7 +3276,7 @@ mod tests {
                 id: "floating-a".to_string(),
                 layout: WorkspaceDockLayout::Group {
                     id: "group-floating-a".to_string(),
-                    role: WorkspaceDockGroupRole::Sidebar,
+                    role: WorkspaceDockGroupRole::SidePanel,
                     active_slot_id: "slot-floating-a".to_string(),
                     slots: vec![WorkspaceToolSlot::Mirror {
                         id: "slot-floating-a".to_string(),
@@ -3123,7 +3369,7 @@ mod tests {
             children: vec![
                 WorkspaceDockLayout::Group {
                     id: "group-files-a".to_string(),
-                    role: WorkspaceDockGroupRole::Sidebar,
+                    role: WorkspaceDockGroupRole::SidePanel,
                     active_slot_id: "slot-files-a".to_string(),
                     slots: vec![WorkspaceToolSlot::Owned {
                         id: "slot-files-a".to_string(),
@@ -3197,5 +3443,21 @@ mod tests {
             ],
         };
         snapshot
+    }
+
+    fn single_owned_content_group(
+        id: &str,
+        slot_id: &str,
+        tool_tab_id: &str,
+    ) -> WorkspaceDockLayout {
+        WorkspaceDockLayout::Group {
+            id: id.to_string(),
+            role: WorkspaceDockGroupRole::Content,
+            active_slot_id: slot_id.to_string(),
+            slots: vec![WorkspaceToolSlot::Owned {
+                id: slot_id.to_string(),
+                tool_tab_id: tool_tab_id.to_string(),
+            }],
+        }
     }
 }

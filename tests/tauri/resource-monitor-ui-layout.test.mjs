@@ -173,37 +173,67 @@ test("resource monitor ui layout", { timeout: 180_000 }, async () => {
       throw new Error(`Resource Monitor drag test rows not found\n${JSON.stringify({ draggedMetric, targetMetric, geometry }, null, 2)}`);
     }
 
-    await webdriver("POST", `/session/${sessionId}/actions`, {
-      actions: [
-        {
-          type: "pointer",
-          id: "resource-monitor-mouse",
-          parameters: { pointerType: "mouse" },
-          actions: [
-            { type: "pointerMove", duration: 0, origin: "viewport", x: geometry.start.x, y: geometry.start.y },
-            { type: "pointerDown", button: 0 },
-            { type: "pause", duration: 80 },
-            { type: "pointerMove", duration: 180, origin: "viewport", x: geometry.mid.x, y: geometry.mid.y },
-            { type: "pointerMove", duration: 180, origin: "viewport", x: geometry.end.x, y: geometry.end.y },
-            { type: "pause", duration: 80 },
-          ],
-        },
-      ],
-    });
+    await execute(`
+      const [geometry, draggedMetric] = arguments;
+      const source = document.querySelector('[data-testid="resource-monitor-row"][data-metric="' + draggedMetric + '"]');
+      if (!source) throw new Error('No Resource Monitor metric row at drag start point');
+      window.__nocturneResourceMetricDragTest = {
+        source,
+        end: geometry.end,
+        originalSetPointerCapture: HTMLElement.prototype.setPointerCapture,
+        originalHasPointerCapture: HTMLElement.prototype.hasPointerCapture,
+        originalReleasePointerCapture: HTMLElement.prototype.releasePointerCapture,
+      };
+      HTMLElement.prototype.setPointerCapture = function () {};
+      HTMLElement.prototype.hasPointerCapture = function () { return true; };
+      HTMLElement.prototype.releasePointerCapture = function () {};
+      const dispatch = (target, type, point, buttons) => {
+        target.dispatchEvent(new PointerEvent(type, {
+          bubbles: true,
+          cancelable: true,
+          composed: true,
+          pointerId: 93,
+          pointerType: 'mouse',
+          isPrimary: true,
+          button: 0,
+          buttons,
+          clientX: point.x,
+          clientY: point.y,
+          view: window,
+        }));
+      };
+      dispatch(source, 'pointerdown', geometry.start, 1);
+      dispatch(window, 'pointermove', geometry.mid, 1);
+      dispatch(window, 'pointermove', geometry.end, 1);
+    `, [geometry, draggedMetric]);
     const preview = await waitForDragPreview(draggedMetric, targetMetric);
-    await webdriver("POST", `/session/${sessionId}/actions`, {
-      actions: [
-        {
-          type: "pointer",
-          id: "resource-monitor-mouse",
-          parameters: { pointerType: "mouse" },
-          actions: [
-            { type: "pointerUp", button: 0 },
-          ],
-        },
-      ],
-    });
-    await webdriver("DELETE", `/session/${sessionId}/actions`).catch(() => undefined);
+    await execute(`
+      const state = window.__nocturneResourceMetricDragTest;
+      if (!state?.source) throw new Error('No active Resource Monitor drag test state');
+      const dispatch = (target, type, point, buttons) => {
+        target.dispatchEvent(new PointerEvent(type, {
+          bubbles: true,
+          cancelable: true,
+          composed: true,
+          pointerId: 93,
+          pointerType: 'mouse',
+          isPrimary: true,
+          button: 0,
+          buttons,
+          clientX: point.x,
+          clientY: point.y,
+          view: window,
+        }));
+      };
+      try {
+        dispatch(window, 'pointerup', state.end, 0);
+      } finally {
+        HTMLElement.prototype.setPointerCapture = state.originalSetPointerCapture;
+        HTMLElement.prototype.hasPointerCapture = state.originalHasPointerCapture;
+        HTMLElement.prototype.releasePointerCapture = state.originalReleasePointerCapture;
+        delete window.__nocturneResourceMetricDragTest;
+      }
+    `);
     await delay(250);
     const after = await execute(`
       return [...document.querySelectorAll('[data-testid="resource-monitor-row"]')]
@@ -369,10 +399,10 @@ test("resource monitor ui layout", { timeout: 180_000 }, async () => {
     return id;
   }
 
-  async function execute(script) {
+  async function execute(script, args = []) {
     const response = await webdriver("POST", `/session/${sessionId}/execute/sync`, {
       script,
-      args: [],
+      args,
     });
     return response.value;
   }
