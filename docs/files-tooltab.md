@@ -358,8 +358,16 @@ Preview cache is short-lived and keyed by provider, path, mtime, and size. It is
 Preview supports:
 
 - text/code snippets
+- Markdown rendering for `.md` and `.markdown` files using `marked` with KaTeX
+  math support for inline and block math
 - image preview
 - owner/group/permissions/size/modified metadata when available
+
+Markdown previews are still read-only previews. Raw HTML in Markdown files is
+escaped instead of injected into the WebView, while Nocturne-generated KaTeX
+markup is inserted only for math expressions. Markdown preview content must wrap
+within the preview column and avoid horizontal scrollbars just like plain text
+previews.
 
 If a selected file cannot be rendered as text or image under the configured
 limits, the preview region is completely hidden. Do not keep an empty preview

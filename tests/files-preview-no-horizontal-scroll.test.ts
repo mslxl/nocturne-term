@@ -15,8 +15,10 @@ describe("Files preview horizontal overflow behavior", () => {
 
     assert.match(source, /const overlayPreviewOptions = \{[^}]*overflow:\s*\{[^}]*x:\s*"hidden"[^}]*y:\s*"scroll"/s);
     assert.match(source, /class="preview-text"\s+options=\{overlayPreviewOptions\}/s);
+    assert.match(source, /class="preview-markdown"\s+options=\{overlayPreviewOptions\}/s);
     assert.match(source, /class="image-preview"\s+options=\{overlayPreviewOptions\}/s);
     assert.match(source, /\.preview-content\s*\{[^}]*overflow:\s*hidden;/s);
     assert.match(source, /\.preview-content header\s*\{[^}]*overflow:\s*hidden;/s);
+    assert.match(source, /\.preview-content :global\(\.preview-markdown\)\s*\{[^}]*overflow-x:\s*hidden;/s);
   });
 });

@@ -6,6 +6,7 @@
   import { getCurrentWebview } from "@tauri-apps/api/webview";
   import { createQuery, useQueryClient } from "@tanstack/svelte-query";
   import { OverlayScrollbarsComponent } from "overlayscrollbars-svelte";
+  import "katex/dist/katex.min.css";
   import "overlayscrollbars/overlayscrollbars.css";
   import FileIcon from "~icons/lucide/file";
   import FileSymlinkIcon from "~icons/lucide/file-symlink";
@@ -14,6 +15,7 @@
   import { setFilesClipboard } from "$lib/files/clipboard.svelte";
   import { basename, buildFilesColumnsView, columnsForPath, columnsForVisiblePane, type FilesColumnView } from "$lib/files/columns";
   import { filesSelectionContextMenuActions, type FilesContextMenuAction, type FilesContextMenuActionId } from "$lib/files/context-menu";
+  import { isMarkdownPreviewPath, renderMarkdownPreviewHtml } from "$lib/files/markdown-preview";
   import { filesToolSelection, filesToolViewState, resetFilesToolSelection } from "$lib/files/selection.svelte";
   import { selectFilesContextTarget, selectFilesEntry, selectFilesMarquee } from "$lib/files/selection";
   import { DEFAULT_FILES_TOOLBAR_ACTION_IDS, normalizeFilesToolbarActionIds, type FilesToolbarActionId } from "$lib/files/toolbar-actions";
@@ -1539,6 +1541,15 @@
     return `data:${preview.content.mime};base64,${preview.content.data_base64}`;
   }
 
+  function isMarkdownTextPreview(preview: FilePreviewResult) {
+    return preview.content.kind === "text" && isMarkdownPreviewPath(preview.path);
+  }
+
+  function markdownPreviewHtml(preview: FilePreviewResult) {
+    if (preview.content.kind !== "text") return "";
+    return renderMarkdownPreviewHtml(preview.content.text);
+  }
+
   function providerCommandAuth() {
     return {
       workspace_id: workspaceId,
@@ -2724,7 +2735,11 @@
         <span>{formatPreviewSize(previewResult)}</span>
         <span>{formatPreviewModified(previewResult)}</span>
       </header>
-      {#if previewResult.content.kind === "text"}
+      {#if previewResult.content.kind === "text" && isMarkdownTextPreview(previewResult)}
+        <OverlayScrollbarsComponent element="div" class="preview-markdown" options={overlayPreviewOptions} defer>
+          {@html markdownPreviewHtml(previewResult)}
+        </OverlayScrollbarsComponent>
+      {:else if previewResult.content.kind === "text"}
         <OverlayScrollbarsComponent element="pre" class="preview-text" options={overlayPreviewOptions} defer>{previewResult.content.text}</OverlayScrollbarsComponent>
       {:else if previewResult.content.kind === "image"}
         <OverlayScrollbarsComponent element="div" class="image-preview" options={overlayPreviewOptions} defer>
@@ -3431,6 +3446,115 @@
     line-height: 1.45;
     white-space: pre-wrap;
     word-break: break-word;
+  }
+
+  .preview-content :global(.preview-markdown) {
+    min-width: 0;
+    min-height: 0;
+    max-width: 100%;
+    overflow-x: hidden;
+    padding: 10px 12px 14px;
+    color: color-mix(in srgb, var(--app-fg) 88%, transparent);
+    font-size: 12px;
+    line-height: 1.5;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+  }
+
+  .preview-content :global(.preview-markdown > :first-child) {
+    margin-top: 0;
+  }
+
+  .preview-content :global(.preview-markdown > :last-child) {
+    margin-bottom: 0;
+  }
+
+  .preview-content :global(.preview-markdown h1),
+  .preview-content :global(.preview-markdown h2),
+  .preview-content :global(.preview-markdown h3),
+  .preview-content :global(.preview-markdown h4) {
+    margin: 0.85em 0 0.45em;
+    font-weight: 650;
+    line-height: 1.2;
+  }
+
+  .preview-content :global(.preview-markdown h1) {
+    font-size: 18px;
+  }
+
+  .preview-content :global(.preview-markdown h2) {
+    font-size: 15px;
+  }
+
+  .preview-content :global(.preview-markdown h3),
+  .preview-content :global(.preview-markdown h4) {
+    font-size: 13px;
+  }
+
+  .preview-content :global(.preview-markdown p),
+  .preview-content :global(.preview-markdown ul),
+  .preview-content :global(.preview-markdown ol),
+  .preview-content :global(.preview-markdown blockquote),
+  .preview-content :global(.preview-markdown pre),
+  .preview-content :global(.preview-markdown table) {
+    margin: 0.65em 0;
+  }
+
+  .preview-content :global(.preview-markdown ul),
+  .preview-content :global(.preview-markdown ol) {
+    padding-left: 1.35em;
+  }
+
+  .preview-content :global(.preview-markdown code),
+  .preview-content :global(.preview-markdown pre) {
+    font-family: var(--terminal-font-family, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
+    font-size: 11px;
+  }
+
+  .preview-content :global(.preview-markdown code) {
+    border-radius: 4px;
+    padding: 1px 4px;
+    background: color-mix(in srgb, var(--app-fg) 9%, transparent);
+  }
+
+  .preview-content :global(.preview-markdown pre) {
+    max-width: 100%;
+    overflow-x: hidden;
+    border-radius: 6px;
+    padding: 8px;
+    background: color-mix(in srgb, var(--app-fg) 7%, transparent);
+    white-space: pre-wrap;
+  }
+
+  .preview-content :global(.preview-markdown pre code) {
+    padding: 0;
+    background: transparent;
+  }
+
+  .preview-content :global(.preview-markdown blockquote) {
+    border-left: 2px solid color-mix(in srgb, var(--app-border) 80%, transparent);
+    padding-left: 8px;
+    color: color-mix(in srgb, var(--app-fg) 68%, transparent);
+  }
+
+  .preview-content :global(.preview-markdown table) {
+    width: 100%;
+    border-collapse: collapse;
+    table-layout: fixed;
+  }
+
+  .preview-content :global(.preview-markdown th),
+  .preview-content :global(.preview-markdown td) {
+    border: 1px solid color-mix(in srgb, var(--app-border) 72%, transparent);
+    padding: 4px 6px;
+    vertical-align: top;
+  }
+
+  .preview-content :global(.preview-markdown .katex-display) {
+    max-width: 100%;
+    overflow-x: hidden;
+    overflow-y: hidden;
+    white-space: normal;
   }
 
   .preview-content :global(.image-preview) {
