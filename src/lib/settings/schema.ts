@@ -17,6 +17,7 @@ import {
 } from "$lib/config/document";
 import type { MessageKey } from "$lib/i18n/messages";
 import { DEFAULT_FILES_TOOLBAR_ACTION_IDS, filesToolbarActionIdsFromSettingText, filesToolbarActionSettingText } from "$lib/files/toolbar-actions";
+import { DEFAULT_TERMINAL_FONT_FAMILY } from "$lib/terminal/fonts";
 import { defaultKeybindingMap, terminalKeybindings, type KeybindingMap } from "$lib/terminal/keybindings";
 
 export type SettingCategoryId = "appearance" | "workspace" | "terminal" | "files" | "resources" | "transfers" | "keybindings" | "profiles" | "hosts";
@@ -181,8 +182,8 @@ export const settingsSchema: SettingDefinition[] = [
     label: "fontFamily",
     path: ["terminal", "font_family"],
     kind: "text",
-    defaultValue: "Menlo, Monaco, Consolas, monospace",
-    get: (root) => stringValue(valueAt(root, ["terminal", "font_family"])) ?? "Menlo, Monaco, Consolas, monospace",
+    defaultValue: DEFAULT_TERMINAL_FONT_FAMILY,
+    get: (root) => stringValue(valueAt(root, ["terminal", "font_family"])) ?? DEFAULT_TERMINAL_FONT_FAMILY,
     toConfigValue: (value) => configString(String(value)),
   },
   {

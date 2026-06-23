@@ -50,6 +50,7 @@
   import { startTransferQueueObserver } from "$lib/transfers/queue.svelte";
   import { routeTerminalPaneEvent, shouldHandleTerminalPaneEvent } from "$lib/terminal/event-routing";
   import { isTerminalSessionInactiveMessage } from "$lib/terminal/errors";
+  import { DEFAULT_TERMINAL_FONT_FAMILY } from "$lib/terminal/fonts";
   import {
     clearTerminalFindEffects,
     terminalFindSearchKeyChanged,
@@ -575,7 +576,7 @@
       command: null,
       args: [],
       cwd: null,
-      font_family: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+      font_family: DEFAULT_TERMINAL_FONT_FAMILY,
       font_size: 13,
       scrollback: 10_000,
       renderer: "dom",
@@ -5672,6 +5673,7 @@
     width: 100%;
     height: 100%;
     box-sizing: content-box;
+    font-family: var(--terminal-font-family);
   }
 
   :global(.xterm *) {

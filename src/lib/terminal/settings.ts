@@ -15,13 +15,22 @@ export function xtermOptions(config: TerminalSettings): ITerminalOptions {
 }
 
 export function syncSettingsVariables(config: TerminalSettings) {
-  document.documentElement.style.setProperty("--terminal-bg", config.theme.background);
-  document.documentElement.style.setProperty("--terminal-fg", config.theme.foreground);
-  document.documentElement.style.setProperty("--terminal-selection", config.theme.selection_background);
-  document.documentElement.style.setProperty("--terminal-padding-top", `${finiteNumber("terminal.padding.top", config.padding.top)}px`);
-  document.documentElement.style.setProperty("--terminal-padding-right", `${finiteNumber("terminal.padding.right", config.padding.right)}px`);
-  document.documentElement.style.setProperty("--terminal-padding-bottom", `${finiteNumber("terminal.padding.bottom", config.padding.bottom)}px`);
-  document.documentElement.style.setProperty("--terminal-padding-left", `${finiteNumber("terminal.padding.left", config.padding.left)}px`);
+  for (const [name, value] of Object.entries(terminalCssVariables(config))) {
+    document.documentElement.style.setProperty(name, value);
+  }
+}
+
+export function terminalCssVariables(config: TerminalSettings): Record<string, string> {
+  return {
+    "--terminal-bg": config.theme.background,
+    "--terminal-fg": config.theme.foreground,
+    "--terminal-selection": config.theme.selection_background,
+    "--terminal-font-family": config.font_family,
+    "--terminal-padding-top": `${finiteNumber("terminal.padding.top", config.padding.top)}px`,
+    "--terminal-padding-right": `${finiteNumber("terminal.padding.right", config.padding.right)}px`,
+    "--terminal-padding-bottom": `${finiteNumber("terminal.padding.bottom", config.padding.bottom)}px`,
+    "--terminal-padding-left": `${finiteNumber("terminal.padding.left", config.padding.left)}px`,
+  };
 }
 
 export function resolvedTerminalTheme(): TerminalColorSchemeVariant {

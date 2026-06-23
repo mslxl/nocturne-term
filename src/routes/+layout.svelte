@@ -1,6 +1,7 @@
 <script lang="ts">
   import { QueryClient, QueryClientProvider } from "@tanstack/svelte-query";
   import { forwardConsoleToBackendLogs } from "$lib/tauri/logging";
+  import "@fontsource/maple-mono";
   import "$lib/styles/app-theme.css";
 
   let { children } = $props();

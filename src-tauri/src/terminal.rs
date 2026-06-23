@@ -57,6 +57,8 @@ const TERMINAL_TRANSPORT_STATE_EVENT: &str = "terminal://transport-state";
 const OUTPUT_BACKLOG_LIMIT: usize = 512 * 1024;
 const SSH_PENDING_WRITE_LIMIT: usize = 1024 * 1024;
 const SSH_WRITE_CHUNK_LIMIT: usize = 8192;
+const DEFAULT_TERMINAL_FONT_FAMILY: &str =
+    "\"Maple Mono\", \"Symbols Nerd Font Mono\", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace";
 
 struct TerminalSession {
     backend: Mutex<TerminalBackend>,
@@ -131,8 +133,7 @@ impl Default for TerminalSettings {
             command: None,
             args: Vec::new(),
             cwd: None,
-            font_family: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace"
-                .to_string(),
+            font_family: DEFAULT_TERMINAL_FONT_FAMILY.to_string(),
             font_size: 13.0,
             scrollback: 10_000,
             renderer: TerminalRenderer::Dom,
@@ -2215,6 +2216,19 @@ pub(crate) fn close_terminal_session(session_id: String) -> Result<()> {
 mod tests {
     use super::*;
     use crate::config::parse_toml;
+
+    #[test]
+    fn default_terminal_font_uses_maple_then_nerd_symbols() {
+        let config = parse_toml("").expect("valid TOML");
+
+        let settings =
+            terminal_settings_from_config_for_test(&config).expect("valid terminal settings");
+
+        assert_eq!(settings.font_family, DEFAULT_TERMINAL_FONT_FAMILY);
+        assert!(settings.font_family.starts_with("\"Maple Mono\", \"Symbols Nerd Font Mono\""));
+        assert!(settings.font_family.ends_with("monospace"));
+    }
+
     #[test]
     fn parses_uniform_terminal_padding() {
         let config = parse_toml(

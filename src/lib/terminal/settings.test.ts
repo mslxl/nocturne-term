@@ -1,6 +1,6 @@
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
-import { xtermOptions } from "./settings";
+import { terminalCssVariables, xtermOptions } from "./settings";
 import type { TerminalSettings } from "../bindings";
 
 describe("terminal settings", () => {
@@ -8,6 +8,12 @@ describe("terminal settings", () => {
     const options = xtermOptions(settings());
 
     assert.equal(options.allowProposedApi, true);
+  });
+
+  it("publishes the terminal font family as a CSS variable for xterm DOM rendering", () => {
+    const variables = terminalCssVariables(settings());
+
+    assert.equal(variables["--terminal-font-family"], "Menlo");
   });
 });
 

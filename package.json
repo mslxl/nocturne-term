@@ -17,6 +17,7 @@
     "test:tauri:terminal-workspace-mirror-shares-session": "vitest run --config vitest.tauri.config.js tests/tauri/terminal-workspace-mirror-shares-session.test.mjs",
     "test:tauri:terminal-tooltab-live-title": "vitest run --config vitest.tauri.config.js tests/tauri/terminal-tooltab-live-title.test.mjs",
     "test:tauri:terminal-padding-settings-apply-to-workspace": "vitest run --config vitest.tauri.config.js tests/tauri/terminal-padding-settings-apply-to-workspace.test.mjs",
+    "test:tauri:terminal-font-stack-loads": "vitest run --config vitest.tauri.config.js tests/tauri/terminal-font-stack-loads.test.mjs",
     "test:tauri:terminal-startup-light-theme-background": "vitest run --config vitest.tauri.config.js tests/tauri/terminal-startup-light-theme-background.test.mjs",
     "test:tauri:terminal-workspace-switch-preserves-content": "vitest run --config vitest.tauri.config.js tests/tauri/terminal-workspace-switch-preserves-content.test.mjs",
     "test:tauri:terminal-workspace-visible-content": "vitest run --config vitest.tauri.config.js tests/tauri/terminal-workspace-visible-content.test.mjs",
@@ -46,6 +47,7 @@
   },
   "license": "AGPL-3.0-only",
   "dependencies": {
+    "@fontsource/maple-mono": "^5.2.6",
     "@iconify-json/devicon": "^1.2.62",
     "@iconify-json/lucide": "^1.2.111",
     "@iconify-json/simple-icons": "^1.2.84",

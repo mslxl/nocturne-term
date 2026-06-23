@@ -379,6 +379,20 @@ tab_width = 4
 
 ### Terminal padding
 
+Terminal text uses the npm-packaged Maple Mono font first and the vendored
+`SymbolsNerdFontMono-Regular.ttf` from the official
+`ryanoasis/nerd-fonts` Symbols-only release second. Users can override the full
+xterm font stack with `terminal.font_family`:
+
+```toml
+[terminal]
+font_family = "\"Maple Mono\", \"Symbols Nerd Font Mono\", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace"
+```
+
+The value is passed to xterm as CSS `font-family`, so family names containing
+spaces must stay quoted inside the string. The Settings window exposes this as
+Font Family.
+
 Terminal content padding is configured under `terminal.padding`. A single numeric value applies to all sides:
 
 ```toml
