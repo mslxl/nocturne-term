@@ -162,6 +162,7 @@
   let columnsAncestorPreloadKey = "";
   let treeAncestorPreloadKey = "";
   let treeInitialFocusScrollKey = "";
+  let treeInitialFocusScrollPendingKey = "";
   let handledCompletedTransferIds = new Set<string>();
   let treeVisibleFrame: number | null = null;
   const queryClient = useQueryClient();
@@ -1623,13 +1624,17 @@
     if (!result?.provider.current_path) return;
     const focusPath = normalizeFilePath(result.provider.current_path);
     if (!treeRows.some((row) => sameFilePath(row.entry.path, focusPath))) return;
-    const scrollKey = `${toolTab.id}\u001f${focusPath}\u001f${treeRows.length}`;
-    if (treeInitialFocusScrollKey === scrollKey) return;
-    treeInitialFocusScrollKey = scrollKey;
+    const scrollKey = `${toolTab.id}\u001f${focusPath}`;
+    if (treeInitialFocusScrollKey === scrollKey || treeInitialFocusScrollPendingKey === scrollKey) return;
+    treeInitialFocusScrollPendingKey = scrollKey;
     requestAnimationFrame(() => {
+      if (treeInitialFocusScrollPendingKey === scrollKey) treeInitialFocusScrollPendingKey = "";
+      if (treeInitialFocusScrollKey === scrollKey) return;
       const rows = filesRoot?.querySelectorAll<HTMLElement>(".files-table .files-row[data-file-entry='true']:not(.sticky-row)") ?? [];
       const focusRow = [...rows].find((row) => sameFilePath(row.getAttribute("data-entry-path") ?? "", focusPath));
-      focusRow?.scrollIntoView({ block: "center", inline: "nearest" });
+      if (!focusRow) return;
+      treeInitialFocusScrollKey = scrollKey;
+      focusRow.scrollIntoView({ block: "center", inline: "nearest" });
       scheduleFirstVisibleTreePathUpdate();
     });
   }

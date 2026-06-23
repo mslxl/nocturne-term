@@ -492,16 +492,23 @@ test("files upload completion refreshes visible tree", { timeout: 180_000 }, asy
   }
 
   async function clickTreeRow(path) {
-    const target = await execute(`
+    const target = await executeAsync(`
+      const done = arguments[arguments.length - 1];
       const rows = [...document.querySelectorAll('.files-row[data-file-entry="true"]')];
       const row = rows.find((item) => samePath(item.getAttribute('data-entry-path') ?? '', ${JSON.stringify(path)}));
-      if (!row) return { found: false, rows: rows.map((item) => ({ text: item.textContent?.trim() ?? '', path: item.getAttribute('data-entry-path') ?? '' })) };
-      const rect = row.getBoundingClientRect();
-      return {
-        found: true,
-        x: Math.round(rect.left + Math.min(24, rect.width / 2)),
-        y: Math.round(rect.top + rect.height / 2),
-      };
+      if (!row) {
+        done({ found: false, rows: rows.map((item) => ({ text: item.textContent?.trim() ?? '', path: item.getAttribute('data-entry-path') ?? '' })) });
+        return;
+      }
+      row.scrollIntoView({ block: 'center', inline: 'nearest' });
+      requestAnimationFrame(() => {
+        const rect = row.getBoundingClientRect();
+        done({
+          found: true,
+          x: Math.round(rect.left + Math.min(24, rect.width / 2)),
+          y: Math.round(rect.top + rect.height / 2),
+        });
+      });
       function samePath(left, right) {
         return normalizePath(left) === normalizePath(right);
       }

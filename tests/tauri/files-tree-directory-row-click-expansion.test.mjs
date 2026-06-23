@@ -14,6 +14,8 @@
  * ancestor siblings before any manual collapse/expand action, expands and
  * toggles real directory rows through ordinary single-click activation,
  * toggles each of the first four real directory levels at least three times,
+ * scrolls the Tree deep into a long sibling list and toggles a visible
+ * directory without changing the user's scroll position,
  * and on Windows toggles the virtual root drive row that contains the fixture
  * path.
  *
@@ -24,8 +26,10 @@
  * click toggles directory expansion and selection, child rows appear and
  * disappear with that toggle on every repeated cycle, clicking a parent after
  * selecting a deeper child leaves the Files view responsive for subsequent
- * clicks, and the Windows drive row can be collapsed and expanded repeatedly
- * without making the WebView stop responding.
+ * clicks, expanding or collapsing a visible directory preserves the Tree
+ * scroll offset instead of jumping to the top or initial focus row, and the
+ * Windows drive row can be collapsed and expanded repeatedly without making
+ * the WebView stop responding.
  */
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
@@ -103,6 +107,7 @@ test("files tree directory row click expansion", { timeout: 180_000 }, async () 
       { name: "beta", childName: "gamma", ancestorNames: [fixtureRootName, "alpha"], siblingName: "beta-sibling-a" },
       { name: "gamma", childName: "delta", ancestorNames: [fixtureRootName, "alpha", "beta"], siblingName: "gamma-sibling-a" },
     ], 3);
+    await assertVisibleDirectoryTogglePreservesTreeScroll("scroll-target-42");
 
     if (fixtureDriveName) {
       await dispatchTreeRowClick(fixtureDriveName, 1);
@@ -162,6 +167,10 @@ test("files tree directory row click expansion", { timeout: 180_000 }, async () 
     await mkdir(join(root, "alpha", "beta", "gamma", "gamma-sibling-a"), { recursive: true });
     await mkdir(join(root, "alpha", "beta", "gamma", "gamma-sibling-b"), { recursive: true });
     await mkdir(join(root, "alpha", "beta", "gamma", "delta", "epsilon"), { recursive: true });
+    for (let index = 0; index < 64; index += 1) {
+      const name = `scroll-target-${String(index).padStart(2, "0")}`;
+      await mkdir(join(root, name, "child"), { recursive: true });
+    }
     await writeFile(join(root, "alpha", "beta", "gamma", "delta", "epsilon", "leaf.txt"), "leaf content\n");
     await writeFile(join(root, "alpha", "note.txt"), "alpha content\n");
     return root;
@@ -271,6 +280,61 @@ test("files tree directory row click expansion", { timeout: 180_000 }, async () 
     }
   }
 
+  async function assertVisibleDirectoryTogglePreservesTreeScroll(name) {
+    const scrolled = await scrollTreeToRow(name);
+    if (!scrolled.ok) {
+      throw new Error(`Tree did not scroll to ${name} before toggle preservation check\n${JSON.stringify(scrolled, null, 2)}`);
+    }
+    const beforeExpand = await treeScrollState();
+    if (beforeExpand.scrollTop <= 8 || beforeExpand.firstVisibleName === fixtureRootName || beforeExpand.firstVisibleName === "alpha") {
+      throw new Error(`Tree was not prepared in a deep scroll position before expanding ${name}\n${JSON.stringify(beforeExpand, null, 2)}`);
+    }
+
+    await dispatchTreeRowClick(name, 1);
+    await assertWebViewResponsive(`after expanding ${name} in a scrolled Tree`);
+    await waitUntil(async () => {
+      const rows = await treeRows();
+      return rows.some((row) => row.name === name && row.expanded === "true" && row.selected) &&
+        rows.some((row) => row.name === "child");
+    }, async () => `directory ${name} did not expand during scroll preservation check\n${await pageSummary()}`);
+    await delay(450);
+    const afterExpand = await treeScrollState();
+    assertTreeScrollPreserved(beforeExpand, afterExpand, `expanding ${name}`);
+
+    await dispatchTreeRowClick(name, 1);
+    await assertWebViewResponsive(`after collapsing ${name} in a scrolled Tree`);
+    await waitUntil(async () => {
+      const rows = await treeRows();
+      return rows.some((row) => row.name === name && row.expanded === "false" && row.selected);
+    }, async () => `directory ${name} did not collapse during scroll preservation check\n${await pageSummary()}`);
+    await delay(450);
+    const afterCollapse = await treeScrollState();
+    assertTreeScrollPreserved(beforeExpand, afterCollapse, `collapsing ${name}`);
+  }
+
+  function assertTreeScrollPreserved(before, after, operation) {
+    const delta = Math.abs(after.scrollTop - before.scrollTop);
+    if (
+      after.scrollTop <= 8 ||
+      after.firstVisibleName === fixtureRootName ||
+      after.firstVisibleName === "alpha" ||
+      after.firstVisibleName === "beta" ||
+      delta > 80
+    ) {
+      throw new Error(
+        `Tree scroll position was not preserved after ${operation}\n${JSON.stringify(
+          {
+            before,
+            after,
+            delta,
+          },
+          null,
+          2,
+        )}`,
+      );
+    }
+  }
+
   async function ensureTreePathExpanded(pathNames, finalChildName) {
     for (const name of pathNames) {
       const rows = await treeRows();
@@ -337,6 +401,100 @@ test("files tree directory row click expansion", { timeout: 180_000 }, async () 
     if (!result || typeof result.marker !== "number") {
       throw new Error(`WebView did not respond ${label}: ${JSON.stringify(result)}`);
     }
+  }
+
+  async function scrollTreeToRow(name) {
+    return await execute(`
+      const table = document.querySelector('.files-table');
+      const viewport = treeViewport();
+      const row = treeRowByName(${JSON.stringify(name)});
+      if (!table || !viewport || !row) {
+        return {
+          ok: false,
+          reason: 'Tree row or viewport missing',
+          hasTable: Boolean(table),
+          hasViewport: Boolean(viewport),
+          hasRow: Boolean(row),
+          rows: [...document.querySelectorAll('.files-table [data-file-entry="true"]:not(.sticky-row)')]
+            .map((candidate) => basename(candidate.getAttribute('data-entry-path') ?? candidate.textContent?.trim() ?? '')),
+        };
+      }
+      row.scrollIntoView({ block: 'center', inline: 'nearest' });
+      viewport.dispatchEvent(new Event('scroll', { bubbles: true }));
+      return {
+        ok: viewport.scrollTop > 8,
+        scrollTop: viewport.scrollTop,
+        firstVisibleName: firstVisibleTreeRowName(),
+      };
+
+      function treeViewport() {
+        if (!table) return null;
+        if (table.matches('[data-overlayscrollbars-viewport]')) return table;
+        return table.querySelector('[data-overlayscrollbars-viewport]') ?? table;
+      }
+
+      function treeRowByName(value) {
+        const rows = [...document.querySelectorAll('.files-table [data-file-entry="true"]:not(.sticky-row)')]
+          .filter((candidate) => candidate.offsetParent !== null);
+        return rows.find((candidate) =>
+          candidate.getAttribute('data-entry-kind') === 'directory' &&
+          basename(candidate.getAttribute('data-entry-path') ?? candidate.querySelector('.name-cell')?.textContent?.trim() ?? '') === value
+        );
+      }
+
+      function firstVisibleTreeRowName() {
+        const root = treeViewport();
+        if (!root) return '';
+        const rootRect = root.getBoundingClientRect();
+        const rows = [...document.querySelectorAll('.files-table .files-row[data-file-entry="true"]:not(.sticky-row)')]
+          .filter((candidate) => candidate.offsetParent !== null);
+        const row = rows.find((candidate) => {
+          const rect = candidate.getBoundingClientRect();
+          return rect.bottom > rootRect.top + 2 && rect.top < rootRect.bottom - 2;
+        });
+        return row ? basename(row.getAttribute('data-entry-path') ?? row.textContent?.trim() ?? '') : '';
+      }
+
+      function basename(value) {
+        const normalized = value.replace(/\\\\/g, '/').replace(/\\/+$/, '');
+        return normalized.slice(normalized.lastIndexOf('/') + 1) || normalized;
+      }
+    `);
+  }
+
+  async function treeScrollState() {
+    return await execute(`
+      const table = document.querySelector('.files-table');
+      const viewport = treeViewport();
+      return {
+        scrollTop: viewport?.scrollTop ?? 0,
+        firstVisibleName: firstVisibleTreeRowName(),
+      };
+
+      function treeViewport() {
+        if (!table) return null;
+        if (table.matches('[data-overlayscrollbars-viewport]')) return table;
+        return table.querySelector('[data-overlayscrollbars-viewport]') ?? table;
+      }
+
+      function firstVisibleTreeRowName() {
+        const root = treeViewport();
+        if (!root) return '';
+        const rootRect = root.getBoundingClientRect();
+        const rows = [...document.querySelectorAll('.files-table .files-row[data-file-entry="true"]:not(.sticky-row)')]
+          .filter((candidate) => candidate.offsetParent !== null);
+        const row = rows.find((candidate) => {
+          const rect = candidate.getBoundingClientRect();
+          return rect.bottom > rootRect.top + 2 && rect.top < rootRect.bottom - 2;
+        });
+        return row ? basename(row.getAttribute('data-entry-path') ?? row.textContent?.trim() ?? '') : '';
+      }
+
+      function basename(value) {
+        const normalized = value.replace(/\\\\/g, '/').replace(/\\/+$/, '');
+        return normalized.slice(normalized.lastIndexOf('/') + 1) || normalized;
+      }
+    `);
   }
 
   async function createSession() {
