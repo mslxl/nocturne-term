@@ -53,6 +53,7 @@ export type DockGroup = {
   role: DockGroupRole;
   slots: ToolSlot[];
   activeSlotId: DisplaySlotId;
+  collapsed: boolean;
 };
 
 export type DockSplit = {
@@ -90,6 +91,7 @@ export function createDockGroup(
   role: DockGroupRole,
   slots: ToolSlot[],
   activeSlotId: DisplaySlotId,
+  collapsed = false,
 ): DockGroup {
   if (!id.trim()) throw new Error("dock group id cannot be empty");
   if (!["content", "side_panel"].includes(role)) throw new Error(`dock group ${id} has invalid role ${role}`);
@@ -99,7 +101,7 @@ export function createDockGroup(
     throw new Error(`active slot ${activeSlotId} not found in dock group ${id}`);
   }
   if (slots.length === 0 && activeSlotId) throw new Error(`empty dock group ${id} cannot have an active slot`);
-  return { kind: "group", id, role, slots, activeSlotId };
+  return { kind: "group", id, role, slots, activeSlotId, collapsed };
 }
 
 export function createOwnedSlot(id: DisplaySlotId, toolTabId: ToolTabId): OwnedDisplaySlot {
@@ -171,6 +173,7 @@ export function cloneDockLayout(layout: DockLayout): DockLayout {
       id: layout.id,
       role: layout.role,
       activeSlotId: layout.activeSlotId,
+      collapsed: layout.collapsed,
       slots: layout.slots.map((slot) => ({ ...slot })),
     };
   }

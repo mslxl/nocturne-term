@@ -285,6 +285,7 @@
     side: "" | "left" | "right" | "up" | "down";
     style: string;
   };
+  type ToolTabKind = WorkspaceToolTab["kind"];
   type DockGroupBounds = {
     left: boolean;
     right: boolean;
@@ -376,10 +377,18 @@
     pointerId: number;
   } | null>(null);
   let dragState = $state<{ kind: "pane" | "tab"; id: string } | null>(null);
-  let toolTabDragState = $state<{ workspaceId: string; slotId: string; toolTabId: string | null; active: boolean } | null>(null);
+  let toolTabDragState = $state<{
+    workspaceId: string;
+    slotId: string;
+    groupId: string;
+    groupRole: "content" | "side_panel";
+    toolTabId: string | null;
+    active: boolean;
+  } | null>(null);
   let toolTabDropTarget = $state<ToolTabDropTarget | null>(null);
   let activeToolSlotOverrideByGroupId = $state<Record<string, string>>({});
   let activeToolSlotOverrideRevision = $state(0);
+  let suppressToolTabClickSlotId = "";
   let dropTarget = $state<{ paneId: string; zone: PaneDropZone } | null>(null);
   let pointerDrag = $state<{
     kind: "pane" | "tab";
@@ -393,7 +402,10 @@
   let toolTabPointerDrag = $state<{
     workspaceId: string;
     slotId: string;
+    groupId: string;
+    groupRole: "content" | "side_panel";
     toolTabId: string | null;
+    toolKind: ToolTabKind | null;
     pointerId: number;
     startX: number;
     startY: number;
@@ -459,6 +471,7 @@
   });
 
   function syncWorkspaceSnapshot(next: WorkspaceLayoutSnapshot | null) {
+    if (next) pruneActiveToolSlotOverrides(next);
     workspaceViewSnapshot = next;
     workspaceRenderRevision += 1;
     if (typeof window !== "undefined") {
@@ -634,6 +647,29 @@
     return override && layout.slots.some((slot) => slot.id === override) ? override : layout.active_slot_id;
   }
 
+  function pruneActiveToolSlotOverrides(snapshot: WorkspaceLayoutSnapshot) {
+    const nextOverrides: Record<string, string> = {};
+    for (const workspace of snapshot.workspaces) collectValidActiveToolSlotOverrides(workspace.layout, nextOverrides);
+    for (const window of snapshot.floating_windows) collectValidActiveToolSlotOverrides(window.layout, nextOverrides);
+    const currentKeys = Object.keys(activeToolSlotOverrideByGroupId);
+    const nextKeys = Object.keys(nextOverrides);
+    const changed =
+      currentKeys.length !== nextKeys.length ||
+      nextKeys.some((key) => activeToolSlotOverrideByGroupId[key] !== nextOverrides[key]);
+    if (!changed) return;
+    activeToolSlotOverrideByGroupId = nextOverrides;
+    activeToolSlotOverrideRevision += 1;
+  }
+
+  function collectValidActiveToolSlotOverrides(layout: WorkspaceDockLayout, target: Record<string, string>) {
+    if (layout.kind === "group") {
+      const override = activeToolSlotOverrideByGroupId[layout.id];
+      if (override && layout.slots.some((slot) => slot.id === override)) target[layout.id] = override;
+      return;
+    }
+    for (const child of layout.children) collectValidActiveToolSlotOverrides(child, target);
+  }
+
   function isGroupSlotActive(layout: Extract<WorkspaceDockLayout, { kind: "group" }>, slotId: string): boolean {
     return slotId === activeGroupSlotId(layout);
   }
@@ -643,8 +679,9 @@
     return slot.tool_tab_id;
   }
 
-  function dockGroupRole(group: Extract<WorkspaceDockLayout, { kind: "group" }>) {
-    return group.role;
+  function dockGroupRole(group: Extract<WorkspaceDockLayout, { kind: "group" }>): "content" | "side_panel" {
+    if (group.role === "content" || group.role === "side_panel") return group.role;
+    throw new Error(`dock group ${group.id} has unsupported role ${group.role}`);
   }
 
   function rootDockGroupBounds(): DockGroupBounds {
@@ -673,15 +710,23 @@
         };
   }
 
-  function toolTabbarPlacement(bounds: DockGroupBounds): ToolTabbarPlacement {
+  function edgeToolTabbarPlacement(bounds: DockGroupBounds): ToolTabbarPlacement {
     if (bounds.bottom && !bounds.top) return "bottom";
     if (bounds.left && !bounds.right) return "left";
     if (bounds.right && !bounds.left) return "right";
     return "top";
   }
 
-  function visualDockGroupRole(bounds: DockGroupBounds) {
-    return toolTabbarPlacement(bounds) === "top" ? "content" : "side_panel";
+  function toolTabbarPlacement(
+    group: Extract<WorkspaceDockLayout, { kind: "group" }>,
+    bounds: DockGroupBounds,
+  ): ToolTabbarPlacement {
+    if (dockGroupRole(group) === "content") return "top";
+    return edgeToolTabbarPlacement(bounds);
+  }
+
+  function visualDockGroupRole(group: Extract<WorkspaceDockLayout, { kind: "group" }>) {
+    return dockGroupRole(group);
   }
 
   function firstContentGroupId(workspace: WorkspaceTabState): string | null {
@@ -709,9 +754,23 @@
 
   function activateWorkspaceLayoutSlot(layout: WorkspaceDockLayout, slotId: string): WorkspaceDockLayout {
     if (layout.kind === "group") {
-      return layout.slots.some((slot) => slot.id === slotId) ? { ...layout, active_slot_id: slotId } : layout;
+      return layout.slots.some((slot) => slot.id === slotId) ? { ...layout, active_slot_id: slotId, collapsed: false } : layout;
     }
     return { ...layout, children: layout.children.map((child) => activateWorkspaceLayoutSlot(child, slotId)) };
+  }
+
+  function setWorkspaceDockGroupCollapsed(
+    layout: WorkspaceDockLayout,
+    groupId: string,
+    collapsed: boolean,
+  ): WorkspaceDockLayout {
+    if (layout.kind === "group") {
+      return layout.id === groupId ? { ...layout, collapsed } : layout;
+    }
+    return {
+      ...layout,
+      children: layout.children.map((child) => setWorkspaceDockGroupCollapsed(child, groupId, collapsed)),
+    };
   }
 
   function replaceWorkspaceLayoutSnapshot(workspaceId: string, layout: WorkspaceDockLayout) {
@@ -808,8 +867,70 @@
     return workspaceById(slot.owner_workspace_id)?.title ?? "Closed workspace";
   }
 
-  function splitStyle(layout: Extract<WorkspaceDockLayout, { kind: "split" }>) {
-    return dockSplitGridTemplate(layout.direction, layout.children.length, layout.ratios);
+  function splitStyle(layout: Extract<WorkspaceDockLayout, { kind: "split" }>, bounds: DockGroupBounds) {
+    const collapsedTracks = layout.children.map((child, index) => {
+      if (child.kind !== "group" || child.collapsed !== true) return null;
+      const placement = toolTabbarPlacement(child, childDockGroupBounds(bounds, layout.direction, index, layout.children.length));
+      if (placement === "left" || placement === "right") return "32px";
+      if (placement === "bottom") return "31px";
+      return null;
+    });
+    const resizableBoundaries = layout.children.slice(0, -1).map((_, index) => splitBoundaryResizable(layout, index));
+    if (collapsedTracks.every((track) => track === null)) {
+      return dockSplitGridTemplateWithResizableBoundaries(layout.direction, layout.children.length, layout.ratios, resizableBoundaries);
+    }
+    return dockSplitGridTemplateWithFixedTracks(layout.direction, layout.children.length, layout.ratios, collapsedTracks, resizableBoundaries);
+  }
+
+  function dockSplitGridTemplateWithFixedTracks(
+    direction: "row" | "column",
+    childCount: number,
+    ratios: readonly (number | null)[],
+    fixedTracks: readonly (string | null)[],
+    resizableBoundaries: readonly boolean[],
+    splitterPixels = 5,
+  ): string {
+    const normalized = normalizedDockRatios(childCount, ratios);
+    const flexibleTotal = normalized.reduce((sum, ratio, index) => fixedTracks[index] === null ? sum + ratio : sum, 0);
+    const tracks = normalized.flatMap((ratio, index) => {
+      const fixedTrack = fixedTracks[index];
+      const flexibleRatio = flexibleTotal > 0 ? ratio / flexibleTotal : 1;
+      const track = fixedTrack ?? `minmax(0, ${Math.max(0.08, flexibleRatio)}fr)`;
+      return index === normalized.length - 1 || !resizableBoundaries[index] ? [track] : [track, `${splitterPixels}px`];
+    });
+    return direction === "row" ? `grid-template-columns: ${tracks.join(" ")};` : `grid-template-rows: ${tracks.join(" ")};`;
+  }
+
+  function dockSplitGridTemplateWithResizableBoundaries(
+    direction: "row" | "column",
+    childCount: number,
+    ratios: readonly (number | null)[],
+    resizableBoundaries: readonly boolean[],
+    splitterPixels = 5,
+  ): string {
+    const normalized = normalizedDockRatios(childCount, ratios);
+    const tracks = normalized.flatMap((ratio, index) => {
+      const track = `minmax(0, ${Math.max(0.08, ratio)}fr)`;
+      return index === normalized.length - 1 || !resizableBoundaries[index] ? [track] : [track, `${splitterPixels}px`];
+    });
+    return direction === "row" ? `grid-template-columns: ${tracks.join(" ")};` : `grid-template-rows: ${tracks.join(" ")};`;
+  }
+
+  function splitBoundaryResizable(layout: Extract<WorkspaceDockLayout, { kind: "split" }>, index: number) {
+    return !dockChildCollapsed(layout.children[index]) && !dockChildCollapsed(layout.children[index + 1]);
+  }
+
+  function dockChildCollapsed(layout: WorkspaceDockLayout | undefined) {
+    return layout?.kind === "group" && layout.collapsed === true;
+  }
+
+  function normalizedDockRatios(length: number, values: readonly (number | null)[]): number[] {
+    const fallback = Array.from({ length }, () => 1 / Math.max(1, length));
+    if (values.length !== length) return fallback;
+    const numeric = values.map((value) => (typeof value === "number" && Number.isFinite(value) && value > 0 ? value : 0));
+    const total = numeric.reduce((sum, value) => sum + value, 0);
+    if (total <= 0) return fallback;
+    return numeric.map((value) => value / total);
   }
 
   function dockLayoutRenderKey(layout: WorkspaceDockLayout): string {
@@ -876,6 +997,26 @@
           activeToolSlotOverrideRevision += 1;
         }
       }
+      replaceWorkspaceLayoutSnapshot(workspace.id, previousLayout);
+      settingsError = error instanceof Error ? error.message : String(error);
+    }
+  }
+
+  async function setDockGroupCollapsed(workspace: WorkspaceTabState, groupId: string, collapsed: boolean) {
+    const previousLayout = workspace.layout;
+    replaceWorkspaceLayoutSnapshot(
+      workspace.id,
+      setWorkspaceDockGroupCollapsed(workspace.layout, groupId, collapsed),
+    );
+    try {
+      const next = await dispatchWorkspaceIntent({
+        kind: "set_dock_group_collapsed",
+        workspace_id: workspace.id,
+        group_id: groupId,
+        collapsed,
+      });
+      replaceWorkspaceSnapshot(next);
+    } catch (error) {
       replaceWorkspaceLayoutSnapshot(workspace.id, previousLayout);
       settingsError = error instanceof Error ? error.message : String(error);
     }
@@ -2203,10 +2344,15 @@
     if (slot.kind === "closed_source" || slot.kind === "floating_placeholder") return;
     const target = event.currentTarget;
     if (!(target instanceof HTMLElement)) return;
+    const group = findWorkspaceGroupContainingSlot(workspace.layout, slot.id);
+    if (!group) throw new Error(`dock group for tool slot ${slot.id} not found`);
     toolTabPointerDrag = {
       workspaceId: workspace.id,
       slotId: slot.id,
+      groupId: group.id,
+      groupRole: dockGroupRole(group),
       toolTabId: slot.tool_tab_id,
+      toolKind: slot.tool_tab_id ? workspaceSnapshot?.tool_tabs.find((tool) => tool.id === slot.tool_tab_id)?.kind ?? null : null,
       pointerId: event.pointerId,
       startX: event.clientX,
       startY: event.clientY,
@@ -2273,6 +2419,8 @@
       toolTabDragState = {
         workspaceId: drag.workspaceId,
         slotId: drag.slotId,
+        groupId: drag.groupId,
+        groupRole: drag.groupRole,
         toolTabId: drag.toolTabId,
         active: true,
       };
@@ -2313,12 +2461,27 @@
     const wasActive = drag.active;
     toolTabDragState = null;
     toolTabDropTarget = null;
+    if (wasActive) {
+      suppressToolTabClickSlotId = drag.slotId;
+      window.setTimeout(() => {
+        if (suppressToolTabClickSlotId === drag.slotId) suppressToolTabClickSlotId = "";
+      }, 250);
+    }
     if (!wasActive || !target) return;
     try {
       await applyToolTabDrop(drag, target);
     } catch (error) {
       settingsError = error instanceof Error ? error.message : String(error);
     }
+  }
+
+  function handleClick(event: MouseEvent) {
+    if (!suppressToolTabClickSlotId) return;
+    const slot = event.target instanceof Element ? event.target.closest<HTMLElement>("[data-tool-slot-id]") : null;
+    if (slot?.dataset.toolSlotId !== suppressToolTabClickSlotId) return;
+    suppressToolTabClickSlotId = "";
+    event.preventDefault();
+    event.stopPropagation();
   }
 
   async function applyToolTabDrop(
@@ -2388,8 +2551,8 @@
     const workspaceId = workspaceTarget?.dataset.workspaceId;
     if (workspaceId && workspaceId !== drag.workspaceId) return { kind: "workspace", workspaceId };
 
-    const workspaceEdgeTarget = toolTabWorkspaceEdgeDropTargetFromPoint(x, y, drag.workspaceId);
-    if (workspaceEdgeTarget) return workspaceEdgeTarget;
+    const collapsedGroupTarget = toolTabCollapsedGroupDropTargetFromPoint(x, y);
+    if (collapsedGroupTarget) return collapsedGroupTarget;
 
     const dockGroups = [...document.querySelectorAll<HTMLElement>("[data-dock-group-id]")];
     const containingGroup = dockGroups
@@ -2400,12 +2563,31 @@
       const targetWorkspaceId = containingGroup.element.dataset.workspaceId;
       const groupId = containingGroup.element.dataset.dockGroupId;
       if (!targetWorkspaceId || !groupId) return null;
-      const groupEdgeTarget = toolTabGroupEdgeDropTargetFromPoint(x, y, containingGroup.element, containingGroup.rect);
+      const workspaceEdgeTarget = toolTabWorkspaceEdgeDropTargetFromPoint(x, y, targetWorkspaceId, workspaceEdgeInnerBand());
+      if (workspaceEdgeTarget) return workspaceEdgeTarget;
+      const sidePanelRestoreTarget = toolTabSidePanelRestoreDropTargetFromPoint(
+        x,
+        y,
+        targetWorkspaceId,
+        containingGroup.element,
+        containingGroup.rect,
+        drag.toolKind,
+        drag.slotId,
+        drag.groupId,
+        drag.groupRole,
+      );
+      if (sidePanelRestoreTarget) return sidePanelRestoreTarget;
+      const groupEdgeTarget = toolTabGroupEdgeDropTargetFromPoint(x, y, containingGroup.element, containingGroup.rect, drag.slotId);
       if (groupEdgeTarget) return groupEdgeTarget;
-      const slotTarget = toolTabSlotDropTargetFromPoint(x, y, targetWorkspaceId);
+      const slotTarget = toolTabSlotDropTargetFromPoint(x, y, targetWorkspaceId, drag.slotId);
       if (slotTarget) return slotTarget;
+      const broadWorkspaceEdgeTarget = toolTabWorkspaceEdgeDropTargetFromPoint(x, y, targetWorkspaceId);
+      if (broadWorkspaceEdgeTarget) return broadWorkspaceEdgeTarget;
       return { kind: "group", workspaceId: targetWorkspaceId, groupId };
     }
+
+    const workspaceEdgeTarget = toolTabWorkspaceEdgeDropTargetFromPoint(x, y, drag.workspaceId);
+    if (workspaceEdgeTarget) return workspaceEdgeTarget;
 
     const workspaceBody = document.querySelector<HTMLElement>(".workspace-body");
     if (workspaceBody) {
@@ -2415,15 +2597,62 @@
     return { kind: "float", workspaceId: drag.workspaceId };
   }
 
+  function toolTabCollapsedGroupDropTargetFromPoint(x: number, y: number): ToolTabDropTarget | null {
+    const collapsedGroups = [...document.querySelectorAll<HTMLElement>("[data-dock-group-id][data-dock-group-collapsed='true']")];
+    const containingGroup = collapsedGroups
+      .map((element) => ({ element, rect: element.getBoundingClientRect() }))
+      .filter(({ rect }) => x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom)
+      .sort((a, b) => a.rect.width * a.rect.height - b.rect.width * b.rect.height)[0];
+    const workspaceId = containingGroup?.element.dataset.workspaceId;
+    const groupId = containingGroup?.element.dataset.dockGroupId;
+    return workspaceId && groupId ? { kind: "group", workspaceId, groupId } : null;
+  }
+
+  function toolTabSidePanelRestoreDropTargetFromPoint(
+    x: number,
+    y: number,
+    workspaceId: string,
+    group: HTMLElement,
+    rect: DOMRect,
+    draggingToolKind: ToolTabKind | null,
+    draggingSlotId: string,
+    draggingGroupId: string,
+    draggingGroupRole: "content" | "side_panel",
+  ): ToolTabDropTarget | null {
+    if (group.dataset.dockGroupRole !== "content") return null;
+    if (!draggingToolKind || draggingToolKind === "terminal") return null;
+    if (draggingGroupRole !== "side_panel") return null;
+    if (group.dataset.dockGroupId === draggingGroupId) {
+      return null;
+    }
+    const workspaceBody = document.querySelector<HTMLElement>(".workspace-body");
+    if (!workspaceBody) return null;
+    const bodyRect = workspaceBody.getBoundingClientRect();
+    const restoreBand = sidePanelRestoreBand(rect);
+    const touchesLeft = Math.abs(rect.left - bodyRect.left) <= 2;
+    const touchesRight = Math.abs(rect.right - bodyRect.right) <= 2;
+    const touchesBottom = Math.abs(rect.bottom - bodyRect.bottom) <= 2;
+    if (touchesLeft && x >= rect.left && x <= rect.left + restoreBand) return { kind: "workspace_edge", workspaceId, side: "left" };
+    if (touchesRight && x <= rect.right && x >= rect.right - restoreBand) return { kind: "workspace_edge", workspaceId, side: "right" };
+    if (touchesBottom && y <= rect.bottom && y >= rect.bottom - restoreBand) return { kind: "workspace_edge", workspaceId, side: "down" };
+    return null;
+  }
+
+  function sidePanelRestoreBand(rect: DOMRect) {
+    return Math.min(220, Math.max(96, rect.width * 0.45));
+  }
+
   function toolTabGroupEdgeDropTargetFromPoint(
     x: number,
     y: number,
     group: HTMLElement,
     rect: DOMRect,
+    draggingSlotId: string,
   ): ToolTabDropTarget | null {
     const workspaceId = group.dataset.workspaceId;
     const slotId = group.dataset.activeToolSlotId;
     if (!workspaceId || !slotId) return null;
+    if (slotId === draggingSlotId) return null;
     const edgeInset = Math.min(72, Math.max(28, Math.min(rect.width, rect.height) * 0.22));
     const distances = [
       { side: "left" as const, distance: x - rect.left },
@@ -2439,12 +2668,13 @@
     x: number,
     y: number,
     workspaceId: string,
+    edgeInsetOverride?: number,
   ): ToolTabDropTarget | null {
     const workspaceBody = document.querySelector<HTMLElement>(".workspace-body");
     if (!workspaceBody) return null;
     const rect = workspaceBody.getBoundingClientRect();
     if (x < rect.left || x > rect.right || y < rect.top || y > rect.bottom) return null;
-    const edgeInset = Math.min(44, Math.max(18, Math.min(rect.width, rect.height) * 0.08));
+    const edgeInset = edgeInsetOverride ?? Math.min(44, Math.max(18, Math.min(rect.width, rect.height) * 0.08));
     const distances = [
       { side: "left" as const, distance: x - rect.left },
       { side: "right" as const, distance: rect.right - x },
@@ -2455,7 +2685,16 @@
     return nearest.distance <= edgeInset ? { kind: "workspace_edge", workspaceId, side: nearest.side } : null;
   }
 
-  function toolTabSlotDropTargetFromPoint(x: number, y: number, workspaceId: string): ToolTabDropTarget | null {
+  function workspaceEdgeInnerBand() {
+    return 28;
+  }
+
+  function toolTabSlotDropTargetFromPoint(
+    x: number,
+    y: number,
+    workspaceId: string,
+    draggingSlotId: string,
+  ): ToolTabDropTarget | null {
     const slots = [...document.querySelectorAll<HTMLElement>("[data-tool-slot-id]")];
     const match = slots
       .map((element) => ({ element, rect: element.getBoundingClientRect() }))
@@ -2463,6 +2702,7 @@
       .sort((a, b) => a.rect.width * a.rect.height - b.rect.width * b.rect.height)[0];
     const slotId = match?.element.dataset.toolSlotId;
     if (!match || !slotId) return null;
+    if (slotId === draggingSlotId) return null;
     return { kind: "split", workspaceId, slotId, side: dockSideForRect(match.rect, x, y) };
   }
 
@@ -4286,6 +4526,7 @@
     window.addEventListener("pointermove", handlePointerMove, { capture: true });
     window.addEventListener("pointerup", handlePointerUp, { capture: true });
     window.addEventListener("pointercancel", handlePointerCancel, { capture: true });
+    window.addEventListener("click", handleClick, { capture: true });
     window.addEventListener("blur", handleWindowBlur);
     window.addEventListener("focus", syncTerminalMenuState);
     document.addEventListener("pointerdown", closeHostPickerOnExternalPointer, { capture: true });
@@ -4304,6 +4545,7 @@
       window.removeEventListener("pointermove", handlePointerMove, { capture: true });
       window.removeEventListener("pointerup", handlePointerUp, { capture: true });
       window.removeEventListener("pointercancel", handlePointerCancel, { capture: true });
+      window.removeEventListener("click", handleClick, { capture: true });
       window.removeEventListener("blur", handleWindowBlur);
       window.removeEventListener("focus", syncTerminalMenuState);
       document.removeEventListener("pointerdown", closeHostPickerOnExternalPointer, { capture: true });
@@ -4760,7 +5002,7 @@
       class:column={layout.direction === "column"}
       class:row={layout.direction === "row"}
       class="workspace-dock-split"
-      style={splitStyle(layout)}
+      style={splitStyle(layout, bounds)}
     >
       {#each layout.children as child, index (dockLayoutStableRenderKey(child))}
         {@render dockLayout(
@@ -4772,7 +5014,7 @@
           activeSlotRevision,
           activeSlotOverrides,
         )}
-        {#if index < layout.children.length - 1}
+        {#if index < layout.children.length - 1 && splitBoundaryResizable(layout, index)}
           <button
             class:column={layout.direction === "column"}
             class:row={layout.direction === "row"}
@@ -4797,8 +5039,8 @@
       {workspace}
       activeSlotId={activeGroupSlotId(layout)}
       {activeSlotRevision}
-      tabbarPlacement={toolTabbarPlacement(bounds)}
-      visualRole={visualDockGroupRole(bounds)}
+      tabbarPlacement={toolTabbarPlacement(layout, bounds)}
+      visualRole={visualDockGroupRole(layout)}
       dropTargetGroupId={activeToolDropTargetGroupId()}
       splitTargetSlotId={activeToolSplitTargetSlotId()}
       draggingSlotId={toolTabDragState?.slotId ?? null}
@@ -4807,6 +5049,7 @@
       {ownerWorkspaceTitle}
       terminalSessionId={terminalSessionIdForToolTab}
       onActivate={(slotId) => workspace ? void activateWorkspaceSlot(workspace, slotId) : undefined}
+      onSetCollapsed={(collapsed) => workspace ? void setDockGroupCollapsed(workspace, layout.id, collapsed) : undefined}
       onClose={(slotId) => workspace ? void closeWorkspaceSlot(workspace.id, slotId) : undefined}
       onContextMenu={(event, group, slot) => workspace ? openToolTabContextMenu(event, workspace, group, slot) : undefined}
       onPointerDown={(event, slot) => workspace ? startToolTabPointerDrag(event, workspace, slot) : undefined}

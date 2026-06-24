@@ -19,6 +19,7 @@
     ownerWorkspaceTitle: (slot: WorkspaceToolSlot) => string;
     terminalSessionId: (tool: WorkspaceToolTab | null) => string | undefined;
     onActivate: (slotId: string) => void;
+    onSetCollapsed: (collapsed: boolean) => void;
     onClose: (slotId: string) => void;
     onContextMenu: (event: MouseEvent, layout: WorkspaceDockGroupLayout, slot: WorkspaceToolSlot) => void;
     onPointerDown: (event: PointerEvent, slot: WorkspaceToolSlot) => void;
@@ -40,6 +41,7 @@
     ownerWorkspaceTitle,
     terminalSessionId,
     onActivate,
+    onSetCollapsed,
     onClose,
     onContextMenu,
     onPointerDown,
@@ -64,18 +66,48 @@
     }
   });
 
-  function isActive(slot: WorkspaceToolSlot) {
-    return slot.id === localActiveSlotId;
+  const canCollapse = $derived(tabbarPlacement !== "top");
+  const groupCollapsed = $derived(canCollapse && layout.collapsed);
+
+  function isActiveId(slotId: string) {
+    return slotId === localActiveSlotId;
   }
 
-  function activate(slotId: string) {
+  function isActive(slot: WorkspaceToolSlot) {
+    return isActiveId(slot.id);
+  }
+
+  function selectSlot(slotId: string) {
+    if (isActiveId(slotId) && canCollapse) {
+      onSetCollapsed(!groupCollapsed);
+      return;
+    }
     localActiveSlotIdOverride = slotId;
     onActivate(slotId);
+    if (canCollapse && groupCollapsed) onSetCollapsed(false);
   }
 
   function shouldMountSlot(slot: WorkspaceToolSlot) {
+    if (groupCollapsed) return false;
     const tool = slotTool(slot);
     return tool?.kind !== "terminal" || isActive(slot);
+  }
+
+  function compactSlotTitle(slot: WorkspaceToolSlot, tool: WorkspaceToolTab | null) {
+    if (slot.kind === "closed_source") return "Closed";
+    if (slot.kind === "floating_placeholder") return "Floating";
+    if (slot.kind === "mirror" && tool?.kind) return compactToolKindTitle(tool.kind);
+    if (!tool?.kind) return slotTitle(slot);
+    return compactToolKindTitle(tool.kind);
+  }
+
+  function compactToolKindTitle(kind: WorkspaceToolTab["kind"]) {
+    if (kind === "files") return "Files";
+    if (kind === "terminal") return "Terminal";
+    if (kind === "transfers") return "Transfers";
+    if (kind === "resources") return "Resources";
+    if (kind === "ports") return "Ports";
+    return kind;
   }
 </script>
 
@@ -86,12 +118,14 @@
   class:tabbar-left={tabbarPlacement === "left"}
   class:tabbar-right={tabbarPlacement === "right"}
   class:tabbar-top={tabbarPlacement === "top"}
+  class:collapsed={groupCollapsed}
   aria-label="Tool tabs"
   data-dock-group-id={layout.id}
   data-dock-group-role={layout.role}
   data-dock-group-visual-role={visualRole}
   data-dock-group-model-role={layout.role}
   data-tool-tabbar-placement={tabbarPlacement}
+  data-dock-group-collapsed={groupCollapsed ? "true" : "false"}
   data-active-tool-slot-id={localActiveSlotId}
   data-active-tool-slot-revision={activeSlotRevision}
   data-testid={`dock-group-${layout.id}`}
@@ -100,6 +134,8 @@
   <div class="tool-tabbar">
     {#each layout.slots as slot (slot.id)}
       {@const tool = slotTool(slot)}
+      {@const fullTitle = slotTitle(slot)}
+      {@const displayTitle = groupCollapsed ? compactSlotTitle(slot, tool) : fullTitle}
       <div
         class="tool-tab"
         class:active={isActive(slot)}
@@ -117,17 +153,17 @@
         role="tab"
         tabindex="0"
         aria-selected={isActive(slot)}
-        title={slotTitle(slot)}
-        onclick={() => workspace ? activate(slot.id) : undefined}
+        title={fullTitle}
+        onclick={() => workspace ? selectSlot(slot.id) : undefined}
         onkeydown={(event) => {
           if (event.key !== "Enter" && event.key !== " ") return;
           event.preventDefault();
-          if (workspace) activate(slot.id);
+          if (workspace) selectSlot(slot.id);
         }}
         oncontextmenu={(event) => workspace ? onContextMenu(event, layout, slot) : undefined}
         onpointerdown={(event) => workspace ? onPointerDown(event, slot) : undefined}
       >
-        <span class="tool-title">{slotTitle(slot)}</span>
+        <span class="tool-title">{displayTitle}</span>
         {#if slot.kind === "mirror"}
           <small>{ownerWorkspaceTitle(slot)}</small>
         {:else if slot.kind === "floating_placeholder"}
@@ -153,21 +189,23 @@
       </div>
     {/each}
   </div>
-  <div class="tool-surface">
-    {#each layout.slots as slot (slot.id)}
-      {#if shouldMountSlot(slot)}
-        <div
-          class="tool-pane"
-          class:active={isActive(slot)}
-          data-tool-pane-slot-id={slot.id}
-          hidden={!isActive(slot)}
-          aria-hidden={!isActive(slot)}
-        >
-          {@render children(slot, isActive(slot))}
-        </div>
-      {/if}
-    {/each}
-  </div>
+  {#if !groupCollapsed}
+    <div class="tool-surface">
+      {#each layout.slots as slot (slot.id)}
+        {#if shouldMountSlot(slot)}
+          <div
+            class="tool-pane"
+            class:active={isActive(slot)}
+            data-tool-pane-slot-id={slot.id}
+            hidden={!isActive(slot)}
+            aria-hidden={!isActive(slot)}
+          >
+            {@render children(slot, isActive(slot))}
+          </div>
+        {/if}
+      {/each}
+    </div>
+  {/if}
 </section>
 
 <style>
@@ -187,6 +225,10 @@
     grid-template-rows: minmax(0, 1fr) 31px;
   }
 
+  .workspace-dock-group.tabbar-bottom.collapsed {
+    grid-template-rows: minmax(0, 0fr) 31px;
+  }
+
   .workspace-dock-group.tabbar-left,
   .workspace-dock-group.tabbar-right {
     grid-template-rows: minmax(0, 1fr);
@@ -195,6 +237,35 @@
 
   .workspace-dock-group.tabbar-right {
     grid-template-columns: minmax(0, 1fr) 32px;
+  }
+
+  .workspace-dock-group.tabbar-left.collapsed {
+    grid-template-columns: 32px minmax(0, 0fr);
+  }
+
+  .workspace-dock-group.tabbar-right.collapsed {
+    grid-template-columns: minmax(0, 0fr) 32px;
+  }
+
+  .workspace-dock-group.tabbar-left .tool-tabbar,
+  .workspace-dock-group.tabbar-right .tool-tabbar {
+    min-height: 0;
+    flex-direction: column;
+    align-items: stretch;
+    overflow-x: hidden;
+    overflow-y: auto;
+    border-bottom: 0;
+    padding: 5px 0;
+  }
+
+  .workspace-dock-group.tabbar-left .tool-tabbar {
+    grid-column: 1;
+    border-right: 1px solid var(--app-border);
+  }
+
+  .workspace-dock-group.tabbar-right .tool-tabbar {
+    grid-column: 2;
+    border-left: 1px solid var(--app-border);
   }
 
   .workspace-dock-group.drop-target {
@@ -219,27 +290,6 @@
     border-bottom: 0;
     padding: 0 5px 3px;
     align-items: start;
-  }
-
-  .workspace-dock-group.tabbar-left .tool-tabbar,
-  .workspace-dock-group.tabbar-right .tool-tabbar {
-    min-height: 0;
-    flex-direction: column;
-    align-items: stretch;
-    overflow-x: hidden;
-    overflow-y: auto;
-    border-bottom: 0;
-    padding: 5px 0;
-  }
-
-  .workspace-dock-group.tabbar-left .tool-tabbar {
-    grid-column: 1;
-    border-right: 1px solid var(--app-border);
-  }
-
-  .workspace-dock-group.tabbar-right .tool-tabbar {
-    grid-column: 2;
-    border-left: 1px solid var(--app-border);
   }
 
   .tool-tab {
@@ -282,6 +332,24 @@
     padding: 8px 0;
     writing-mode: vertical-rl;
     text-orientation: mixed;
+  }
+
+  .workspace-dock-group.collapsed .tool-tabbar {
+    background: color-mix(in srgb, var(--app-control) 42%, var(--app-bg));
+  }
+
+  .workspace-dock-group.tabbar-bottom.collapsed .tool-tabbar {
+    align-items: stretch;
+  }
+
+  .workspace-dock-group.tabbar-left.collapsed .tool-tab,
+  .workspace-dock-group.tabbar-right.collapsed .tool-tab {
+    width: 31px;
+    height: max(92px, min(132px, 24vh));
+  }
+
+  .workspace-dock-group.tabbar-bottom.collapsed .tool-tab {
+    height: 30px;
   }
 
   .workspace-dock-group.tabbar-left .tool-tab {

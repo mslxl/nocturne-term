@@ -222,7 +222,13 @@ export function openResourceMonitorToolTab(
 
 export function activateSlot(layout: DockLayout, slotId: DisplaySlotId): DockLayout {
   if (!hasDisplaySlot(layout, slotId)) throw new Error(`display slot ${slotId} not found`);
-  return mapContainingGroup(layout, slotId, (group) => ({ ...group, activeSlotId: slotId }));
+  return mapContainingGroup(layout, slotId, (group) => ({ ...group, activeSlotId: slotId, collapsed: false }));
+}
+
+export function setDockGroupCollapsed(layout: DockLayout, groupId: DockGroupId, collapsed: boolean): DockLayout {
+  return mapGroup(layout, groupId, (group) =>
+    createDockGroup(group.id, group.role, group.slots, group.activeSlotId, collapsed),
+  );
 }
 
 function splitSlotRecursive(
@@ -266,7 +272,7 @@ function removeSlotRecursive(layout: DockLayout, slotId: DisplaySlotId): { layou
     }
     const activeSlotId = layout.activeSlotId === slotId ? remaining[0]?.id : layout.activeSlotId;
     if (!activeSlotId) throw new Error(`dock group ${layout.id} lost active slot after removal`);
-    return { layout: createDockGroup(layout.id, layout.role, remaining, activeSlotId), removed };
+    return { layout: createDockGroup(layout.id, layout.role, remaining, activeSlotId, layout.collapsed), removed };
   }
   let removed: ToolSlot | null = null;
   const children: DockLayout[] = [];
@@ -290,7 +296,7 @@ function replaceSlotRecursive(layout: DockLayout, slotId: DisplaySlotId, replace
     if (!layout.slots.some((slot) => slot.id === slotId)) return layout;
     const slots = layout.slots.map((slot) => (slot.id === slotId ? replacement : slot));
     const activeSlotId = layout.activeSlotId === slotId ? replacement.id : layout.activeSlotId;
-    return createDockGroup(layout.id, layout.role, slots, activeSlotId);
+    return createDockGroup(layout.id, layout.role, slots, activeSlotId, layout.collapsed);
   }
   return { ...layout, children: layout.children.map((child) => replaceSlotRecursive(child, slotId, replacement)) };
 }
@@ -317,7 +323,7 @@ function removeOrCloseToolSlots(
     }
     const activeSlotId = slots.some((slot) => slot.id === layout.activeSlotId) ? layout.activeSlotId : slots[0]?.id;
     if (!activeSlotId) throw new Error(`dock group ${layout.id} has no active slot`);
-    return createDockGroup(layout.id, layout.role, slots, activeSlotId);
+    return createDockGroup(layout.id, layout.role, slots, activeSlotId, layout.collapsed);
   }
   return {
     ...layout,

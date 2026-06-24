@@ -509,6 +509,8 @@ pub enum WorkspaceDockLayout {
         role: WorkspaceDockGroupRole,
         slots: Vec<WorkspaceToolSlot>,
         active_slot_id: String,
+        #[serde(default)]
+        collapsed: bool,
     },
 }
 
@@ -593,6 +595,11 @@ pub enum WorkspaceIntent {
     ActivateToolSlot {
         workspace_id: String,
         slot_id: String,
+    },
+    SetDockGroupCollapsed {
+        workspace_id: String,
+        group_id: String,
+        collapsed: bool,
     },
     CloseToolSlot {
         workspace_id: String,

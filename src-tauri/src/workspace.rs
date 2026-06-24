@@ -262,6 +262,7 @@ fn default_snapshot(app: &AppHandle) -> Result<WorkspaceLayoutSnapshot> {
                                     tool_tab_id: files_tool_id.clone(),
                                 }],
                                 active_slot_id: files_slot_id,
+                                collapsed: false,
                             },
                             WorkspaceDockLayout::Group {
                                 id: terminal_group_id,
@@ -271,6 +272,7 @@ fn default_snapshot(app: &AppHandle) -> Result<WorkspaceLayoutSnapshot> {
                                     tool_tab_id: terminal_tool_id.clone(),
                                 }],
                                 active_slot_id: terminal_slot_id,
+                                collapsed: false,
                             },
                             WorkspaceDockLayout::Group {
                                 id: right_group_id,
@@ -286,6 +288,7 @@ fn default_snapshot(app: &AppHandle) -> Result<WorkspaceLayoutSnapshot> {
                                     },
                                 ],
                                 active_slot_id: resources_slot_id,
+                                collapsed: false,
                             },
                         ],
                         ratios: vec![0.24, 0.52, 0.24],
@@ -298,6 +301,7 @@ fn default_snapshot(app: &AppHandle) -> Result<WorkspaceLayoutSnapshot> {
                             tool_tab_id: ports_tool_id.clone(),
                         }],
                         active_slot_id: ports_slot_id,
+                        collapsed: false,
                     },
                 ],
                 ratios: vec![0.7, 0.3],
@@ -380,6 +384,11 @@ fn apply_intent(
             workspace_id,
             slot_id,
         } => activate_tool_slot(snapshot, &workspace_id, &slot_id),
+        WorkspaceIntent::SetDockGroupCollapsed {
+            workspace_id,
+            group_id,
+            collapsed,
+        } => set_dock_group_collapsed(snapshot, &workspace_id, &group_id, collapsed),
         WorkspaceIntent::CloseToolSlot {
             workspace_id,
             slot_id,
@@ -606,6 +615,7 @@ fn default_new_workspace_layout(
                                 tool_tab_id: ids.files_tool_id.clone(),
                             }],
                             active_slot_id: ids.files_slot_id.clone(),
+                            collapsed: false,
                         },
                         WorkspaceDockLayout::Group {
                             id: terminal_group_id,
@@ -615,6 +625,7 @@ fn default_new_workspace_layout(
                                 tool_tab_id: ids.terminal_tool_id.clone(),
                             }],
                             active_slot_id: ids.terminal_slot_id.clone(),
+                            collapsed: false,
                         },
                         WorkspaceDockLayout::Group {
                             id: right_group_id,
@@ -630,6 +641,7 @@ fn default_new_workspace_layout(
                                 },
                             ],
                             active_slot_id: ids.resources_slot_id.clone(),
+                            collapsed: false,
                         },
                     ],
                     ratios: vec![0.24, 0.52, 0.24],
@@ -642,6 +654,7 @@ fn default_new_workspace_layout(
                         tool_tab_id: ids.ports_tool_id.clone(),
                     }],
                     active_slot_id: ids.ports_slot_id.clone(),
+                    collapsed: false,
                 },
             ],
             ratios: vec![0.7, 0.3],
@@ -739,6 +752,7 @@ fn remap_remembered_layout(
                         role: *role,
                         slots: Vec::new(),
                         active_slot_id: String::new(),
+                        collapsed: false,
                     }))
                 } else {
                     Ok(None)
@@ -752,6 +766,7 @@ fn remap_remembered_layout(
                 role: *role,
                 slots: remapped_slots,
                 active_slot_id: active,
+                collapsed: false,
             }))
         }
         WorkspaceDockLayout::Split {
@@ -839,6 +854,7 @@ fn add_slot_to_first_content_group(
             role,
             mut slots,
             active_slot_id,
+            ..
         } if role == WorkspaceDockGroupRole::Content => {
             let slot_id = workspace_slot_id(&slot).to_string();
             slots.push(slot);
@@ -852,6 +868,7 @@ fn add_slot_to_first_content_group(
                 } else {
                     active_slot_id
                 },
+                collapsed: false,
             })
         }
         WorkspaceDockLayout::Group { .. } => Ok(layout),
@@ -1092,6 +1109,17 @@ fn activate_tool_slot(
     Ok(())
 }
 
+fn set_dock_group_collapsed(
+    snapshot: &mut WorkspaceLayoutSnapshot,
+    workspace_id: &str,
+    group_id: &str,
+    collapsed: bool,
+) -> Result<()> {
+    let workspace = require_workspace_mut(snapshot, workspace_id)?;
+    workspace.layout = set_group_collapsed(workspace.layout.clone(), group_id, collapsed)?;
+    Ok(())
+}
+
 fn close_tool_slot(
     snapshot: &mut WorkspaceLayoutSnapshot,
     workspace_id: &str,
@@ -1250,6 +1278,7 @@ fn float_tool_slot(
                 role: WorkspaceDockGroupRole::Content,
                 active_slot_id: workspace_slot_id(&floating_slot).to_string(),
                 slots: vec![floating_slot],
+                collapsed: false,
             },
         });
     Ok(())
@@ -1313,8 +1342,10 @@ fn move_tool_slot_to_split(
             "target display slot {target_slot_id} not found"
         )));
     }
-    let inserted_role = find_group_role_containing_slot(&workspace.layout, slot_id)
-        .ok_or_else(|| missing_error(format!("display slot {slot_id} not found")))?;
+    let target_role = find_group_role_containing_slot(&workspace.layout, target_slot_id)
+        .ok_or_else(|| missing_error(format!("target display slot {target_slot_id} not found")))?;
+    let moved_kind = find_tool_kind_for_slot(snapshot, &workspace.layout, slot_id)?;
+    let inserted_role = inserted_group_role_for_split(target_role, moved_kind, side.clone());
     let (layout_without_slot, removed) = remove_slot_for_move(workspace.layout.clone(), slot_id)?;
     let removed =
         removed.ok_or_else(|| missing_error(format!("display slot {slot_id} not found")))?;
@@ -1333,6 +1364,31 @@ fn move_tool_slot_to_split(
     )?))?
     .ok_or_else(|| invalid_error("dock layout cleanup removed every group"))?;
     Ok(())
+}
+
+fn inserted_group_role_for_split(
+    target_role: WorkspaceDockGroupRole,
+    moved_kind: Option<WorkspaceToolKind>,
+    side: WorkspaceDockSide,
+) -> WorkspaceDockGroupRole {
+    if target_role == WorkspaceDockGroupRole::Content
+        && matches!(
+            moved_kind,
+            Some(
+                WorkspaceToolKind::Files
+                    | WorkspaceToolKind::Resources
+                    | WorkspaceToolKind::Transfers
+                    | WorkspaceToolKind::Ports
+            )
+        )
+        && matches!(
+            side,
+            WorkspaceDockSide::Left | WorkspaceDockSide::Right | WorkspaceDockSide::Down
+        )
+    {
+        return WorkspaceDockGroupRole::SidePanel;
+    }
+    target_role
 }
 
 fn move_tool_slot_to_workspace_edge(
@@ -1466,11 +1522,18 @@ fn split_workspace_edge(
     };
     let before = matches!(side, WorkspaceDockSide::Left | WorkspaceDockSide::Up);
     let inserted_id = workspace_slot_id(&inserted_slot).to_string();
+    let role = match side {
+        WorkspaceDockSide::Up => WorkspaceDockGroupRole::Content,
+        WorkspaceDockSide::Left | WorkspaceDockSide::Right | WorkspaceDockSide::Down => {
+            WorkspaceDockGroupRole::SidePanel
+        }
+    };
     let inserted = WorkspaceDockLayout::Group {
         id: new_id("group"),
-        role: WorkspaceDockGroupRole::SidePanel,
+        role,
         slots: vec![inserted_slot],
         active_slot_id: inserted_id,
+        collapsed: false,
     };
     Ok(WorkspaceDockLayout::Split {
         direction,
@@ -1500,6 +1563,7 @@ fn split_slot_recursive(
             role,
             slots,
             active_slot_id,
+            collapsed,
         } => {
             if !slots
                 .iter()
@@ -1510,6 +1574,7 @@ fn split_slot_recursive(
                     role,
                     slots,
                     active_slot_id,
+                    collapsed,
                 });
             }
             let direction = match side {
@@ -1522,6 +1587,7 @@ fn split_slot_recursive(
                 role,
                 slots,
                 active_slot_id,
+                collapsed,
             };
             let inserted_id = workspace_slot_id(&inserted_slot).to_string();
             let inserted = WorkspaceDockLayout::Group {
@@ -1529,6 +1595,7 @@ fn split_slot_recursive(
                 role: inserted_role,
                 slots: vec![inserted_slot],
                 active_slot_id: inserted_id,
+                collapsed: false,
             };
             Ok(WorkspaceDockLayout::Split {
                 direction,
@@ -1579,11 +1646,12 @@ fn activate_slot(layout: WorkspaceDockLayout, slot_id_value: &str) -> Result<Wor
             role,
             slots,
             active_slot_id,
+            collapsed,
         } => {
-            let active = if slots
+            let contains_requested_slot = slots
                 .iter()
-                .any(|slot| workspace_slot_id(slot) == slot_id_value)
-            {
+                .any(|slot| workspace_slot_id(slot) == slot_id_value);
+            let active = if contains_requested_slot {
                 slot_id_value.to_string()
             } else {
                 active_slot_id
@@ -1593,6 +1661,7 @@ fn activate_slot(layout: WorkspaceDockLayout, slot_id_value: &str) -> Result<Wor
                 role,
                 slots,
                 active_slot_id: active,
+                collapsed: if contains_requested_slot { false } else { collapsed },
             }
         }
         WorkspaceDockLayout::Split {
@@ -1628,6 +1697,7 @@ fn close_mirrors_for_tool_tabs(
             role,
             slots,
             active_slot_id,
+            collapsed,
         } => {
             let slots = slots
                 .into_iter()
@@ -1667,6 +1737,7 @@ fn close_mirrors_for_tool_tabs(
                 role,
                 slots,
                 active_slot_id: active,
+                collapsed,
             })
         }
         WorkspaceDockLayout::Split {
@@ -1831,6 +1902,7 @@ fn remove_slot_recursive(
             role,
             slots,
             active_slot_id,
+            collapsed,
         } => {
             let Some(removed_index) = slots
                 .iter()
@@ -1842,6 +1914,7 @@ fn remove_slot_recursive(
                         role,
                         slots,
                         active_slot_id,
+                        collapsed,
                     }),
                     None,
                 ));
@@ -1862,6 +1935,7 @@ fn remove_slot_recursive(
                             role,
                             slots: Vec::new(),
                             active_slot_id: String::new(),
+                            collapsed: false,
                         })
                     } else {
                         None
@@ -1888,6 +1962,7 @@ fn remove_slot_recursive(
                     role,
                     slots: remaining,
                     active_slot_id: active,
+                    collapsed,
                 }),
                 Some(removed),
             ))
@@ -1938,7 +2013,7 @@ fn add_slot_to_group(
     map_group(
         layout,
         group_id_value,
-        &|id, role, mut slots, _active_slot_id| {
+        &|id, role, mut slots, _active_slot_id, _collapsed| {
             let active_slot_id = workspace_slot_id(&inserted_slot).to_string();
             slots.push(inserted_slot.clone());
             WorkspaceDockLayout::Group {
@@ -1946,6 +2021,7 @@ fn add_slot_to_group(
                 role,
                 slots,
                 active_slot_id,
+                collapsed: false,
             }
         },
     )
@@ -1969,6 +2045,7 @@ fn add_slot_to_first_group(
                 role,
                 slots,
                 active_slot_id,
+                collapsed: false,
             })
         }
         WorkspaceDockLayout::Split {
@@ -1990,10 +2067,28 @@ fn add_slot_to_first_group(
     }
 }
 
+fn set_group_collapsed(
+    layout: WorkspaceDockLayout,
+    group_id_value: &str,
+    collapsed: bool,
+) -> Result<WorkspaceDockLayout> {
+    map_group(
+        layout,
+        group_id_value,
+        &|id, role, slots, active_slot_id, _collapsed| WorkspaceDockLayout::Group {
+            id,
+            role,
+            slots,
+            active_slot_id,
+            collapsed,
+        },
+    )
+}
+
 fn map_group(
     layout: WorkspaceDockLayout,
     group_id_value: &str,
-    map: &impl Fn(String, WorkspaceDockGroupRole, Vec<WorkspaceToolSlot>, String) -> WorkspaceDockLayout,
+    map: &impl Fn(String, WorkspaceDockGroupRole, Vec<WorkspaceToolSlot>, String, bool) -> WorkspaceDockLayout,
 ) -> Result<WorkspaceDockLayout> {
     match layout {
         WorkspaceDockLayout::Group {
@@ -2001,15 +2096,17 @@ fn map_group(
             role,
             slots,
             active_slot_id,
+            collapsed,
         } => {
             if id == group_id_value {
-                Ok(map(id, role, slots, active_slot_id))
+                Ok(map(id, role, slots, active_slot_id, collapsed))
             } else {
                 Ok(WorkspaceDockLayout::Group {
                     id,
                     role,
                     slots,
                     active_slot_id,
+                    collapsed,
                 })
             }
         }
@@ -2056,6 +2153,7 @@ fn remove_or_close_tool_slots(
             role,
             slots,
             active_slot_id,
+            collapsed,
         } => {
             let mut next_slots = Vec::new();
             for slot in slots {
@@ -2089,6 +2187,7 @@ fn remove_or_close_tool_slots(
                         role,
                         active_slot_id: String::new(),
                         slots: Vec::new(),
+                        collapsed: false,
                     });
                 }
                 let closed = closed_source(&format!("{id}-closed"));
@@ -2097,6 +2196,7 @@ fn remove_or_close_tool_slots(
                     role,
                     active_slot_id: workspace_slot_id(&closed).to_string(),
                     slots: vec![closed],
+                    collapsed,
                 });
             }
             let active = if next_slots
@@ -2117,6 +2217,7 @@ fn remove_or_close_tool_slots(
                 role,
                 slots: next_slots,
                 active_slot_id: active,
+                collapsed,
             })
         }
         WorkspaceDockLayout::Split {
@@ -2186,6 +2287,28 @@ fn find_group_role_containing_slot(
             .iter()
             .find_map(|child| find_group_role_containing_slot(child, needle)),
     }
+}
+
+fn find_tool_kind_for_slot(
+    snapshot: &WorkspaceLayoutSnapshot,
+    layout: &WorkspaceDockLayout,
+    needle: &str,
+) -> Result<Option<WorkspaceToolKind>> {
+    let Some(slot) = find_slot(layout, needle) else {
+        return Ok(None);
+    };
+    let tool_tab_id = match slot {
+        WorkspaceToolSlot::Owned { tool_tab_id, .. }
+        | WorkspaceToolSlot::Mirror { tool_tab_id, .. }
+        | WorkspaceToolSlot::FloatingPlaceholder { tool_tab_id, .. } => tool_tab_id,
+        WorkspaceToolSlot::ClosedSource { .. } => return Ok(None),
+    };
+    let tool_tab = snapshot
+        .tool_tabs
+        .iter()
+        .find(|tool_tab| tool_tab.id == *tool_tab_id)
+        .ok_or_else(|| missing_error(format!("tool tab {tool_tab_id} not found")))?;
+    Ok(Some(tool_tab.kind.clone()))
 }
 
 fn find_owned_slot_for_tool_tab(layout: &WorkspaceDockLayout, tool_tab_id: &str) -> Option<String> {
@@ -2312,6 +2435,7 @@ fn remove_empty_content_groups(layout: WorkspaceDockLayout) -> Result<Option<Wor
             role,
             slots,
             active_slot_id,
+            collapsed,
         } => {
             if role == WorkspaceDockGroupRole::Content && slots.is_empty() {
                 Ok(None)
@@ -2321,6 +2445,11 @@ fn remove_empty_content_groups(layout: WorkspaceDockLayout) -> Result<Option<Wor
                     role,
                     slots,
                     active_slot_id,
+                    collapsed: if role == WorkspaceDockGroupRole::Content {
+                        false
+                    } else {
+                        collapsed
+                    },
                 }))
             }
         }
@@ -2369,9 +2498,17 @@ fn normalize_snapshot_group_roles(snapshot: &mut WorkspaceLayoutSnapshot) {
 
 fn normalize_workspace_group_roles(layout: &mut WorkspaceDockLayout) {
     match layout {
-        WorkspaceDockLayout::Group { role, slots, .. } => {
+        WorkspaceDockLayout::Group {
+            role,
+            slots,
+            collapsed,
+            ..
+        } => {
             if slots.is_empty() {
                 *role = WorkspaceDockGroupRole::Content;
+            }
+            if *role == WorkspaceDockGroupRole::Content {
+                *collapsed = false;
             }
         }
         WorkspaceDockLayout::Split { children, .. } => {
@@ -2384,7 +2521,14 @@ fn normalize_workspace_group_roles(layout: &mut WorkspaceDockLayout) {
 
 fn set_all_group_roles(layout: &mut WorkspaceDockLayout, next_role: WorkspaceDockGroupRole) {
     match layout {
-        WorkspaceDockLayout::Group { role, .. } => *role = next_role,
+        WorkspaceDockLayout::Group {
+            role, collapsed, ..
+        } => {
+            *role = next_role;
+            if next_role == WorkspaceDockGroupRole::Content {
+                *collapsed = false;
+            }
+        }
         WorkspaceDockLayout::Split { children, .. } => {
             for child in children {
                 set_all_group_roles(child, next_role);
@@ -2469,7 +2613,13 @@ fn validate_layout(layout: &WorkspaceDockLayout, snapshot: &WorkspaceLayoutSnaps
             role,
             slots,
             active_slot_id,
+            collapsed,
         } => {
+            if *role == WorkspaceDockGroupRole::Content && *collapsed {
+                return Err(invalid_error(format!(
+                    "content dock group {id} cannot be collapsed"
+                )));
+            }
             if slots.is_empty() {
                 if *role != WorkspaceDockGroupRole::Content {
                     return Err(invalid_error(format!("dock group {id} has no slots")));
@@ -2629,6 +2779,7 @@ fn intent_name(intent: &WorkspaceIntent) -> &'static str {
         WorkspaceIntent::CloseOtherWorkspaces { .. } => "close_other_workspaces",
         WorkspaceIntent::CloseWorkspacesToRight { .. } => "close_workspaces_to_right",
         WorkspaceIntent::ActivateToolSlot { .. } => "activate_tool_slot",
+        WorkspaceIntent::SetDockGroupCollapsed { .. } => "set_dock_group_collapsed",
         WorkspaceIntent::CloseToolSlot { .. } => "close_tool_slot",
         WorkspaceIntent::CloseOtherToolSlots { .. } => "close_other_tool_slots",
         WorkspaceIntent::CloseToolSlotsToRight { .. } => "close_tool_slots_to_right",
@@ -2773,6 +2924,7 @@ mod tests {
             id: "group-a".to_string(),
             role: WorkspaceDockGroupRole::Content,
             active_slot_id: "slot-files-a".to_string(),
+            collapsed: false,
             slots: vec![
                 WorkspaceToolSlot::Owned {
                     id: "slot-files-a".to_string(),
@@ -2860,9 +3012,97 @@ mod tests {
         assert_eq!(
             collect_group_roles(&workspace.layout),
             vec![
-                WorkspaceDockGroupRole::Content,
-                WorkspaceDockGroupRole::SidePanel
+                WorkspaceDockGroupRole::SidePanel,
+                WorkspaceDockGroupRole::SidePanel,
+                WorkspaceDockGroupRole::Content
             ]
+        );
+        let empty_content_group =
+            find_group(&workspace.layout, "group-terminal-a").expect("empty content group");
+        let WorkspaceDockLayout::Group { role, slots, .. } = empty_content_group else {
+            panic!("expected preserved content group");
+        };
+        assert_eq!(*role, WorkspaceDockGroupRole::Content);
+        assert!(slots.is_empty());
+    }
+
+    #[test]
+    fn moving_auxiliary_tool_slot_from_content_to_terminal_left_split_creates_local_side_panel() {
+        let mut snapshot = test_snapshot();
+        let workspace = require_workspace_mut(&mut snapshot, "workspace-a").unwrap();
+        workspace.layout = WorkspaceDockLayout::Group {
+            id: "group-content-a".to_string(),
+            role: WorkspaceDockGroupRole::Content,
+            active_slot_id: "slot-terminal-a".to_string(),
+            collapsed: false,
+            slots: vec![
+                WorkspaceToolSlot::Owned {
+                    id: "slot-files-a".to_string(),
+                    tool_tab_id: "files-a".to_string(),
+                },
+                WorkspaceToolSlot::Owned {
+                    id: "slot-terminal-a".to_string(),
+                    tool_tab_id: "terminal-a".to_string(),
+                },
+            ],
+        };
+
+        move_tool_slot_to_split(
+            &mut snapshot,
+            "workspace-a",
+            "slot-files-a",
+            "slot-terminal-a",
+            WorkspaceDockSide::Left,
+        )
+        .unwrap();
+
+        let workspace = require_workspace(&snapshot, "workspace-a").unwrap();
+        let group = find_group_containing_slot(&workspace.layout, "slot-files-a")
+            .expect("moved files slot group");
+        assert_eq!(
+            find_group_role_containing_slot(&workspace.layout, "slot-files-a"),
+            Some(WorkspaceDockGroupRole::SidePanel)
+        );
+        assert_eq!(
+            find_group_role_containing_slot(&workspace.layout, "slot-terminal-a"),
+            Some(WorkspaceDockGroupRole::Content)
+        );
+        assert_eq!(group.iter().map(workspace_slot_id).collect::<Vec<_>>(), vec!["slot-files-a"]);
+        let WorkspaceDockLayout::Split {
+            direction,
+            children,
+            ..
+        } = &workspace.layout
+        else {
+            panic!("expected a local split around the Terminal group");
+        };
+        assert!(matches!(direction, WorkspaceDockDirection::Row));
+        assert!(contains_slot(&children[0], "slot-files-a"));
+        assert!(contains_slot(&children[1], "slot-terminal-a"));
+    }
+
+    #[test]
+    fn moving_auxiliary_tool_slot_from_side_panel_to_terminal_left_split_creates_local_side_panel()
+    {
+        let mut snapshot = test_split_snapshot();
+
+        move_tool_slot_to_split(
+            &mut snapshot,
+            "workspace-a",
+            "slot-files-a",
+            "slot-terminal-a",
+            WorkspaceDockSide::Left,
+        )
+        .unwrap();
+
+        let workspace = require_workspace(&snapshot, "workspace-a").unwrap();
+        assert_eq!(
+            find_group_role_containing_slot(&workspace.layout, "slot-files-a"),
+            Some(WorkspaceDockGroupRole::SidePanel)
+        );
+        assert_eq!(
+            find_group_role_containing_slot(&workspace.layout, "slot-terminal-a"),
+            Some(WorkspaceDockGroupRole::Content)
         );
     }
 
@@ -2887,6 +3127,7 @@ mod tests {
                     id: "group-ports-a".to_string(),
                     role: WorkspaceDockGroupRole::SidePanel,
                     active_slot_id: "slot-ports-a".to_string(),
+                    collapsed: false,
                     slots: vec![WorkspaceToolSlot::Owned {
                         id: "slot-ports-a".to_string(),
                         tool_tab_id: "ports-a".to_string(),
@@ -2910,14 +3151,30 @@ mod tests {
 
     #[test]
     fn moving_tool_slot_to_workspace_edge_keeps_inserted_group_on_requested_edge() {
-        for (side, before, direction) in [
-            (WorkspaceDockSide::Left, true, WorkspaceDockDirection::Row),
-            (WorkspaceDockSide::Right, false, WorkspaceDockDirection::Row),
-            (WorkspaceDockSide::Up, true, WorkspaceDockDirection::Column),
+        for (side, before, direction, expected_role) in [
+            (
+                WorkspaceDockSide::Left,
+                true,
+                WorkspaceDockDirection::Row,
+                WorkspaceDockGroupRole::SidePanel,
+            ),
+            (
+                WorkspaceDockSide::Right,
+                false,
+                WorkspaceDockDirection::Row,
+                WorkspaceDockGroupRole::SidePanel,
+            ),
+            (
+                WorkspaceDockSide::Up,
+                true,
+                WorkspaceDockDirection::Column,
+                WorkspaceDockGroupRole::Content,
+            ),
             (
                 WorkspaceDockSide::Down,
                 false,
                 WorkspaceDockDirection::Column,
+                WorkspaceDockGroupRole::SidePanel,
             ),
         ] {
             let mut snapshot = test_split_snapshot();
@@ -2950,7 +3207,7 @@ mod tests {
             let WorkspaceDockLayout::Group { role, slots, .. } = inserted_child else {
                 panic!("expected inserted edge group");
             };
-            assert_eq!(*role, WorkspaceDockGroupRole::SidePanel);
+            assert_eq!(*role, expected_role);
             assert_eq!(
                 slots.iter().map(workspace_slot_id).collect::<Vec<_>>(),
                 vec!["slot-files-a"]
@@ -2975,6 +3232,7 @@ mod tests {
             role,
             slots,
             active_slot_id,
+            ..
         } = &workspace.layout
         else {
             panic!("expected remaining content group to replace the split");
@@ -3154,6 +3412,7 @@ mod tests {
                 id: "group-production-2".to_string(),
                 role: WorkspaceDockGroupRole::Content,
                 active_slot_id: "slot-production-2".to_string(),
+                collapsed: false,
                 slots: vec![WorkspaceToolSlot::ClosedSource {
                     id: "slot-production-2".to_string(),
                     previous_title: "Closed".to_string(),
@@ -3258,6 +3517,7 @@ mod tests {
             id: "group-a".to_string(),
             role: WorkspaceDockGroupRole::SidePanel,
             active_slot_id: "slot-files-a".to_string(),
+            collapsed: false,
             slots: vec![WorkspaceToolSlot::Owned {
                 id: "slot-files-a".to_string(),
                 tool_tab_id: "files-a".to_string(),
@@ -3278,6 +3538,7 @@ mod tests {
                     id: "group-floating-a".to_string(),
                     role: WorkspaceDockGroupRole::SidePanel,
                     active_slot_id: "slot-floating-a".to_string(),
+                    collapsed: false,
                     slots: vec![WorkspaceToolSlot::Mirror {
                         id: "slot-floating-a".to_string(),
                         tool_tab_id: "files-a".to_string(),
@@ -3311,6 +3572,7 @@ mod tests {
                         id: "group-a".to_string(),
                         role: WorkspaceDockGroupRole::Content,
                         active_slot_id: "slot-files-a".to_string(),
+                        collapsed: false,
                         slots: vec![WorkspaceToolSlot::Owned {
                             id: "slot-files-a".to_string(),
                             tool_tab_id: "files-a".to_string(),
@@ -3326,6 +3588,7 @@ mod tests {
                         id: "group-b".to_string(),
                         role: WorkspaceDockGroupRole::Content,
                         active_slot_id: "slot-files-b".to_string(),
+                        collapsed: false,
                         slots: vec![WorkspaceToolSlot::Owned {
                             id: "slot-files-b".to_string(),
                             tool_tab_id: "files-b".to_string(),
@@ -3371,6 +3634,7 @@ mod tests {
                     id: "group-files-a".to_string(),
                     role: WorkspaceDockGroupRole::SidePanel,
                     active_slot_id: "slot-files-a".to_string(),
+                    collapsed: false,
                     slots: vec![WorkspaceToolSlot::Owned {
                         id: "slot-files-a".to_string(),
                         tool_tab_id: "files-a".to_string(),
@@ -3380,6 +3644,7 @@ mod tests {
                     id: "group-terminal-a".to_string(),
                     role: WorkspaceDockGroupRole::Content,
                     active_slot_id: "slot-terminal-a".to_string(),
+                    collapsed: false,
                     slots: vec![WorkspaceToolSlot::Owned {
                         id: "slot-terminal-a".to_string(),
                         tool_tab_id: "terminal-a".to_string(),
@@ -3426,6 +3691,7 @@ mod tests {
                     id: "group-left".to_string(),
                     role: WorkspaceDockGroupRole::Content,
                     active_slot_id: "slot-terminal-left".to_string(),
+                    collapsed: false,
                     slots: vec![WorkspaceToolSlot::Owned {
                         id: "slot-terminal-left".to_string(),
                         tool_tab_id: "terminal-left".to_string(),
@@ -3435,6 +3701,7 @@ mod tests {
                     id: "group-right".to_string(),
                     role: WorkspaceDockGroupRole::Content,
                     active_slot_id: "slot-terminal-right".to_string(),
+                    collapsed: false,
                     slots: vec![WorkspaceToolSlot::Owned {
                         id: "slot-terminal-right".to_string(),
                         tool_tab_id: "terminal-right".to_string(),
@@ -3454,6 +3721,7 @@ mod tests {
             id: id.to_string(),
             role: WorkspaceDockGroupRole::Content,
             active_slot_id: slot_id.to_string(),
+            collapsed: false,
             slots: vec![WorkspaceToolSlot::Owned {
                 id: slot_id.to_string(),
                 tool_tab_id: tool_tab_id.to_string(),

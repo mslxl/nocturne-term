@@ -78,6 +78,7 @@ export function defaultWorkspaceLayoutSnapshot(input: DefaultWorkspaceLayoutInpu
                   id: ids.filesGroupId,
                   role: "side_panel",
                   activeSlotId: ids.filesSlotId,
+                  collapsed: false,
                   slots: [{ kind: "owned", id: ids.filesSlotId, toolTabId: ids.filesToolId }],
                 },
                 {
@@ -85,6 +86,7 @@ export function defaultWorkspaceLayoutSnapshot(input: DefaultWorkspaceLayoutInpu
                   id: ids.terminalGroupId,
                   role: "content",
                   activeSlotId: ids.terminalSlotId,
+                  collapsed: false,
                   slots: [{ kind: "owned", id: ids.terminalSlotId, toolTabId: ids.terminalToolId }],
                 },
                 {
@@ -92,6 +94,7 @@ export function defaultWorkspaceLayoutSnapshot(input: DefaultWorkspaceLayoutInpu
                   id: ids.rightGroupId,
                   role: "side_panel",
                   activeSlotId: ids.resourcesSlotId,
+                  collapsed: false,
                   slots: [
                     { kind: "owned", id: ids.resourcesSlotId, toolTabId: ids.resourcesToolId },
                     { kind: "owned", id: ids.transfersSlotId, toolTabId: ids.transfersToolId },
@@ -104,6 +107,7 @@ export function defaultWorkspaceLayoutSnapshot(input: DefaultWorkspaceLayoutInpu
               id: ids.portsGroupId,
               role: "side_panel",
               activeSlotId: ids.portsSlotId,
+              collapsed: false,
               slots: [{ kind: "owned", id: ids.portsSlotId, toolTabId: ids.portsToolId }],
             },
           ],

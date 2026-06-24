@@ -58,7 +58,7 @@ The dock layout is a tree:
 ```ts
 type DockLayout =
   | { kind: "split"; direction: "row" | "column"; children: DockLayout[]; ratios: number[] }
-  | { kind: "group"; id: string; role: "content" | "side_panel"; slots: ToolSlot[]; activeSlotId: string };
+  | { kind: "group"; id: string; role: "content" | "side_panel"; slots: ToolSlot[]; activeSlotId: string; collapsed: boolean };
 
 type ToolSlot =
   | { kind: "owned"; id: string; toolTabId: string }
@@ -69,12 +69,18 @@ type ToolSlot =
 
 Ratios are positive finite values normalized per split node. Persist ratios, not pixels. Every group and split child must have a minimum size.
 
+`collapsed` is dock group display/layout state. It belongs to one rendered group
+inside one Workspace or floating layout; it is not ToolTab business state and is
+not shared with mirrors of the same ToolTab in other Workspaces. Collapsing an
+owner group must not collapse a mirror group, and collapsing a mirror group must
+not affect the owner group.
+
 Every dock group has an explicit role. The role is spatial layout state, not a value inferred from the ToolTabs inside the group:
 
 - `content`: primary editor/terminal/content area. A content group may be empty and show an empty content surface.
 - `side_panel`: auxiliary dock area on the left, right, or bottom edge. Files, Resources, Transfers, Ports, and future auxiliary tools may live here.
 
-Do not infer group role from a terminal, files, transfers, mirror, or closed-source slot. Role follows the group's current dock position: groups whose ToolTab bar is on top are `content`, while groups whose ToolTab bar is on the left, right, or bottom edge are `side_panel`. Bottom placement wins over left/right when a group touches multiple edges. Rust must create and return layouts with explicit roles, and frontend/tests should fail on role-less layouts instead of migrating them. Rust accepts old `sidebar` and `panel` snapshot values as `side_panel` for migration only.
+Do not infer group role from a terminal, files, transfers, mirror, closed-source slot, or current window edge. The explicit group role is authoritative. `content` groups always render a top ToolTab bar even when a split places them against the left, right, or bottom workspace edge. `side_panel` groups choose their ToolTab bar placement from the edge they touch; bottom placement wins over left/right when a side-panel group touches multiple edges. Rust must create and return layouts with explicit roles, and frontend/tests should fail on role-less layouts instead of migrating them. Rust accepts old `sidebar` and `panel` snapshot values as `side_panel` for migration only.
 
 ## Split Resizing
 
@@ -88,7 +94,7 @@ Supported drop targets:
 
 - group tab bar: add to that group
 - group center: add to or activate within that group
-- group left/right/top/bottom: split around the target group and inherit the target group's role
+- group left/right/top/bottom: split around the target group. By default the inserted group inherits the target group's role. When an auxiliary ToolTab such as Files, Resources, Transfers, or Ports is dropped on the left, right, or bottom edge of a `content` group, the inserted group becomes a local `side_panel` adjacent to that target group. This restores the native auxiliary-tool placement without docking to the whole Workspace edge. Dropping above a content group stays `content`.
 - workspace edge left/right/top/bottom: create an edge dock area with `side_panel` role when the resulting ToolTab bar is left, right, or bottom; top-edge groups become `content`
 - another workspace: create a mirror slot
 - floating window: add to that floating window's dock layout
@@ -97,6 +103,15 @@ Supported drop targets:
 Dragging a mirror moves the mirror display slot only. Dragging an owned tool tab to a floating window or outside a window creates a floating mirror and leaves the source slot in place.
 
 Dragging an owned tool tab to another workspace is not a move. It creates a mirror slot. Tool tabs cannot change owner workspace.
+
+Hit testing must keep both workspace-edge drops and group-edge splits reachable. When a dock group already touches the window edge, the outermost narrow band is reserved for workspace-edge docking, but the group's own left/right/top/bottom split zones inside that band must remain reachable. Do not let a broad workspace-edge hit test run before group hit testing, because it makes the corresponding group-edge split direction impossible to trigger after a role-preserving drag.
+
+Dragging an auxiliary ToolTab onto a content group's left, right, or bottom
+group-edge split zone must create a local side-panel beside that content group.
+For example, dragging Files into the Terminal group and then dropping Files on
+Terminal's left edge restores Files as a local left side-panel in the same upper
+split, not as a full-height global Workspace-left dock and not as a `content`
+group with a top ToolTab bar.
 
 ## Floating Windows
 
@@ -127,8 +142,21 @@ Tool tab bar:
 - shows tool kind icons and titles
 - shows mirror badges and mirror border styling
 - does not use subtitles
-- sits on the bottom edge for bottom groups, on the left or right edge for side groups, and at the top for content groups
+- sits at the top for content groups; for side-panel groups, it sits on the bottom edge for bottom groups and on the left or right edge for side groups
 - uses vertical title text when placed on the left or right edge
+- clicking the active ToolTab in a left, right, or bottom group toggles that
+  group's collapsed display state
+- collapsed groups keep only their ToolTab bar visible and do not show a
+  placeholder surface
+- collapsed side and bottom groups do not expose the adjacent split resize
+  handle, because the collapsed rail has a fixed size and is not resizable
+- collapsed side and bottom groups remain valid group drop targets. Dragging a
+  ToolTab onto the collapsed rail previews the rail as the target group, drops
+  the ToolTab into that group, activates it, and expands the group.
+- clicking a different ToolTab in a collapsed group activates that ToolTab and
+  expands the group
+- top ToolTab bars are not collapsible; content groups must always show their
+  content surface
 
 Do not use `cursor: pointer` on rows or tabs. Use native-feeling hover and pressed states appropriate to the control kind.
 

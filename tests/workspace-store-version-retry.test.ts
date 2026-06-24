@@ -96,6 +96,7 @@ function snapshot(version: number): WorkspaceLayoutSnapshot {
           id: "group-content-a",
           role: "content",
           active_slot_id: "slot-files-a",
+          collapsed: false,
           slots: [
             {
               kind: "owned",

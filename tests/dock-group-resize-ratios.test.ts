@@ -68,6 +68,7 @@ function group(id: string): WorkspaceDockLayout {
     role: "content",
     slots: [{ kind: "closed_source", id: `${id}-slot`, previous_title: id, owner_workspace_title: "closed" }],
     active_slot_id: `${id}-slot`,
+    collapsed: false,
   };
 }
 

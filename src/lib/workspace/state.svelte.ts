@@ -158,6 +158,7 @@ function applyDemoWorkspaceIntent(
             id: `group-files-demo-${next.version + 1}`,
             role: "side_panel",
             active_slot_id: filesSlotId,
+            collapsed: false,
             slots: [{ kind: "owned", id: filesSlotId, tool_tab_id: filesToolId }],
           },
           {
@@ -165,6 +166,7 @@ function applyDemoWorkspaceIntent(
             id: `group-terminal-demo-${next.version + 1}`,
             role: "content",
             active_slot_id: terminalSlotId,
+            collapsed: false,
             slots: [{ kind: "owned", id: terminalSlotId, tool_tab_id: terminalToolId }],
           },
           {
@@ -172,6 +174,7 @@ function applyDemoWorkspaceIntent(
             id: `group-resources-transfers-demo-${next.version + 1}`,
             role: "side_panel",
             active_slot_id: resourcesSlotId,
+            collapsed: false,
             slots: [
               { kind: "owned", id: resourcesSlotId, tool_tab_id: resourcesToolId },
               { kind: "owned", id: transfersSlotId, tool_tab_id: transfersToolId },
@@ -216,6 +219,11 @@ function applyDemoWorkspaceIntent(
   if (intent.kind === "activate_tool_slot") {
     const workspace = requireDemoWorkspace(next, intent.workspace_id);
     workspace.layout = activateDemoSlot(workspace.layout, intent.slot_id);
+    return bumpDemoVersion(next);
+  }
+  if (intent.kind === "set_dock_group_collapsed") {
+    const workspace = requireDemoWorkspace(next, intent.workspace_id);
+    workspace.layout = setDemoGroupCollapsed(workspace.layout, intent.group_id, intent.collapsed);
     return bumpDemoVersion(next);
   }
   if (intent.kind === "move_tool_slot_to_group") {
@@ -274,6 +282,7 @@ function applyDemoWorkspaceIntent(
         id: `group-${floatingWindowId}`,
         role: "content",
         active_slot_id: `slot-${floatingWindowId}`,
+        collapsed: false,
         slots: [
           {
             kind: "mirror",
@@ -388,6 +397,7 @@ function toBindingLayout(layout: import("$lib/workspace/dock/model").DockLayout)
       id: layout.id,
       role: layout.role,
       active_slot_id: layout.activeSlotId,
+      collapsed: layout.collapsed,
       slots: layout.slots.map((slot) => {
         if (slot.kind === "owned") return { kind: "owned", id: slot.id, tool_tab_id: slot.toolTabId };
         if (slot.kind === "mirror") return { kind: "mirror", id: slot.id, tool_tab_id: slot.toolTabId, owner_workspace_id: slot.ownerWorkspaceId };
@@ -405,66 +415,28 @@ function toBindingLayout(layout: import("$lib/workspace/dock/model").DockLayout)
 }
 
 function bumpDemoVersion(snapshot: WorkspaceLayoutSnapshot): WorkspaceLayoutSnapshot {
-  normalizeDemoSnapshotGroupRoles(snapshot);
+  assertDemoSnapshotGroupRoles(snapshot);
   snapshot.version += 1;
   return snapshot;
 }
 
-type DemoRoleBounds = {
-  left: boolean;
-  right: boolean;
-  top: boolean;
-  bottom: boolean;
-};
-
-function normalizeDemoSnapshotGroupRoles(snapshot: WorkspaceLayoutSnapshot) {
+function assertDemoSnapshotGroupRoles(snapshot: WorkspaceLayoutSnapshot) {
   for (const workspace of snapshot.workspaces) {
-    normalizeDemoLayoutGroupRoles(workspace.layout, { left: true, right: true, top: true, bottom: true });
+    assertDemoLayoutGroupRoles(workspace.layout);
   }
   for (const window of snapshot.floating_windows) {
-    setAllDemoGroupRoles(window.layout, "content");
+    assertDemoLayoutGroupRoles(window.layout);
   }
 }
 
-function normalizeDemoLayoutGroupRoles(layout: DemoLayout, bounds: DemoRoleBounds) {
+function assertDemoLayoutGroupRoles(layout: DemoLayout) {
   if (layout.kind === "group") {
-    layout.role = layout.slots.length === 0 ? "content" : demoRoleForBounds(bounds);
+    if (layout.role !== "content" && layout.role !== "side_panel") {
+      throw new Error(`dock group ${layout.id} is missing an explicit role`);
+    }
     return;
   }
-  const last = layout.children.length - 1;
-  layout.children.forEach((child, index) => {
-    normalizeDemoLayoutGroupRoles(
-      child,
-      layout.direction === "row"
-        ? {
-            left: bounds.left && index === 0,
-            right: bounds.right && index === last,
-            top: bounds.top,
-            bottom: bounds.bottom,
-          }
-        : {
-            left: bounds.left,
-            right: bounds.right,
-            top: bounds.top && index === 0,
-            bottom: bounds.bottom && index === last,
-          },
-    );
-  });
-}
-
-function demoRoleForBounds(bounds: DemoRoleBounds) {
-  if (bounds.bottom && !bounds.top) return "side_panel";
-  if (bounds.left && !bounds.right) return "side_panel";
-  if (bounds.right && !bounds.left) return "side_panel";
-  return "content";
-}
-
-function setAllDemoGroupRoles(layout: DemoLayout, role: "content" | "side_panel") {
-  if (layout.kind === "group") {
-    layout.role = role;
-    return;
-  }
-  for (const child of layout.children) setAllDemoGroupRoles(child, role);
+  for (const child of layout.children) assertDemoLayoutGroupRoles(child);
 }
 
 function cloneDemoSnapshot(snapshot: WorkspaceLayoutSnapshot): WorkspaceLayoutSnapshot {
@@ -504,9 +476,18 @@ function findDemoSlot(layout: DemoLayout, slotId: string): DemoSlot | null {
 
 function activateDemoSlot(layout: DemoLayout, slotId: string): DemoLayout {
   if (layout.kind === "group") {
-    return layout.slots.some((slot) => slot.id === slotId) ? { ...layout, active_slot_id: slotId } : layout;
+    return layout.slots.some((slot) => slot.id === slotId)
+      ? { ...layout, active_slot_id: slotId, collapsed: false }
+      : layout;
   }
   return { ...layout, children: layout.children.map((child) => activateDemoSlot(child, slotId)) };
+}
+
+function setDemoGroupCollapsed(layout: DemoLayout, groupId: string, collapsed: boolean): DemoLayout {
+  if (layout.kind === "group") {
+    return layout.id === groupId ? { ...layout, collapsed } : layout;
+  }
+  return { ...layout, children: layout.children.map((child) => setDemoGroupCollapsed(child, groupId, collapsed)) };
 }
 
 function removeDemoSlot(layout: DemoLayout, slotId: string): { layout: DemoLayout | null; slot: DemoSlot } {
@@ -550,14 +531,14 @@ function removeDemoSlotRecursive(layout: DemoLayout, slotId: string): { layout: 
 function addDemoSlotToGroup(layout: DemoLayout, groupId: string, slot: DemoSlot): DemoLayout {
   if (layout.kind === "group") {
     if (layout.id !== groupId) return layout;
-    return { ...layout, slots: [...layout.slots, slot], active_slot_id: slot.id };
+    return { ...layout, slots: [...layout.slots, slot], active_slot_id: slot.id, collapsed: false };
   }
   return { ...layout, children: layout.children.map((child) => addDemoSlotToGroup(child, groupId, slot)) };
 }
 
 function addDemoSlotToFirstGroup(layout: DemoLayout, slot: DemoSlot): DemoLayout {
   if (layout.kind === "group") {
-    return { ...layout, slots: [...layout.slots, slot], active_slot_id: slot.id };
+    return { ...layout, slots: [...layout.slots, slot], active_slot_id: slot.id, collapsed: false };
   }
   const children = [...layout.children];
   const first = children[0];
@@ -604,7 +585,7 @@ function findDemoOwnedSlotForToolTab(layout: DemoLayout, toolTabId: string): Dem
 function splitDemoSlot(layout: DemoLayout, targetSlotId: string, slot: DemoSlot, side: "left" | "right" | "up" | "down"): DemoLayout {
   if (layout.kind === "group") {
     if (!layout.slots.some((item) => item.id === targetSlotId)) return layout;
-    const inserted: DemoLayout = { kind: "group", id: `group-${slot.id}`, role: layout.role, slots: [slot], active_slot_id: slot.id };
+    const inserted: DemoLayout = { kind: "group", id: `group-${slot.id}`, role: layout.role, slots: [slot], active_slot_id: slot.id, collapsed: false };
     const direction = side === "left" || side === "right" ? "row" : "column";
     const before = side === "left" || side === "up";
     return { kind: "split", direction, ratios: [0.5, 0.5], children: before ? [inserted, layout] : [layout, inserted] };
@@ -613,7 +594,8 @@ function splitDemoSlot(layout: DemoLayout, targetSlotId: string, slot: DemoSlot,
 }
 
 function splitDemoWorkspaceEdge(layout: DemoLayout, slot: DemoSlot, side: "left" | "right" | "up" | "down"): DemoLayout {
-  const inserted: DemoLayout = { kind: "group", id: `group-${slot.id}`, role: "side_panel", slots: [slot], active_slot_id: slot.id };
+  const role = side === "up" ? "content" : "side_panel";
+  const inserted: DemoLayout = { kind: "group", id: `group-${slot.id}`, role, slots: [slot], active_slot_id: slot.id, collapsed: false };
   const direction = side === "left" || side === "right" ? "row" : "column";
   const before = side === "left" || side === "up";
   return {

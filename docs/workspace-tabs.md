@@ -65,7 +65,7 @@ Mirror rules:
 
 Shared business state includes Files current path, selection, sorting, provider state, search task, transfer actions, and Terminal backend session state.
 
-View-local state includes scroll position, focused control, hover state, Tree view expansion, Columns view column widths, preview panel width, find UI, selection UI, and local panel sizing inside a rendered control.
+View-local state includes scroll position, focused control, hover state, Tree view expansion, Columns view column widths, preview panel width, find UI, selection UI, local panel sizing inside a rendered control, and the collapsed display state of the dock group that contains the rendered slot. Collapsing a group in one workspace must not collapse a mirror of the same ToolTab in another workspace, and collapsing a mirror group must not affect the owner workspace.
 
 Terminal mirrors have additional rules because one backend PTY can be displayed by multiple xterm views. The target Terminal mirror design is defined in [Terminal ToolTabs And Dock Splits](terminal-split-panes.md#terminal-mirror-target-design). If the current implementation has not yet shipped every Terminal mirror rule, treat that section as the acceptance criteria for future work.
 
@@ -128,6 +128,7 @@ Runtime snapshot state includes:
 - owned tool tabs
 - dock layout
 - split ratios
+- dock group collapsed display state
 - active dock groups and active tool tabs
 - floating windows containing mirror display slots for the current process
 
