@@ -87,13 +87,8 @@ test("files columns left-column directory focus remains switchable", { timeout: 
     await waitForDevServer();
     await waitForDriver();
     sessionId = await createSession();
-    await waitUntil(async () => await execute("return document.querySelector('.files-tooltab .files-toolbar') !== null;"), pageSummary);
-    await execute(`
-      const button = document.querySelector('.files-toolbar button[aria-label="Columns view"]');
-      if (!button) throw new Error('Columns view button missing');
-      button.click();
-      return true;
-    `);
+    await activateFilesToolTab();
+    await switchToColumnsView();
     await waitUntil(async () => {
       const measurement = await measureColumnsView();
       return measurement.visibleColumns.some((column) => column.rowNames.includes(fixture.rootName));
@@ -469,6 +464,35 @@ test("files columns left-column directory focus remains switchable", { timeout: 
         focusedPath: target.focusedPath,
         focusedChildName: target.focusedChildName,
       });
+    `);
+  }
+
+  async function activateFilesToolTab() {
+    await waitUntil(async () => {
+      const result = await execute(`
+        const button = document.querySelector('[data-tool-kind="files"]');
+        if (!button) return { found: false };
+        const group = button.closest('[data-dock-group-id]');
+        const active = button.classList.contains('active');
+        const collapsed = group?.getAttribute('data-dock-group-collapsed') === 'true';
+        if (!active || collapsed) {
+          button.click();
+          return { found: true, clicked: true, active, collapsed };
+        }
+        return { found: true, clicked: false, active, collapsed };
+      `);
+      return result.found === true;
+    }, pageSummary);
+    await waitUntil(async () => await execute("return document.querySelector('.files-tooltab .files-toolbar') !== null;"), pageSummary);
+  }
+
+  async function switchToColumnsView() {
+    await waitUntil(async () => await execute("return document.querySelector('.files-toolbar button[aria-label=\"Columns view\"]') !== null;"), pageSummary);
+    await execute(`
+      const button = document.querySelector('.files-toolbar button[aria-label="Columns view"]');
+      if (!button) throw new Error('Columns view button missing');
+      button.click();
+      return true;
     `);
   }
 

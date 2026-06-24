@@ -71,6 +71,8 @@ describe("Files Columns view motion source", () => {
     assert.match(source, /columnsPanes\s*=\s*direction\s*===\s*"backward"\s*\?\s*\[current,\s*previous\]\s*:\s*\[previous,\s*current\];/);
     assert.match(source, /columnsMotionDistance\s*=\s*motionWindow\?\.distance\s*\?\?\s*"100%";/);
     assert.match(source, /columnsMotionTranslate\s*=\s*direction\s*===\s*"backward"\s*\?\s*negativeColumnsMotionDistance\(columnsMotionDistance\)\s*:\s*"0px";/);
+    assert.match(source, /function\s+clearSettledColumnsNavigationPendingState\(\)/);
+    assert.match(source, /clearSettledColumnsNavigationPendingState\(\);[\s\S]*?scheduleColumnsScrollRestore\(scrollOffsets\);/);
     assert.match(source, /function\s+negativeColumnsMotionDistance\(distance:\s*string\)/);
     assert.match(source, /function\s+columnsMotionDistanceClass\(distance:\s*string\)/);
     assert.match(source, /function\s+columnsForSlideMotionWindow\(previous:\s*readonly\s+FilesColumn\[\],\s*next:\s*readonly\s+FilesColumn\[\],\s*direction:\s*ColumnsMotion\)/);

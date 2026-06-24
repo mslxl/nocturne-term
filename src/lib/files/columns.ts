@@ -57,13 +57,14 @@ export function buildFilesColumnsView<TEntry extends FilesColumnEntry>(input: {
   const currentPath = normalizeColumnPath(input.currentPath || rootPath);
   const selectedPath = normalizeColumnPath(input.selectedPath || currentPath);
   const childrenByPath = normalizeChildrenByPath(input.childrenByPath ?? {});
-  const focusChain = rootPath === currentPath ? [currentPath] : pathChainFromRoot(rootPath, currentPath);
+  const focusPath = selectedEntryKind(selectedPath, input.activeEntries, childrenByPath) === "directory" ? selectedPath : currentPath;
+  const focusChain = rootPath === focusPath ? [focusPath] : pathChainFromRoot(rootPath, focusPath);
   const initialColumns = focusChain.length ? focusChain : [currentPath];
 
   for (let index = 0; index < initialColumns.length; index += 1) {
     const columnPath = initialColumns[index] ?? currentPath;
     const nextPath = initialColumns[index + 1];
-    const baseEntries = index === initialColumns.length - 1 ? input.activeEntries : childrenByPath[columnPath] ?? [];
+    const baseEntries = sameColumnPath(columnPath, currentPath) ? input.activeEntries : childrenByPath[normalizeColumnPath(columnPath)] ?? [];
     const columnEntries = nextPath ? mergeColumnEntries(baseEntries, [syntheticDirectoryEntry<TEntry>(nextPath)]) : baseEntries;
     columns.push(columnView(columnPath, columnEntries, selectedPath || currentPath));
   }
@@ -166,6 +167,21 @@ function mergeColumnEntries<TEntry extends FilesColumnEntry>(existing: readonly 
 
 function normalizeChildrenByPath<TEntry extends FilesColumnEntry>(childrenByPath: Readonly<Record<string, readonly TEntry[]>>) {
   return Object.fromEntries(Object.entries(childrenByPath).map(([path, entries]) => [normalizeColumnPath(path), entries])) as Record<string, readonly TEntry[]>;
+}
+
+function selectedEntryKind<TEntry extends FilesColumnEntry>(
+  selectedPath: string,
+  activeEntries: readonly TEntry[],
+  childrenByPath: Readonly<Record<string, readonly TEntry[]>>,
+) {
+  if (!selectedPath) return null;
+  const activeEntry = activeEntries.find((entry) => sameColumnPath(entry.path, selectedPath));
+  if (activeEntry) return activeEntry.kind;
+  for (const entries of Object.values(childrenByPath)) {
+    const entry = entries.find((candidate) => sameColumnPath(candidate.path, selectedPath));
+    if (entry) return entry.kind;
+  }
+  return null;
 }
 
 function normalizeColumnPath(value: string): string {

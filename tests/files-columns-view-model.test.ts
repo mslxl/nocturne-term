@@ -158,6 +158,56 @@ describe("Files Columns view model", () => {
     assert.deepEqual(columns[4].entries.map((entry) => entry.path), ["/Users/alice/project/src/client/components/Button.svelte"]);
   });
 
+  it("replaces stale descendant columns when selecting a sibling directory from an ancestor column", () => {
+    const columns = buildFilesColumnsView({
+      rootPath: "/Users/alice",
+      currentPath: "/Users/alice/project/src/current",
+      selectedPath: "/Users/alice/project/theta",
+      activeEntries: [{ kind: "file", name: "current.txt", path: "/Users/alice/project/src/current/current.txt", size: "64" }],
+      childrenByPath: {
+        "/Users/alice": [{ kind: "directory", name: "project", path: "/Users/alice/project", size: null }],
+        "/Users/alice/project": [
+          { kind: "directory", name: "src", path: "/Users/alice/project/src", size: null },
+          { kind: "directory", name: "theta", path: "/Users/alice/project/theta", size: null },
+        ],
+        "/Users/alice/project/src": [{ kind: "directory", name: "current", path: "/Users/alice/project/src/current", size: null }],
+        "/Users/alice/project/theta": [{ kind: "file", name: "theta-leaf.txt", path: "/Users/alice/project/theta/theta-leaf.txt", size: "128" }],
+      },
+    });
+
+    assert.deepEqual(
+      columns.map((column) => column.path),
+      ["/Users/alice", "/Users/alice/project", "/Users/alice/project/theta"],
+    );
+    assert.deepEqual(columns[1].entries.map((entry) => ({ path: entry.path, selected: entry.selected })), [
+      { path: "/Users/alice/project/src", selected: false },
+      { path: "/Users/alice/project/theta", selected: true },
+    ]);
+    assert.deepEqual(columns[2].entries.map((entry) => entry.path), ["/Users/alice/project/theta/theta-leaf.txt"]);
+  });
+
+  it("uses active entries for the selected directory after the provider current path changes", () => {
+    const columns = buildFilesColumnsView({
+      rootPath: "/Users/alice",
+      currentPath: "/Users/alice/project/theta",
+      selectedPath: "/Users/alice/project/theta",
+      activeEntries: [{ kind: "file", name: "theta-leaf.txt", path: "/Users/alice/project/theta/theta-leaf.txt", size: "128" }],
+      childrenByPath: {
+        "/Users/alice": [{ kind: "directory", name: "project", path: "/Users/alice/project", size: null }],
+        "/Users/alice/project": [
+          { kind: "directory", name: "src", path: "/Users/alice/project/src", size: null },
+          { kind: "directory", name: "theta", path: "/Users/alice/project/theta", size: null },
+        ],
+      },
+    });
+
+    assert.deepEqual(
+      columns.map((column) => column.path),
+      ["/Users/alice", "/Users/alice/project", "/Users/alice/project/theta"],
+    );
+    assert.deepEqual(columns[2].entries.map((entry) => entry.path), ["/Users/alice/project/theta/theta-leaf.txt"]);
+  });
+
   it("keeps every data column available when preview occupies the terminal column", () => {
     const columns = buildFilesColumnsView({
       currentPath: "/Users/alice",

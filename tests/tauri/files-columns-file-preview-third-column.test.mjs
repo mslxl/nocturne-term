@@ -82,13 +82,8 @@ test("files columns file preview third column", { timeout: 180_000 }, async () =
     await waitForDevServer();
     await waitForDriver();
     sessionId = await createSession();
-    await waitUntil(async () => await execute("return document.querySelector('.files-tooltab .files-toolbar') !== null;"), pageSummary);
-    await execute(`
-      const button = document.querySelector('.files-toolbar button[aria-label="Columns view"]');
-      if (!button) throw new Error('Columns view button missing');
-      button.click();
-      return true;
-    `);
+    await activateFilesToolTab();
+    await switchToColumnsView();
     await waitUntil(async () => await columnsIncludeRows([["alpha"]]), pageSummary);
     await clickColumnDirectory("alpha");
     await waitUntil(async () => await columnsIncludeRows([["alpha"], ["beta"]]), pageSummary);
@@ -186,6 +181,35 @@ test("files columns file preview third column", { timeout: 180_000 }, async () =
       ? visibleColumns.slice(-expectedRowsByColumn.length)
       : measurement.columns.slice(-expectedRowsByColumn.length);
     return expectedRowsByColumn.every((expectedRows, index) => expectedRows.every((row) => columns[index]?.rowNames.includes(row)));
+  }
+
+  async function activateFilesToolTab() {
+    await waitUntil(async () => {
+      const result = await execute(`
+        const button = document.querySelector('[data-tool-kind="files"]');
+        if (!button) return { found: false };
+        const group = button.closest('[data-dock-group-id]');
+        const active = button.classList.contains('active');
+        const collapsed = group?.getAttribute('data-dock-group-collapsed') === 'true';
+        if (!active || collapsed) {
+          button.click();
+          return { found: true, clicked: true, active, collapsed };
+        }
+        return { found: true, clicked: false, active, collapsed };
+      `);
+      return result.found === true;
+    }, pageSummary);
+    await waitUntil(async () => await execute("return document.querySelector('.files-tooltab .files-toolbar') !== null;"), pageSummary);
+  }
+
+  async function switchToColumnsView() {
+    await waitUntil(async () => await execute("return document.querySelector('.files-toolbar button[aria-label=\"Columns view\"]') !== null;"), pageSummary);
+    await execute(`
+      const button = document.querySelector('.files-toolbar button[aria-label="Columns view"]');
+      if (!button) throw new Error('Columns view button missing');
+      button.click();
+      return true;
+    `);
   }
 
   async function measureColumnsView() {

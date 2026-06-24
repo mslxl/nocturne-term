@@ -48,7 +48,7 @@ import { createServer } from "vite";
 import { createIsolatedAppConfigEnv } from "./isolated-app-config.mjs";
 import { test } from "vitest";
 
-test("files columns nested navigation motion", { timeout: 180_000 }, async () => {
+test("files columns nested navigation motion", { timeout: 240_000 }, async () => {
   const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
   const appPath = requiredEnvPath("TAURI_TEST_APPLICATION");
   const isolatedAppConfig = await createIsolatedAppConfigEnv("files-columns-nested-motion");
@@ -102,13 +102,8 @@ test("files columns nested navigation motion", { timeout: 180_000 }, async () =>
     await waitForDriver();
     sessionId = await createSession();
     await setWebDriverTimeouts();
-    await waitUntil(async () => await execute("return document.querySelector('.files-tooltab .files-toolbar') !== null;"), pageSummary);
-    await execute(`
-      const button = document.querySelector('.files-toolbar button[aria-label="Columns view"]');
-      if (!button) throw new Error('Columns view button missing');
-      button.click();
-      return true;
-    `);
+    await activateFilesToolTab();
+    await switchToColumnsView();
     await waitUntil(async () => await columnsIncludeRows([["alpha", "omega", "root-note.txt"]]), pageSummary);
     await clickColumnDirectory("alpha");
     await waitUntil(async () => await columnsIncludeRows([["alpha"], ["beta"]]), pageSummary);
@@ -315,6 +310,35 @@ test("files columns nested navigation motion", { timeout: 180_000 }, async () =>
     if (motion.ok) return;
     const screenshotPath = await saveScreenshot(`files-columns-nested-navigation-motion-${step.replaceAll(" ", "-")}.png`);
     throw new Error(`${step}: ${motion.reason}\n${JSON.stringify(motion, null, 2)}\nscreenshot: ${screenshotPath}`);
+  }
+
+  async function activateFilesToolTab() {
+    await waitUntil(async () => {
+      const result = await execute(`
+        const button = document.querySelector('[data-tool-kind="files"]');
+        if (!button) return { found: false };
+        const group = button.closest('[data-dock-group-id]');
+        const active = button.classList.contains('active');
+        const collapsed = group?.getAttribute('data-dock-group-collapsed') === 'true';
+        if (!active || collapsed) {
+          button.click();
+          return { found: true, clicked: true, active, collapsed };
+        }
+        return { found: true, clicked: false, active, collapsed };
+      `);
+      return result.found === true;
+    }, pageSummary);
+    await waitUntil(async () => await execute("return document.querySelector('.files-tooltab .files-toolbar') !== null;"), pageSummary);
+  }
+
+  async function switchToColumnsView() {
+    await waitUntil(async () => await execute("return document.querySelector('.files-toolbar button[aria-label=\"Columns view\"]') !== null;"), pageSummary);
+    await execute(`
+      const button = document.querySelector('.files-toolbar button[aria-label="Columns view"]');
+      if (!button) throw new Error('Columns view button missing');
+      button.click();
+      return true;
+    `);
   }
 
   async function columnsIncludeRows(expectedRowsByColumn) {

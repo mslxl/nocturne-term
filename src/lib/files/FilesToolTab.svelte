@@ -111,7 +111,7 @@
   let treeChildrenByPath = $derived(viewState.treeChildrenByPath);
   let treeLoadingByPath = $state<Record<string, boolean>>({});
   let treeErrorByPath = $derived(viewState.treeErrorByPath);
-  const directoryChildrenLoadPromises = new Map<string, Promise<void>>();
+  const directoryChildrenLoadPromises = new Map<string, Promise<FileListResult | null>>();
   let filesRoot: HTMLElement | null = null;
   let columnsPanes = $state<ColumnsPane[]>([]);
   let columnsMotion = $state<ColumnsMotion>("idle");
@@ -641,28 +641,26 @@
   }
 
   async function loadDirectoryChildren(entry: FileEntry) {
-    if (entry.kind !== "directory") return;
+    if (entry.kind !== "directory") return null;
     const normalizedPath = normalizeFilePath(entry.path);
-    if (treeChildrenByPath[normalizedPath]) return;
+    if (treeChildrenByPath[normalizedPath]) return null;
     const existingLoad = directoryChildrenLoadPromises.get(normalizedPath);
     if (existingLoad) {
-      await existingLoad;
-      return;
+      return await existingLoad;
     }
-    await reloadDirectoryChildren(entry.path);
+    return await reloadDirectoryChildren(entry.path);
   }
 
   async function reloadDirectoryChildren(directoryPath: string) {
     const normalizedDirectoryPath = normalizeFilePath(directoryPath);
     const existingLoad = directoryChildrenLoadPromises.get(normalizedDirectoryPath);
     if (existingLoad) {
-      await existingLoad;
-      return;
+      return await existingLoad;
     }
     const loadPromise = doReloadDirectoryChildren(directoryPath, normalizedDirectoryPath);
     directoryChildrenLoadPromises.set(normalizedDirectoryPath, loadPromise);
     try {
-      await loadPromise;
+      return await loadPromise;
     } finally {
       directoryChildrenLoadPromises.delete(normalizedDirectoryPath);
     }
@@ -683,15 +681,25 @@
         ...treeChildrenByPath,
         [normalizedDirectoryPath]: childResult.entries,
       };
+      return childResult;
     } catch (error) {
       viewState.treeErrorByPath = {
         ...treeErrorByPath,
         [normalizedDirectoryPath]: error instanceof Error ? error.message : String(error),
       };
+      return null;
     } finally {
       const { [normalizedDirectoryPath]: _completed, ...remainingLoading } = treeLoadingByPath;
       treeLoadingByPath = remainingLoading;
     }
+  }
+
+  function applyCurrentDirectoryResult(childResult: FileListResult | null) {
+    if (!childResult) return;
+    if (!sameFilePath(viewState.path ?? "", childResult.provider.current_path)) return;
+    viewState.filesResult = childResult;
+    filesError = null;
+    filesLoading = false;
   }
 
   async function preloadColumnsAncestorDirectories(rootPath: string, currentDirectoryPath: string) {
@@ -744,7 +752,7 @@
         viewState.previewPath = "";
         applyEntrySelection(entry, visiblePaths, event);
         viewState.path = entry.path;
-        await loadDirectoryChildren(entry);
+        applyCurrentDirectoryResult(await loadDirectoryChildren(entry));
       } else {
         applyEntrySelection(entry, visiblePaths, event);
         if (viewMode === "columns" && entry.kind === "directory") {
@@ -754,7 +762,7 @@
       if (viewMode === "columns" && entry.kind === "directory" && !shouldLoadBeforeSelection) {
         searchResult = null;
         viewState.previewPath = "";
-        await loadDirectoryChildren(entry);
+        applyCurrentDirectoryResult(await loadDirectoryChildren(entry));
       }
     } finally {
       if (selectionScrollOffsets && pendingColumnsScrollOffsets === selectionScrollOffsets) {
@@ -871,6 +879,7 @@
       columnsResizeColumnCount = null;
       columnsPanes = [currentColumnsPane(nextColumns)];
       lastColumnsSignature = nextSignature;
+      clearSettledColumnsNavigationPendingState();
       scheduleColumnsScrollRestore(scrollOffsets);
       scheduleColumnsScrollToSelectedDirectoryWindow(nextColumns);
       return;
@@ -890,6 +899,7 @@
       columnsPanes = [currentColumnsPane(nextColumns)];
       lastColumnsSignature = nextSignature;
       clearPendingColumnsMotionHintIfSettled(nextColumns);
+      clearSettledColumnsNavigationPendingState();
       scheduleColumnsScrollRestore(scrollOffsets);
       return;
     }
@@ -1087,6 +1097,12 @@
     if (pathDescendsFrom(previousLastPath, columnsSelectedEntry.path)) return false;
     return true;
 
+  }
+
+  function clearSettledColumnsNavigationPendingState() {
+    pendingColumnsMotionHint = null;
+    pendingColumnsFocusWindowPath = null;
+    pendingColumnsReplaceWithoutMotionPath = null;
   }
 
   function classifyColumnsSelectionMotion(entry: FileEntry): ColumnsMotionHint | null {

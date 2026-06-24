@@ -246,8 +246,14 @@ test("files finder toolbar upload drop affordances", { timeout: 180_000 }, async
       const result = await execute(`
         const button = document.querySelector('[data-tool-kind="files"]');
         if (!button) return { found: false };
-        button.click();
-        return { found: true };
+        const group = button.closest('[data-dock-group-id]');
+        const active = button.classList.contains('active');
+        const collapsed = group?.getAttribute('data-dock-group-collapsed') === 'true';
+        if (!active || collapsed) {
+          button.click();
+          return { found: true, clicked: true, active, collapsed };
+        }
+        return { found: true, clicked: false, active, collapsed };
       `);
       return result.found === true;
     }, pageSummary);
