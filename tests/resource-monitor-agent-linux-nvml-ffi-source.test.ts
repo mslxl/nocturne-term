@@ -22,7 +22,7 @@ import { resolve } from "node:path";
 
 describe("Resource Monitor agent Linux NVML FFI source", () => {
   it("uses c_char for the NVML device name buffer", () => {
-    const source = readFileSync(resolve("crates/nocturne-resource-monitor-agent/src/lib.rs"), "utf8");
+    const source = readFileSync(resolve("tools/nocturne-resource-monitor-agent/src/lib.rs"), "utf8");
     const start = source.indexOf("unsafe fn device_name(");
     const end = source.indexOf("unsafe fn device_utilization(", start);
 

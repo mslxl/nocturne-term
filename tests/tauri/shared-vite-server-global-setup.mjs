@@ -23,7 +23,7 @@ const require = createRequire(import.meta.url);
 
 export default async function setupSharedViteServer() {
   const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
-  const devUrl = process.env.TAURI_TEST_DEV_URL ?? "http://localhost:1420/";
+  const devUrl = process.env.TAURI_TEST_DEV_URL ?? "http://127.0.0.1:1420/";
   const devPort = Number(new URL(devUrl).port);
 
   if (!Number.isInteger(devPort) || devPort <= 0) {
@@ -41,7 +41,7 @@ export default async function setupSharedViteServer() {
   const { createServer } = await import(pathToFileURL(vitePath).href);
   const devServer = await createServer({
     server: {
-      host: "localhost",
+      host: "127.0.0.1",
       port: devPort,
       strictPort: true,
     },

@@ -7,6 +7,7 @@
     "dev": "vite dev",
     "build": "vite build",
     "build:resource-monitor-agents": "node scripts/build-resource-monitor-agents.mjs",
+    "build:terminal-agents": "node scripts/build-terminal-agents.mjs",
     "prepare:ripgrep-helpers": "node scripts/prepare-ripgrep-helpers.mjs",
     "validate:helper-resources": "node scripts/validate-helper-resources.mjs",
     "test": "vitest run",

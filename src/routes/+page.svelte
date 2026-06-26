@@ -32,7 +32,7 @@
   import { localizeCommand, searchPaletteItems, type PaletteItem, type PaletteSearchResult } from "$lib/command-palette/search";
   import HostIcon from "$lib/hosts/HostIcon.svelte";
   import { resolveHostIcon } from "$lib/hosts/icons";
-  import { buildHostFolderTree, hostFolderLabel, hostHasBlockingDiagnostics, hostSubtitle, type HostFolderTreeNode } from "$lib/hosts/model";
+  import { buildHostFolderTree, hostFolderLabel, hostHasBlockingDiagnostics, hostSubtitle, terminalAgentEnabledForHost, type HostFolderTreeNode } from "$lib/hosts/model";
   import { hasTauriRuntime } from "$lib/tauri/runtime";
   import { dockSplitGridTemplate, resizeWorkspaceDockSplit } from "$lib/workspace/dock/resize";
   import WorkspaceDockGroup from "$lib/workspace/components/WorkspaceDockGroup.svelte";
@@ -46,6 +46,7 @@
   import PortsToolTab from "$lib/ports/PortsToolTab.svelte";
   import ResourceMonitorToolTab from "$lib/resources/ResourceMonitorToolTab.svelte";
   import { DEFAULT_FILES_TOOLBAR_ACTION_IDS, normalizeFilesToolbarActionIds, type FilesToolbarActionId } from "$lib/files/toolbar-actions";
+  import TerminalSessionsToolTab from "$lib/terminal/TerminalSessionsToolTab.svelte";
   import TransfersToolTab from "$lib/transfers/TransfersToolTab.svelte";
   import { startTransferQueueObserver } from "$lib/transfers/queue.svelte";
   import { routeTerminalPaneEvent, shouldHandleTerminalPaneEvent } from "$lib/terminal/event-routing";
@@ -152,6 +153,8 @@
     currentDirectory: string;
     titleOverride: string;
     readOnly: boolean;
+    agentBacked: boolean;
+    agentSessionId: string;
     reconnectPending: boolean;
     everConnected: boolean;
     connectionHostId: string;
@@ -274,6 +277,10 @@
     left: number;
     top: number;
   };
+  type NocturneTestHooks = {
+    openCommandPalette: () => void;
+    openTerminalSessions: () => void;
+  };
   type ToolTabDropTarget =
     | { kind: "group"; workspaceId: string; groupId: string }
     | { kind: "split"; workspaceId: string; slotId: string; side: "left" | "right" | "up" | "down" }
@@ -302,6 +309,7 @@
   let tabs = $state<TerminalTab[]>([]);
   let activeId = $state("");
   let terminalRuntimeByToolTabId = $state(new Map<string, TerminalToolRuntime>());
+  let pendingTerminalRuntimeWorkspaceIds = new Set<string>();
   let terminalTitleRevision = $state(0);
   let activeTerminalWorkspaceId = "";
   let activeTerminalToolTabId = $state("");
@@ -354,6 +362,9 @@
   let undoStack: TerminalUndoAction[] = [];
   let redoStack: TerminalRedoAction[] = [];
   let startupSessionPromise: Promise<void> | null = null;
+  let detachedTerminalPaletteItems = $state<PaletteItem[]>([]);
+  let terminalSessionsRevision = $state(0);
+  let lastPersistedTerminalTitleByAgentSessionId = new Map<string, string>();
   const terminalRuntimeCreationGate = new TerminalRuntimeCreationGate();
   const textEditHistories = new WeakMap<TextInputElement, TextEditHistory>();
   let resizeDrag = $state<{
@@ -462,7 +473,10 @@
     notifySelectionChange: () => {
       syncTerminalMenuState();
     },
-    notifyTitleChange: () => {
+    notifyTitleChange: (paneId, title) => {
+      void persistTerminalProgramTitle(paneId, title);
+    },
+    notifyPaneTitleRefresh: () => {
       terminalTitleRevision += 1;
     },
     requestReconnect: (paneId) => {
@@ -470,10 +484,7 @@
     },
   });
 
-  function syncWorkspaceSnapshot(next: WorkspaceLayoutSnapshot | null) {
-    if (next) pruneActiveToolSlotOverrides(next);
-    workspaceViewSnapshot = next;
-    workspaceRenderRevision += 1;
+  function publishWorkspaceDebugSnapshot(next: WorkspaceLayoutSnapshot | null) {
     if (typeof window !== "undefined") {
       Object.assign(window, {
         __NOCTURNE_WORKSPACE_DEBUG__: {
@@ -481,9 +492,20 @@
           workspaceRenderRevision,
           activeToolSlotOverrideByGroupId,
           activeToolSlotOverrideRevision,
+          activeId,
+          activeTerminalToolTabId,
+          terminalRuntimeToolTabIds: Array.from(terminalRuntimeByToolTabId.keys()),
+          terminalRuntimePaneIds: Array.from(terminalRuntimeByToolTabId.values()).map((runtime) => runtime.tab.activePaneId),
         },
       });
     }
+  }
+
+  function syncWorkspaceSnapshot(next: WorkspaceLayoutSnapshot | null) {
+    if (next) pruneActiveToolSlotOverrides(next);
+    workspaceViewSnapshot = next;
+    workspaceRenderRevision += 1;
+    publishWorkspaceDebugSnapshot(next);
   }
 
   async function dispatchWorkspaceIntent(intent: WorkspaceDispatchInput["intent"]) {
@@ -810,6 +832,7 @@
     next.set(toolTabId, runtime);
     terminalRuntimeByToolTabId = next;
     syncLegacyTerminalTabState();
+    publishWorkspaceDebugSnapshot(workspaceSnapshot);
   }
 
   function deleteTerminalRuntime(toolTabId: string) {
@@ -817,6 +840,7 @@
     next.delete(toolTabId);
     terminalRuntimeByToolTabId = next;
     syncLegacyTerminalTabState();
+    publishWorkspaceDebugSnapshot(workspaceSnapshot);
   }
 
   function syncLegacyTerminalTabState() {
@@ -1322,6 +1346,12 @@
     return lastConfigSnapshot?.hosts.find((host) => host.id === tool.host_id) ?? null;
   }
 
+  function activeWorkspaceHost() {
+    const workspace = activeWorkspace;
+    if (!workspace) return null;
+    return lastConfigSnapshot?.hosts.find((host) => host.id === workspace.host_id) ?? null;
+  }
+
   function measureNewTerminal(cwd: string | null = null) {
     if (!settings) throw new Error("Terminal settings are not loaded");
     const measuredSize = measureTerminalFit(terminalMeasureContainer, settings, { cols: initialCols, rows: initialRows });
@@ -1523,6 +1553,150 @@
     await createHostSession(tool.host_id, { recordHistory, toolTabId: tool.id, workspaceId: workspace.id });
   }
 
+  async function createEmptyTerminalToolTabForWorkspace(workspaceId: string) {
+    const workspace = workspaceById(workspaceId);
+    if (!workspace) throw new Error("target workspace is not loaded");
+    const targetGroupId =
+      lastActivatedContentGroupIdByWorkspace.get(workspace.id) ?? firstContentGroupId(workspace);
+    const before = new Set(
+      (workspaceSnapshot?.tool_tabs ?? [])
+        .filter((tool) => tool.owner_workspace_id === workspace.id && tool.kind === "terminal")
+        .map((tool) => tool.id),
+    );
+    const next = await dispatchWorkspaceIntent({
+      kind: "create_terminal_tool_tab",
+      workspace_id: workspace.id,
+      target_group_id: targetGroupId,
+    });
+    const tool = next.tool_tabs.find(
+      (item) =>
+        item.owner_workspace_id === workspace.id &&
+        item.kind === "terminal" &&
+        !before.has(item.id),
+    );
+    if (!tool) throw new Error("created Terminal ToolTab was not found in workspace snapshot");
+    activeTerminalToolTabId = tool.id;
+    return tool;
+  }
+
+  function bindTerminalSessionToToolTab(tool: WorkspaceToolTab, info: TerminalSessionInfo) {
+    const tab = createTerminalTab(info);
+    tab.id = tool.id;
+    for (const pane of tab.panes) pane.tabId = tool.id;
+    setTerminalRuntime(tool.id, { toolTabId: tool.id, tab });
+    activeTerminalToolTabId = tool.id;
+    activeId = tool.id;
+    return tab;
+  }
+
+  async function createEmptyTerminalToolTabForActiveWorkspace() {
+    const workspace = activeWorkspace;
+    if (!workspace) throw new Error("active workspace is not loaded");
+    return createEmptyTerminalToolTabForWorkspace(workspace.id);
+  }
+
+  function detachedTerminalSourceTool(sourceToolTabId: string | null = null) {
+    const toolTabId = sourceToolTabId ?? activeTerminalToolTabId;
+    const tool = toolTabId ? workspaceToolById(toolTabId) : null;
+    if (!tool || (tool.kind !== "terminal" && tool.kind !== "terminal_sessions")) {
+      throw new Error("Terminal or Terminal Sessions ToolTab is required");
+    }
+    return tool;
+  }
+
+  async function attachDetachedTerminalSession(detachedSessionId: string, sourceToolTabId: string | null = null) {
+    if (!hasTauriRuntime()) return;
+    const sourceTool = detachedTerminalSourceTool(sourceToolTabId);
+    pendingTerminalRuntimeWorkspaceIds.add(sourceTool.owner_workspace_id);
+    try {
+      const info = await unwrapCommand(
+        commands.attachDetachedTerminalSession({
+          workspace_id: sourceTool.owner_workspace_id,
+          tool_tab_id: sourceTool.id,
+          detached_session_id: detachedSessionId,
+          window_label: currentWindowLabel(),
+        }),
+      );
+      const tool = await createEmptyTerminalToolTabForWorkspace(sourceTool.owner_workspace_id);
+      const tab = bindTerminalSessionToToolTab(tool, info);
+      const pane = terminalPaneById(tab, tab.activePaneId);
+      if (pane) pane.connectionHostId = tool.host_id;
+      await tick();
+      await mountTerminalToolTab(tool.id);
+      await flushTerminalOutputBacklog(tab.activePaneId);
+      terminalPaneById(tab, tab.activePaneId)?.term?.focus();
+      detachedTerminalPaletteItems = detachedTerminalPaletteItems.filter(
+        (item) => item.id !== `terminal.attachDetached:${detachedSessionId}`,
+      );
+      terminalSessionsRevision += 1;
+      syncTerminalMenuState();
+    } finally {
+      pendingTerminalRuntimeWorkspaceIds.delete(sourceTool.owner_workspace_id);
+    }
+  }
+
+  async function openDetachedTerminalSessionHistory(detachedSessionId: string, sourceToolTabId: string | null = null) {
+    if (!hasTauriRuntime()) return;
+    const sourceTool = detachedTerminalSourceTool(sourceToolTabId);
+    pendingTerminalRuntimeWorkspaceIds.add(sourceTool.owner_workspace_id);
+    try {
+      const info = await unwrapCommand(
+        commands.openDetachedTerminalSessionHistory({
+          workspace_id: sourceTool.owner_workspace_id,
+          tool_tab_id: sourceTool.id,
+          detached_session_id: detachedSessionId,
+          window_label: currentWindowLabel(),
+        }),
+      );
+      const tool = await createEmptyTerminalToolTabForWorkspace(sourceTool.owner_workspace_id);
+      const tab = bindTerminalSessionToToolTab(tool, info);
+      const pane = terminalPaneById(tab, tab.activePaneId);
+      if (pane) {
+        pane.connectionHostId = tool.host_id;
+        pane.readOnly = true;
+        pane.status = "disconnected";
+        pane.reconnectPending = false;
+        pane.exitText = "History";
+      }
+      await tick();
+      await mountTerminalToolTab(tool.id);
+      await flushTerminalOutputBacklog(tab.activePaneId);
+      terminalPaneById(tab, tab.activePaneId)?.term?.focus();
+      terminalSessionsRevision += 1;
+      syncTerminalMenuState();
+    } finally {
+      pendingTerminalRuntimeWorkspaceIds.delete(sourceTool.owner_workspace_id);
+    }
+  }
+
+  async function deleteDetachedTerminalSession(detachedSessionId: string, sourceToolTabId: string | null = null) {
+    if (!hasTauriRuntime()) return;
+    const toolTabId = sourceToolTabId ?? activeTerminalToolTabId;
+    const tool = toolTabId ? workspaceToolById(toolTabId) : null;
+    if (!tool || (tool.kind !== "terminal" && tool.kind !== "terminal_sessions")) throw new Error("active Terminal ToolTab is required");
+    const confirmed = await ask("Delete this terminal session and its saved transcript?", {
+      title: "Delete Terminal Session",
+      kind: "warning",
+      okLabel: "Delete",
+      cancelLabel: "Cancel",
+    });
+    if (!confirmed) return;
+    await unwrapCommand(
+      commands.deleteDetachedTerminalSession({
+        workspace_id: tool.owner_workspace_id,
+        tool_tab_id: tool.id,
+        detached_session_id: detachedSessionId,
+      }),
+    );
+    detachedTerminalPaletteItems = detachedTerminalPaletteItems.filter(
+      (item) =>
+        item.id !== `terminal.attachDetached:${detachedSessionId}` &&
+        item.id !== `terminal.deleteDetached:${detachedSessionId}`,
+    );
+    terminalSessionsRevision += 1;
+    await refreshDetachedTerminalPaletteItems();
+  }
+
   async function openWorkspaceResourceMonitor() {
     const workspace = activeWorkspace;
     if (!workspace) throw new Error("active workspace is not loaded");
@@ -1531,6 +1705,29 @@
       workspace_id: workspace.id,
       target_group_id: firstToolGroupId(workspace),
     });
+  }
+
+  async function openWorkspaceTerminalSessions() {
+    const workspace = activeWorkspace;
+    if (!workspace) throw new Error("active workspace is not loaded");
+    if (!terminalAgentEnabledForHost(activeWorkspaceHost())) {
+      throw new Error("terminal agent mode is disabled for this host");
+    }
+    await dispatchWorkspaceIntent({
+      kind: "open_terminal_sessions_tool_tab",
+      workspace_id: workspace.id,
+      target_group_id: firstToolGroupId(workspace),
+    });
+  }
+
+  function publishTestHooks() {
+    if (!import.meta.env.DEV || typeof window === "undefined") return;
+    (window as Window & { __NOCTURNE_TEST_HOOKS__?: NocturneTestHooks }).__NOCTURNE_TEST_HOOKS__ = {
+      openCommandPalette,
+      openTerminalSessions: () => {
+        void openWorkspaceTerminalSessions();
+      },
+    };
   }
 
   async function openDefaultWorkspace() {
@@ -1728,12 +1925,14 @@
         tool.kind === "terminal" &&
         workspace.owned_tool_tab_ids.includes(tool.id),
     );
+    if (pendingTerminalRuntimeWorkspaceIds.has(workspace.id)) return;
     return terminalTools.length > 0 && terminalTools.every((tool) => terminalRuntimeByToolTabId.has(tool.id));
   }
 
   async function ensureWorkspaceTerminalRuntimes() {
     const workspace = activeWorkspace;
     if (!workspace) return;
+    if (pendingTerminalRuntimeWorkspaceIds.has(workspace.id)) return;
     const terminalTools = (workspaceSnapshot?.tool_tabs ?? []).filter(
       (tool) =>
         tool.owner_workspace_id === workspace.id &&
@@ -1905,6 +2104,11 @@
     return tab;
   }
 
+  function findLocalPaneById(paneId: string): TerminalPane | null {
+    const tab = findLocalTabByPaneId(paneId);
+    return tab ? (terminalPaneById(tab, paneId) ?? null) : null;
+  }
+
   function localTerminalPaneIds() {
     return terminalRuntimeTabs().flatMap((tab) => tab.panes.map((pane) => pane.id));
   }
@@ -1960,6 +2164,50 @@
     } else {
       syncTerminalMenuState();
     }
+  }
+
+  async function detachPaneSession(paneId: string) {
+    const tab = findTabByPaneId(paneId);
+    const pane = terminalPaneById(tab, paneId);
+    if (!pane) return;
+    if (!pane.agentBacked || pane.status !== "running") {
+      terminalTabs.markConnectionError(paneId, "Only running Terminal Agent sessions can be detached.");
+      return;
+    }
+    try {
+      await unwrapCommand(commands.detachTerminalSession({ session_id: paneId }));
+    } catch (error) {
+      terminalTabs.markConnectionError(paneId, error instanceof Error ? error.message : String(error));
+      return;
+    }
+    terminalSessionsRevision += 1;
+    disposeTerminalPane(pane);
+    hostSessionRetryByPaneId = Object.fromEntries(
+      Object.entries(hostSessionRetryByPaneId).filter(([id]) => id !== paneId),
+    );
+    if (tab.panes.length === 1) {
+      tabs = tabs.filter((item) => item.id !== tab.id);
+      if (activeId === tab.id) {
+        activeId = tabs.at(-1)?.id ?? tabs[0]?.id ?? "";
+        if (activeId) await activateTab(activeId);
+      }
+      syncTerminalMenuState();
+      return;
+    }
+    const nextTree = removePane(tab.tree, paneId);
+    if (!nextTree) {
+      tabs = tabs.filter((item) => item.id !== tab.id);
+      if (activeId === tab.id) activeId = tabs.at(-1)?.id ?? tabs[0]?.id ?? "";
+      syncTerminalMenuState();
+      return;
+    }
+    tab.tree = nextTree;
+    tab.panes = tab.panes.filter((item) => item.id !== paneId);
+    if (tab.activePaneId === paneId) tab.activePaneId = tab.panes[0]?.id ?? "";
+    refreshTerminalTabTitle(tab);
+    await activatePane(tab.activePaneId);
+    await mountAndFitTabPanes(tab);
+    syncTerminalMenuState();
   }
 
   async function confirmRunningPanes(panes: TerminalPane[]) {
@@ -2916,6 +3164,8 @@
         currentDirectory: pane.currentDirectory,
         titleOverride: pane.titleOverride,
         readOnly: pane.readOnly,
+        agentBacked: pane.agentBacked,
+        agentSessionId: pane.agentSessionId,
         reconnectPending: pane.reconnectPending,
         everConnected: pane.everConnected,
         connectionHostId: pane.connectionHostId,
@@ -3004,6 +3254,7 @@
             process_id: null,
             transport: "ssh",
             transport_state: "disconnected",
+            agent: null,
           }, "")
         : createTerminalPane(await unwrapCommand(commands.existingTerminalSessionInfo({ session_id: pane.id })), "");
       restored.title = pane.title;
@@ -3012,6 +3263,7 @@
       restored.currentDirectory = pane.currentDirectory;
       restored.titleOverride = pane.titleOverride;
       restored.readOnly = pane.readOnly;
+      restored.agentSessionId = pane.agentSessionId;
       restored.reconnectPending = pane.reconnectPending;
       restored.everConnected = pane.everConnected || pane.status === "running" || pane.status === "disconnected";
       restored.connectionHostId = pane.connectionHostId;
@@ -3209,6 +3461,7 @@
         has_selection: pane.term?.hasSelection() === true,
         read_only: pane.readOnly,
         has_multiple_panes: tab.panes.length > 1,
+        can_detach: pane.agentBacked && pane.status === "running",
       }),
     ).catch((error) => {
       settingsError = error instanceof Error ? error.message : String(error);
@@ -3235,6 +3488,10 @@
     }
     if (event.action === "change_tab_title") {
       changeTabTitleForPane(event.pane_id);
+      return;
+    }
+    if (event.action === "detach_session") {
+      void detachPaneSession(event.pane_id);
       return;
     }
     if (event.action === "close_pane") {
@@ -3341,6 +3598,42 @@
     if (nextTitle === null) return;
     tab.customTitle = nextTitle.trim();
     refreshTerminalTabTitle(tab);
+    const pane = terminalPaneById(tab, tab.activePaneId);
+    if (pane?.agentBacked && !pane.readOnly && tab.customTitle) {
+      void persistTerminalSessionRename(pane.id, tab.customTitle);
+    }
+  }
+
+  async function persistTerminalProgramTitle(paneId: string, title: string) {
+    const trimmed = title.trim();
+    const pane = findLocalPaneById(paneId);
+    const titleKey = pane?.agentSessionId || paneId;
+    if (!trimmed || lastPersistedTerminalTitleByAgentSessionId.get(titleKey) === trimmed) return;
+    lastPersistedTerminalTitleByAgentSessionId.set(titleKey, trimmed);
+    if (!hasTauriRuntime()) return;
+    try {
+      await unwrapCommand(commands.updateTerminalTitle({ session_id: paneId, title: trimmed }));
+      terminalSessionsRevision += 1;
+    } catch (error) {
+      lastPersistedTerminalTitleByAgentSessionId.delete(titleKey);
+      settingsError = error instanceof Error ? error.message : String(error);
+    }
+  }
+
+  async function persistTerminalSessionRename(paneId: string, title: string) {
+    const trimmed = title.trim();
+    if (!trimmed) return;
+    const pane = findLocalPaneById(paneId);
+    const titleKey = pane?.agentSessionId || paneId;
+    lastPersistedTerminalTitleByAgentSessionId.set(titleKey, trimmed);
+    if (!hasTauriRuntime()) return;
+    try {
+      await unwrapCommand(commands.renameTerminalSession({ session_id: paneId, title: trimmed }));
+      terminalSessionsRevision += 1;
+    } catch (error) {
+      lastPersistedTerminalTitleByAgentSessionId.delete(titleKey);
+      settingsError = error instanceof Error ? error.message : String(error);
+    }
   }
 
   function adjustFontSize(delta: number) {
@@ -3757,6 +4050,7 @@
     const currentLanguage = language();
     const hasActivePane = activePane() !== null;
     const hasMultiplePanes = (activeTab?.panes.length ?? 0) > 1;
+    const terminalAgentEnabled = terminalAgentEnabledForHost(activeWorkspaceHost());
     const staticItems = staticPaletteCommands.map((command) => {
       const item = localizeCommand(command, currentLanguage);
       const shortcut = displayShortcut(item.shortcut);
@@ -3767,8 +4061,14 @@
         recentScore: paletteRecentScore(item.id),
         disabledReason: paletteDisabledReason(item.id, hasActivePane, hasMultiplePanes),
       };
-    });
-    return [...staticItems, ...connectionHostPaletteItems(), ...tabPaletteItems(), ...profilePaletteItems()];
+    }).filter((item) => item.id !== "tool.openTerminalSessions" || terminalAgentEnabled);
+    return [
+      ...staticItems,
+      ...detachedTerminalPaletteItems,
+      ...connectionHostPaletteItems(),
+      ...tabPaletteItems(),
+      ...profilePaletteItems(),
+    ];
   }
 
   function connectionHostPaletteItems(): PaletteItem[] {
@@ -3927,6 +4227,7 @@
     commandPaletteLastFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     commandPaletteQuery = "";
     commandPaletteSelected = 0;
+    void refreshDetachedTerminalPaletteItems();
     commandPaletteOpen = true;
   }
 
@@ -4020,6 +4321,83 @@
     commandPaletteSelected = 0;
   }
 
+  async function refreshDetachedTerminalPaletteItems() {
+    if (!hasTauriRuntime()) {
+      detachedTerminalPaletteItems = [];
+      return;
+    }
+    if (!terminalAgentEnabledForHost(activeWorkspaceHost())) {
+      detachedTerminalPaletteItems = [];
+      return;
+    }
+    const toolTabId = activeTerminalToolTabId;
+    const tool = toolTabId ? workspaceToolById(toolTabId) : null;
+    if (!tool || (tool.kind !== "terminal" && tool.kind !== "terminal_sessions")) {
+      detachedTerminalPaletteItems = [];
+      return;
+    }
+    try {
+      const sessions = await unwrapCommand(
+        commands.listDetachedTerminalSessions({
+          workspace_id: tool.owner_workspace_id,
+          tool_tab_id: tool.id,
+        }),
+      );
+      detachedTerminalPaletteItems = sessions.flatMap((session) => [
+        ...(session.detached
+          ? [
+              {
+                id: `terminal.attachDetached:${session.session_id}`,
+                kind: "command" as const,
+                title: `Attach Detached Session: ${session.title}`,
+                scope: "Terminal",
+                keywords: [
+                  session.title,
+                  session.command,
+                  "attach",
+                  "detached",
+                  "terminal",
+                  "session",
+                  "agent",
+                  "恢复",
+                  "重新连接",
+                  "终端",
+                  "分离",
+                ],
+                contextScore: 36,
+                recentScore: paletteRecentScore(`terminal.attachDetached:${session.session_id}`),
+              },
+            ]
+          : []),
+        {
+          id: `terminal.deleteDetached:${session.session_id}`,
+          kind: "command" as const,
+          title: `Delete Terminal Session: ${session.title}`,
+          scope: "Terminal",
+          keywords: [
+            session.title,
+            session.command,
+            "delete",
+            "remove",
+            "detached",
+            "terminal",
+            "session",
+            "agent",
+            "删除",
+            "移除",
+            "终端",
+            "分离",
+          ],
+          contextScore: 20,
+          recentScore: paletteRecentScore(`terminal.deleteDetached:${session.session_id}`),
+        },
+      ]);
+    } catch (error) {
+      detachedTerminalPaletteItems = [];
+      settingsError = error instanceof Error ? error.message : String(error);
+    }
+  }
+
   function moveCommandPaletteSelection(delta: number) {
     if (!paletteResults.length) return;
     commandPaletteSelected = (commandPaletteSelected + delta + paletteResults.length) % paletteResults.length;
@@ -4044,6 +4422,14 @@
       await createWorkspaceForHost(id.slice("workspace.new:".length));
       return;
     }
+    if (id.startsWith("terminal.attachDetached:")) {
+      await attachDetachedTerminalSession(id.slice("terminal.attachDetached:".length));
+      return;
+    }
+    if (id.startsWith("terminal.deleteDetached:")) {
+      await deleteDetachedTerminalSession(id.slice("terminal.deleteDetached:".length));
+      return;
+    }
     if (id.startsWith("ui.theme.")) {
       await switchAppTheme(id.slice("ui.theme.".length) as "system" | "light" | "dark");
       return;
@@ -4062,6 +4448,10 @@
     }
     if (id === "tool.openResources") {
       await openWorkspaceResourceMonitor();
+      return;
+    }
+    if (id === "tool.openTerminalSessions") {
+      await openWorkspaceTerminalSessions();
       return;
     }
     if (id === "terminal.movePaneLeft") return moveActivePane("left");
@@ -4104,6 +4494,7 @@
     if (!hasLocalTerminalPane(event.session_id)) return;
     clearHostSessionRetry(event.session_id);
     terminalTabs.markExited(event);
+    terminalSessionsRevision += 1;
   }
 
   async function handleWorkspaceSshVerificationRequired(event: WorkspaceSshVerificationRequiredEvent) {
@@ -4450,6 +4841,7 @@
   }
 
   onMount(() => {
+    publishTestHooks();
     let mounted = true;
     floatingWindowId = currentFloatingWindowId();
     const stopTransferQueueObserver = startTransferQueueObserver();
@@ -5100,6 +5492,19 @@
     {/key}
   {:else if tool.kind === "transfers"}
     <TransfersToolTab workspace={effectiveWorkspace} {active} />
+  {:else if tool.kind === "terminal_sessions"}
+    <TerminalSessionsToolTab
+      toolTab={tool}
+      workspaceId={effectiveWorkspace.id}
+      {active}
+      revision={terminalSessionsRevision}
+      onAttach={attachDetachedTerminalSession}
+      onOpenHistory={openDetachedTerminalSessionHistory}
+      onDeleted={() => {
+        terminalSessionsRevision += 1;
+        return refreshDetachedTerminalPaletteItems();
+      }}
+    />
   {:else if tool.kind === "resources"}
     <ResourceMonitorToolTab toolTab={tool} workspaceId={effectiveWorkspace.id} viewId={slot.id} />
   {:else if tool.kind === "ports"}
@@ -5116,7 +5521,7 @@
     {:else}
       <section class="terminal-tool-area" aria-label="Terminal ToolTab">
         <section class="content" aria-label="Terminal content">
-          {#if settingsError || workspaceStore.error}
+          {#if (settingsError || workspaceStore.error) && (!runtime || !pane)}
             <div class="placeholder error-state">
               <img src="/favicon.png" alt="" />
               <h1>Nocturne</h1>
@@ -5140,6 +5545,10 @@
               data-session-id={pane.id}
               data-tool-tab-id={tool.id}
               data-terminal-view-id={slot.id}
+              data-terminal-read-only={pane.readOnly ? "true" : "false"}
+              data-terminal-status={pane.status}
+              data-terminal-exit-text={pane.exitText}
+              data-agent-session-id={pane.agentSessionId}
               data-terminal-mirror={slot.kind === "mirror" ? "true" : undefined}
               data-terminal-runtime-title={terminalRuntimeTitleForToolTab(tool.id) ?? ""}
               aria-label={pane.title}
@@ -5192,7 +5601,12 @@
     --terminal-padding-left: 10px;
   }
 
+  :global(html),
   :global(body) {
+    width: 100%;
+    height: 100%;
+    min-width: 0;
+    min-height: 0;
     overflow: hidden;
   }
 
@@ -5200,8 +5614,11 @@
     --workspace-titlebar-height: 40px;
     width: 100vw;
     height: 100vh;
+    min-width: 0;
+    min-height: 0;
     display: grid;
     grid-template-rows: var(--workspace-titlebar-height) minmax(0, 1fr);
+    overflow: hidden;
     background: color-mix(in srgb, var(--app-bg) 94%, var(--app-fg));
   }
 

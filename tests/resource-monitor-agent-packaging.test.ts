@@ -10,7 +10,7 @@
  * executing platform-specific binaries.
  *
  * Expected:
- * The repository defines a standalone `crates/nocturne-resource-monitor-agent` Cargo
+ * The repository defines a standalone `tools/nocturne-resource-monitor-agent` Cargo
  * package and a script for building target-specific helper binaries from that
  * manifest, the old src-tauri bin entry point is absent, the Tauri bundle
  * includes the helper resource directory, and release builds run the helper
@@ -41,7 +41,7 @@ describe("Resource Monitor agent packaging", () => {
     const buildScript = readFileSync(resolve("scripts/build-resource-monitor-agents.mjs"), "utf8");
     const validateScript = readFileSync(resolve("scripts/validate-helper-resources.mjs"), "utf8");
     const buildRs = readFileSync(resolve("src-tauri/build.rs"), "utf8");
-    const helperManifest = readFileSync(resolve("crates/nocturne-resource-monitor-agent/Cargo.toml"), "utf8");
+    const helperManifest = readFileSync(resolve("tools/nocturne-resource-monitor-agent/Cargo.toml"), "utf8");
 
     assert.equal(packageJson.scripts["build:resource-monitor-agents"], "node scripts/build-resource-monitor-agents.mjs");
     assert.ok(tauriConfig.bundle.resources.includes("resources/nocturne-resource-monitor-agent/**/*"));
@@ -49,7 +49,7 @@ describe("Resource Monitor agent packaging", () => {
     assert.match(helperManifest, /name\s*=\s*"nocturne-resource-monitor-agent"/);
     assert.doesNotMatch(helperManifest, /tauri/);
     assert.doesNotMatch(helperManifest, /nocturne_lib|nocturne\s*=/);
-    assert.match(buildScript, /resolve\(repoRoot, "crates", "nocturne-resource-monitor-agent", "Cargo\.toml"\)/);
+    assert.match(buildScript, /resolve\(repoRoot, "tools", "nocturne-resource-monitor-agent", "Cargo\.toml"\)/);
     assert.doesNotMatch(buildScript, /resolve\(srcTauri, "Cargo\.toml"\)/);
     assert.match(buildScript, /resolve\(helperCrate, "target", target\.triple, "release", target\.binary\)/);
     assert.match(releaseWorkflow, /pnpm build:resource-monitor-agents/);
@@ -153,7 +153,7 @@ describe("Resource Monitor agent packaging", () => {
   });
 
   it("keeps resource-monitor-agent GPU collection inside the helper process without shelling out to vendor commands", () => {
-    const helperSource = readFileSync(resolve("crates/nocturne-resource-monitor-agent/src/lib.rs"), "utf8");
+    const helperSource = readFileSync(resolve("tools/nocturne-resource-monitor-agent/src/lib.rs"), "utf8");
 
     assert.doesNotMatch(helperSource, /std::process::Command/);
     assert.doesNotMatch(helperSource, /nvidia-smi/);

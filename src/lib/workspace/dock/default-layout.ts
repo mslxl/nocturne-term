@@ -3,11 +3,13 @@ import type { WorkspaceLayoutSnapshot, ToolTabId, DisplaySlotId, DockGroupId } f
 export type DefaultWorkspaceToolIds = {
   filesToolId: ToolTabId;
   terminalToolId: ToolTabId;
+  terminalSessionsToolId: ToolTabId;
   resourcesToolId: ToolTabId;
   transfersToolId: ToolTabId;
   portsToolId: ToolTabId;
   filesSlotId: DisplaySlotId;
   terminalSlotId: DisplaySlotId;
+  terminalSessionsSlotId: DisplaySlotId;
   resourcesSlotId: DisplaySlotId;
   transfersSlotId: DisplaySlotId;
   portsSlotId: DisplaySlotId;
@@ -31,11 +33,13 @@ export function defaultWorkspaceToolIds(suffix: string): DefaultWorkspaceToolIds
   return {
     filesToolId: `tool-files-${suffix}`,
     terminalToolId: `tool-terminal-${suffix}`,
+    terminalSessionsToolId: `tool-terminal-sessions-${suffix}`,
     resourcesToolId: `tool-resources-${suffix}`,
     transfersToolId: `tool-transfers-${suffix}`,
     portsToolId: `tool-ports-${suffix}`,
     filesSlotId: `slot-files-${suffix}`,
     terminalSlotId: `slot-terminal-${suffix}`,
+    terminalSessionsSlotId: `slot-terminal-sessions-${suffix}`,
     resourcesSlotId: `slot-resources-${suffix}`,
     transfersSlotId: `slot-transfers-${suffix}`,
     portsSlotId: `slot-ports-${suffix}`,
@@ -59,6 +63,7 @@ export function defaultWorkspaceLayoutSnapshot(input: DefaultWorkspaceLayoutInpu
         ownedToolTabIds: [
           ids.filesToolId,
           ids.terminalToolId,
+          ids.terminalSessionsToolId,
           ids.resourcesToolId,
           ids.transfersToolId,
           ids.portsToolId,
@@ -93,9 +98,10 @@ export function defaultWorkspaceLayoutSnapshot(input: DefaultWorkspaceLayoutInpu
                   kind: "group",
                   id: ids.rightGroupId,
                   role: "side_panel",
-                  activeSlotId: ids.resourcesSlotId,
+                  activeSlotId: ids.terminalSessionsSlotId,
                   collapsed: false,
                   slots: [
+                    { kind: "owned", id: ids.terminalSessionsSlotId, toolTabId: ids.terminalSessionsToolId },
                     { kind: "owned", id: ids.resourcesSlotId, toolTabId: ids.resourcesToolId },
                     { kind: "owned", id: ids.transfersSlotId, toolTabId: ids.transfersToolId },
                   ],
@@ -128,6 +134,13 @@ export function defaultWorkspaceLayoutSnapshot(input: DefaultWorkspaceLayoutInpu
         ownerWorkspaceId: input.workspaceId,
         hostId: input.hostId,
         title: input.terminalTitle,
+      },
+      {
+        id: ids.terminalSessionsToolId,
+        kind: "terminal_sessions",
+        ownerWorkspaceId: input.workspaceId,
+        hostId: input.hostId,
+        title: "Terminals",
       },
       {
         id: ids.resourcesToolId,

@@ -2,7 +2,8 @@ import { defineConfig } from "vitest/config";
 import { sveltekit } from "@sveltejs/kit/vite";
 import Icons from "unplugin-icons/vite";
 
-const host = process.env.TAURI_DEV_HOST;
+const tauriDevHost = process.env.TAURI_DEV_HOST;
+const host = tauriDevHost ?? "127.0.0.1";
 const port = Number(process.env.NOCTURNE_DEV_PORT ?? 1420);
 
 // https://vite.dev/config/
@@ -17,11 +18,11 @@ export default defineConfig(async () => ({
   server: {
     port,
     strictPort: true,
-    host: host || false,
-    hmr: host
+    host,
+    hmr: tauriDevHost
       ? {
           protocol: "ws",
-          host,
+          host: tauriDevHost,
           port: 1421,
         }
       : undefined,

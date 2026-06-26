@@ -360,6 +360,7 @@
       icon: document.icon ? { ...document.icon } : null,
       files: document.files ? { ...document.files } : null,
       resources: document.resources ? { ...document.resources } : null,
+      terminal: document.terminal ? { ...document.terminal } : null,
       protocol: document.protocol,
       local: document.local ? { ...document.local } : null,
       ssh: document.ssh ? { ...document.ssh } : null,

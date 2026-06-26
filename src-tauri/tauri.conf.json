@@ -5,7 +5,7 @@
   "identifier": "com.mslxl.nocturne",
   "build": {
     "beforeDevCommand": "pnpm dev",
-    "devUrl": "http://localhost:1420",
+    "devUrl": "http://127.0.0.1:1420",
     "beforeBuildCommand": "pnpm build",
     "frontendDist": "../build"
   },
@@ -33,6 +33,7 @@
     "longDescription": "Nocturne is a cross-platform terminal app for macOS, Linux, Windows, Android, and iOS, built for a native-feeling experience with a clean interface and fast everyday use.",
     "licenseFile": "../LICENSE",
     "resources": [
+      "resources/nocturne-terminal-agent/**/*",
       "resources/nocturne-resource-monitor-agent/**/*",
       "resources/ripgrep/**/*"
     ],

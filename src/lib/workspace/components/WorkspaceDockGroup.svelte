@@ -49,6 +49,7 @@
   }: Props = $props();
 
   let localActiveSlotIdOverride = $state<string | null>(null);
+  let lastModelActiveSlotId = $state<string | null>(null);
 
   const localActiveSlotId = $derived.by(() => {
     activeSlotRevision;
@@ -62,6 +63,18 @@
   $effect(() => {
     if (!localActiveSlotIdOverride) return;
     if (!layout.slots.some((slot) => slot.id === localActiveSlotIdOverride)) {
+      localActiveSlotIdOverride = null;
+    }
+  });
+
+  $effect(() => {
+    if (lastModelActiveSlotId === null) {
+      lastModelActiveSlotId = activeSlotId;
+      return;
+    }
+    if (activeSlotId === lastModelActiveSlotId) return;
+    lastModelActiveSlotId = activeSlotId;
+    if (localActiveSlotIdOverride && localActiveSlotIdOverride !== activeSlotId) {
       localActiveSlotIdOverride = null;
     }
   });
@@ -104,6 +117,7 @@
   function compactToolKindTitle(kind: WorkspaceToolTab["kind"]) {
     if (kind === "files") return "Files";
     if (kind === "terminal") return "Terminal";
+    if (kind === "terminal_sessions") return "Terms";
     if (kind === "transfers") return "Transfers";
     if (kind === "resources") return "Resources";
     if (kind === "ports") return "Ports";
@@ -135,7 +149,7 @@
     {#each layout.slots as slot (slot.id)}
       {@const tool = slotTool(slot)}
       {@const fullTitle = slotTitle(slot)}
-      {@const displayTitle = groupCollapsed ? compactSlotTitle(slot, tool) : fullTitle}
+      {@const displayTitle = groupCollapsed || tabbarPlacement === "left" || tabbarPlacement === "right" ? compactSlotTitle(slot, tool) : fullTitle}
       <div
         class="tool-tab"
         class:active={isActive(slot)}
@@ -215,6 +229,7 @@
     height: 100%;
     display: grid;
     grid-template-rows: 31px minmax(0, 1fr);
+    box-sizing: border-box;
     overflow: hidden;
     border-right: 1px solid var(--app-border);
     border-bottom: 1px solid var(--app-border);
@@ -250,12 +265,21 @@
   .workspace-dock-group.tabbar-left .tool-tabbar,
   .workspace-dock-group.tabbar-right .tool-tabbar {
     min-height: 0;
+    height: 100%;
     flex-direction: column;
     align-items: stretch;
+    overflow: hidden;
     overflow-x: hidden;
-    overflow-y: auto;
+    overflow-y: hidden;
+    scrollbar-width: none;
+    overscroll-behavior: none;
     border-bottom: 0;
     padding: 5px 0;
+  }
+
+  .workspace-dock-group.tabbar-left .tool-tabbar::-webkit-scrollbar,
+  .workspace-dock-group.tabbar-right .tool-tabbar::-webkit-scrollbar {
+    display: none;
   }
 
   .workspace-dock-group.tabbar-left .tool-tabbar {
@@ -278,6 +302,7 @@
     display: flex;
     align-items: end;
     gap: 2px;
+    box-sizing: border-box;
     overflow-x: auto;
     overflow-y: hidden;
     border-bottom: 1px solid var(--app-border);
@@ -323,13 +348,17 @@
 
   .workspace-dock-group.tabbar-left .tool-tab,
   .workspace-dock-group.tabbar-right .tool-tab {
-    width: 31px;
+    flex: 0 1 auto;
+    width: 29px;
     max-width: none;
-    height: 120px;
-    min-height: 72px;
+    height: auto;
+    min-height: 0;
+    max-height: 124px;
     justify-content: center;
+    align-self: stretch;
     border: 1px solid transparent;
-    padding: 8px 0;
+    padding: 2px 0;
+    overflow: hidden;
     writing-mode: vertical-rl;
     text-orientation: mixed;
   }
@@ -344,8 +373,9 @@
 
   .workspace-dock-group.tabbar-left.collapsed .tool-tab,
   .workspace-dock-group.tabbar-right.collapsed .tool-tab {
-    width: 31px;
-    height: max(92px, min(132px, 24vh));
+    width: 29px;
+    height: auto;
+    min-height: 0;
   }
 
   .workspace-dock-group.tabbar-bottom.collapsed .tool-tab {
@@ -364,9 +394,9 @@
 
   .workspace-dock-group.tabbar-left .tool-close,
   .workspace-dock-group.tabbar-right .tool-close {
-    width: 22px;
-    height: 22px;
-    max-width: 22px;
+    width: 20px;
+    height: 20px;
+    max-width: 20px;
     writing-mode: horizontal-tb;
   }
 
@@ -459,6 +489,8 @@
   .tool-tab .tool-title {
     display: block;
     min-width: 0;
+    min-height: 0;
+    max-height: 100%;
     overflow: hidden;
     line-height: 1;
     text-overflow: ellipsis;
@@ -480,6 +512,7 @@
     height: 100%;
     display: grid;
     grid-template-rows: minmax(0, 1fr);
+    box-sizing: border-box;
     overflow: hidden;
   }
 
@@ -503,6 +536,7 @@
     height: 100%;
     display: grid;
     grid-template-rows: minmax(0, 1fr);
+    box-sizing: border-box;
     overflow: hidden;
   }
 

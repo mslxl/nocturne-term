@@ -51,6 +51,8 @@ Resource Monitor agent binaries are built before the app bundle and are uploaded
 nocturne-resource-monitor-agent-<tag>-<os>-<arch>[.exe]
 ```
 
+Terminal Agent binaries are built from `tools/nocturne-terminal-agent` before the app bundle and are cross-compiled in CI with `CGO_ENABLED=0` by default. That keeps the helper easy to produce for all shipped targets without pulling in platform C toolchains. If a future Windows ConPTY or PTY dependency genuinely needs CGO, the workflow must opt into that exception explicitly and the release docs must describe why the default changed.
+
 Files ripgrep helper binaries are prepared before the app bundle by one Ubuntu job because this step downloads upstream prebuilt archives instead of compiling target-specific code. The job prepares every supported target and uploads one workflow artifact containing all flat `rg-*` resource files for app bundle jobs to download. Nocturne does not upload `rg` binaries to its own GitHub Release because they are third-party versioned artifacts.
 
 If a bundled `rg` helper is missing at runtime, Nocturne may ask the user to download the official ripgrep archive from `BurntSushi/ripgrep` for the locked `RIPGREP_VERSION`, extract `rg` or `rg.exe`, then upload that extracted binary to the target Host according to the normal remote helper policy. The runtime downloader never uses `latest`, a Nocturne app tag, or a guessed ripgrep version.

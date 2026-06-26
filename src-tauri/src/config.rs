@@ -24,6 +24,7 @@ use crate::{
         ConnectionHostIcon, ConnectionHostSource, EffectiveConfigDocument, HostDirsInput,
         LocalConnectionConfig, MainConfigDocument, PortForwardRule, ProfileConfigDocument,
         ProfileDocumentInput, ProfileEntry, SshConnectionConfig, TabBarOrientation,
+        TerminalAgentMode,
     },
 };
 
@@ -801,11 +802,31 @@ fn default_local_host_document() -> ConnectionHostDocument {
         files: None,
         resources: None,
         port_forwards: Vec::new(),
+        terminal: None,
         protocol: crate::types::ConnectionProtocol::Local,
         local: Some(LocalConnectionConfig::default()),
         ssh: None,
         telnet: None,
     }
+}
+
+pub(crate) fn effective_terminal_agent_mode(host: &ConnectionHostEntry) -> TerminalAgentMode {
+    if matches!(host.source, ConnectionHostSource::Virtual)
+        && matches!(
+            host.document.protocol,
+            crate::types::ConnectionProtocol::Local
+        )
+    {
+        return TerminalAgentMode::Enabled;
+    }
+    if !matches!(host.source, ConnectionHostSource::User) || host.read_only {
+        return TerminalAgentMode::Disabled;
+    }
+    host.document
+        .terminal
+        .as_ref()
+        .and_then(|terminal| terminal.agent_mode)
+        .unwrap_or(TerminalAgentMode::Enabled)
 }
 
 fn virtual_default_local_host() -> ConnectionHostEntry {
@@ -1613,6 +1634,7 @@ fn parsed_to_openssh_hosts(parsed: ParsedOpenSshConfig, path: &Path) -> Vec<Conn
                     files: None,
                     resources: None,
                     port_forwards: Vec::new(),
+                    terminal: None,
                     protocol: crate::types::ConnectionProtocol::Ssh,
                     local: None,
                     ssh: Some(SshConnectionConfig {
@@ -2607,8 +2629,9 @@ mod tests {
     use super::*;
     use crate::error::ConfigError;
     use crate::types::{
-        ConnectionProtocol, PortForwardDirection, PortForwardNonLoopbackConfirmation,
-        PortForwardRule, PortForwardSemanticKey, TelnetConnectionConfig,
+        ConnectionProtocol, HostTerminalConfig, PortForwardDirection,
+        PortForwardNonLoopbackConfirmation, PortForwardRule, PortForwardSemanticKey,
+        TelnetConnectionConfig,
     };
     use tempfile::tempdir;
 
@@ -2685,6 +2708,7 @@ mod tests {
             files: None,
             resources: None,
             port_forwards: Vec::new(),
+            terminal: None,
             telnet: None,
         };
 
@@ -2755,6 +2779,7 @@ mod tests {
                 "127.0.0.1",
                 0,
             )],
+            terminal: None,
             protocol: ConnectionProtocol::Local,
             local: Some(LocalConnectionConfig::default()),
             ssh: None,
@@ -2860,6 +2885,103 @@ mod tests {
     }
 
     #[test]
+    fn user_connection_hosts_default_terminal_agent_mode_to_enabled() {
+        let document = ConnectionHostDocument {
+            version: 1,
+            id: "018f6eb3-6f91-7410-bc43-f927b2236d94".to_string(),
+            name: "Project Shell".to_string(),
+            folder: None,
+            icon: None,
+            files: None,
+            resources: None,
+            port_forwards: Vec::new(),
+            terminal: None,
+            protocol: ConnectionProtocol::Local,
+            local: Some(LocalConnectionConfig::default()),
+            ssh: None,
+            telnet: None,
+        };
+        let entry = ConnectionHostEntry {
+            id: document.id.clone(),
+            path: Some("Project.toml".to_string()),
+            source: ConnectionHostSource::User,
+            read_only: false,
+            document,
+            diagnostics: Vec::new(),
+        };
+
+        assert_eq!(
+            effective_terminal_agent_mode(&entry),
+            TerminalAgentMode::Enabled
+        );
+    }
+
+    #[test]
+    fn terminal_agent_mode_can_be_disabled_per_user_connection_host() {
+        let document = ConnectionHostDocument {
+            version: 1,
+            id: "018f6eb3-6f91-7410-bc43-f927b2236d94".to_string(),
+            name: "Project Shell".to_string(),
+            folder: None,
+            icon: None,
+            files: None,
+            resources: None,
+            port_forwards: Vec::new(),
+            terminal: Some(HostTerminalConfig {
+                agent_mode: Some(TerminalAgentMode::Disabled),
+            }),
+            protocol: ConnectionProtocol::Local,
+            local: Some(LocalConnectionConfig::default()),
+            ssh: None,
+            telnet: None,
+        };
+        let entry = ConnectionHostEntry {
+            id: document.id.clone(),
+            path: Some("Project.toml".to_string()),
+            source: ConnectionHostSource::User,
+            read_only: false,
+            document,
+            diagnostics: Vec::new(),
+        };
+
+        assert_eq!(
+            effective_terminal_agent_mode(&entry),
+            TerminalAgentMode::Disabled
+        );
+    }
+
+    #[test]
+    fn virtual_default_local_host_enables_terminal_agent_mode() {
+        let entry = virtual_default_local_host();
+
+        assert_eq!(
+            effective_terminal_agent_mode(&entry),
+            TerminalAgentMode::Enabled
+        );
+    }
+
+    #[test]
+    fn read_only_external_connection_hosts_force_terminal_agent_mode_disabled() {
+        let mut document = default_local_host_document();
+        document.terminal = Some(HostTerminalConfig {
+            agent_mode: Some(TerminalAgentMode::Enabled),
+        });
+        let entry = ConnectionHostEntry {
+            id: document.id.clone(),
+            path: Some("config".to_string()),
+            source: ConnectionHostSource::OpenSshConfig,
+            read_only: true,
+            document,
+            diagnostics: Vec::new(),
+        };
+
+        assert_eq!(
+            effective_terminal_agent_mode(&entry),
+            TerminalAgentMode::Disabled
+        );
+    }
+
+    #[test]
     fn connection_host_entries_derive_nested_folder_from_file_path() {
         let root = tempdir().expect("temp dir");
         let hosts_dir = root.path().join(DEFAULT_HOSTS_DIR);
@@ -2894,6 +3016,7 @@ mod tests {
             files: None,
             resources: None,
             port_forwards: Vec::new(),
+            terminal: None,
             telnet: None,
         };
         write_connection_host_document(
@@ -2941,6 +3064,7 @@ mod tests {
             files: None,
             resources: None,
             port_forwards: Vec::new(),
+            terminal: None,
             telnet: None,
         };
 
@@ -2966,6 +3090,7 @@ mod tests {
             files: None,
             resources: None,
             port_forwards: Vec::new(),
+            terminal: None,
             telnet: None,
         };
 
@@ -2991,6 +3116,7 @@ mod tests {
             files: None,
             resources: None,
             port_forwards: Vec::new(),
+            terminal: None,
             telnet: None,
         };
 
@@ -3034,6 +3160,7 @@ mod tests {
             files: None,
             resources: None,
             port_forwards: Vec::new(),
+            terminal: None,
             telnet: None,
         };
         let second = ConnectionHostDocument {
@@ -3050,6 +3177,7 @@ mod tests {
             files: None,
             resources: None,
             port_forwards: Vec::new(),
+            terminal: None,
             telnet: Some(TelnetConnectionConfig {
                 hostname: "192.0.2.1".to_string(),
                 port: 23,
@@ -3299,6 +3427,7 @@ mod tests {
             files: None,
             resources: None,
             port_forwards,
+            terminal: None,
             protocol: ConnectionProtocol::Ssh,
             local: None,
             ssh: Some(SshConnectionConfig {

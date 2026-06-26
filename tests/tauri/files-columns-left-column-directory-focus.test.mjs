@@ -44,7 +44,7 @@ test("files columns left-column directory focus remains switchable", { timeout: 
   const nativeDriverPort = process.env.TAURI_TEST_NATIVE_DRIVER_PORT ?? "";
   const driverPort = Number(process.env.TAURI_TEST_DRIVER_PORT ?? "4444");
   const driverUrl = `http://127.0.0.1:${driverPort}`;
-  const devUrl = process.env.TAURI_TEST_DEV_URL ?? "http://localhost:1420/";
+  const devUrl = process.env.TAURI_TEST_DEV_URL ?? "http://127.0.0.1:1420/";
   const devPort = Number(new URL(devUrl).port);
   const nativeDriverArgs = [
     ...(nativeDriverPath ? ["--native-driver", nativeDriverPath] : []),

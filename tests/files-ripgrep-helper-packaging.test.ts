@@ -32,6 +32,7 @@ describe("Files ripgrep helper packaging", () => {
     assert.equal(packageJson.scripts["prepare:ripgrep-helpers"], "node scripts/prepare-ripgrep-helpers.mjs");
     assert.ok(existsSync(resolve("scripts/prepare-ripgrep-helpers.mjs")));
     assert.deepEqual(tauriConfig.bundle.resources, [
+      "resources/nocturne-terminal-agent/**/*",
       "resources/nocturne-resource-monitor-agent/**/*",
       "resources/ripgrep/**/*",
     ]);

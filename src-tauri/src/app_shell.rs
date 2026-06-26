@@ -106,6 +106,7 @@ const PANE_PASTE: &str = "terminal.pane.paste";
 const PANE_RESET_TERMINAL: &str = "terminal.pane.reset_terminal";
 const PANE_TOGGLE_READ_ONLY: &str = "terminal.pane.toggle_read_only";
 const PANE_CHANGE_TAB_TITLE: &str = "terminal.pane.change_tab_title";
+const PANE_DETACH_SESSION: &str = "terminal.pane.detach_session";
 const PANE_CLOSE_PANE: &str = "terminal.pane.close_pane";
 const SETTINGS_NAVIGATE_EVENT: &str = "settings://navigate";
 const PANE_MENU_EVENT: &str = "terminal://pane-menu";
@@ -194,6 +195,7 @@ struct MenuText {
     resize_split: &'static str,
     bring_all_to_front: &'static str,
     reset_terminal: &'static str,
+    detach_session: &'static str,
     horizontal_tabs: &'static str,
     vertical_left_tabs: &'static str,
     vertical_right_tabs: &'static str,
@@ -268,6 +270,7 @@ fn menu_text(language: UiLanguage) -> MenuText {
             resize_split: "Resize Split",
             bring_all_to_front: "Bring All to Front",
             reset_terminal: "Reset Terminal",
+            detach_session: "Detach Session",
             horizontal_tabs: "Horizontal Tabs",
             vertical_left_tabs: "Vertical Tabs on Left",
             vertical_right_tabs: "Vertical Tabs on Right",
@@ -339,6 +342,7 @@ fn menu_text(language: UiLanguage) -> MenuText {
             resize_split: "调整分割大小",
             bring_all_to_front: "全部置于前面",
             reset_terminal: "重置终端",
+            detach_session: "分离 Session",
             horizontal_tabs: "水平标签",
             vertical_left_tabs: "左侧标签",
             vertical_right_tabs: "右侧标签",
@@ -1533,6 +1537,14 @@ pub(crate) fn show_pane_context_menu(app: AppHandle, input: PaneContextMenuInput
         None::<&str>,
     )
     .map_err(to_config_error)?;
+    let detach_session = MenuItem::with_id(
+        &app,
+        format!("{PANE_DETACH_SESSION}:{}", input.pane_id),
+        labels.detach_session,
+        input.can_detach,
+        None::<&str>,
+    )
+    .map_err(to_config_error)?;
     let close_pane = MenuItem::with_id(
         &app,
         format!("{PANE_CLOSE_PANE}:{}", input.pane_id),
@@ -1552,6 +1564,7 @@ pub(crate) fn show_pane_context_menu(app: AppHandle, input: PaneContextMenuInput
             &reset_terminal,
             &toggle_read_only,
             &change_tab_title,
+            &detach_session,
             &separator2,
             &close_pane,
         ],
@@ -2287,6 +2300,8 @@ fn emit_pane_menu_event<R: Runtime>(app: &AppHandle<R>, id: &str) -> Result<()> 
         (PaneMenuAction::ToggleReadOnly, pane_id)
     } else if let Some(pane_id) = id.strip_prefix(&format!("{PANE_CHANGE_TAB_TITLE}:")) {
         (PaneMenuAction::ChangeTabTitle, pane_id)
+    } else if let Some(pane_id) = id.strip_prefix(&format!("{PANE_DETACH_SESSION}:")) {
+        (PaneMenuAction::DetachSession, pane_id)
     } else if let Some(pane_id) = id.strip_prefix(&format!("{PANE_CLOSE_PANE}:")) {
         (PaneMenuAction::ClosePane, pane_id)
     } else {

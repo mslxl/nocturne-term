@@ -1,9 +1,10 @@
 use std::{
     collections::{BTreeMap, HashMap, VecDeque},
-    env,
-    io::{Read, Write},
+    env, fs,
+    io::{BufRead, BufReader, ErrorKind, Read, Write},
     net::{TcpListener, TcpStream},
     path::{Path, PathBuf},
+    process::Stdio,
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc::{self, Receiver, Sender},
@@ -15,17 +16,27 @@ use std::{
 
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use portable_pty::{native_pty_system, Child, ChildKiller, CommandBuilder, MasterPty, PtySize};
-use ssh2::{Channel, HashType, HostKeyType, Session};
-use tauri::{AppHandle, Emitter};
+use sha2::Digest;
+use ssh2::{Channel, FileStat, HashType, HostKeyType, OpenFlags, OpenType, Session, Sftp};
+use tauri::{AppHandle, Emitter, Manager};
+use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 
 use crate::{
     config::{
-        connection_host_by_id, effective_application_config, resolve_openssh_proxy_jump_chain,
-        ssh_known_hosts_path,
+        connection_host_by_id, effective_application_config, effective_terminal_agent_mode,
+        resolve_openssh_proxy_jump_chain, ssh_known_hosts_path,
     },
     error::{
         invalid_error, missing_error, ssh_workspace_challenge_error, terminal_error, ConfigError,
         Result,
+    },
+    files::{
+        connect_sftp_for_host, run_remote_command, shell_quote, SftpAuthScope, SftpConnection,
+    },
+    resources::{
+        build_info, detect_remote_resource_target, ResourceHelperBytesSource,
+        ResourceHelperDownloadPlan, ResourceHelperManifest, ResourceHelperPolicy,
+        ResourceHelperUploadPlan,
     },
     ssh_trust::{ssh_trust_target, SshTrustStore},
     terminal_schemes::{
@@ -33,16 +44,20 @@ use crate::{
         terminal_color_scheme_by_id,
     },
     types::{
-        ConnectionDiagnosticSeverity, ConnectionHostEntry, ConnectionHostSource,
-        ConnectionProtocol, CreateHostTerminalSessionInput, ExistingTerminalSessionInput,
-        LocalConnectionConfig, SshAuthTarget, SshConnectionConfig, SshCredentialChallenge,
-        SshCredentialInput, SshCredentialKind, SshHostKeyChallenge, SshHostKeyChallengeKind,
-        SshHostScopedChallenge, SshWorkspaceChallenge, TabBarOrientation,
-        TerminalColorSchemeVariant, TerminalCursorStyle, TerminalExitEvent, TerminalInput,
-        TerminalOutputBacklogInput, TerminalOutputEvent, TerminalPadding, TerminalRenderer,
-        TerminalSessionInfo, TerminalSessionOwnershipInput, TerminalSettings,
-        TerminalSettingsInput, TerminalSizeInput, TerminalTheme, TerminalTransportKind,
-        TerminalTransportState, TerminalTransportStateEvent, WorkspaceSshVerificationResponse,
+        AttachDetachedTerminalSessionInput, ConnectionDiagnosticSeverity, ConnectionHostEntry,
+        ConnectionHostSource, ConnectionProtocol, CreateHostTerminalSessionInput,
+        DeleteDetachedTerminalSessionInput, DetachedTerminalSessionsInput,
+        ExistingTerminalSessionInput, LocalConnectionConfig,
+        OpenDetachedTerminalSessionHistoryInput, RemoteResourceTargetArch, RemoteResourceTargetOs,
+        SshAuthTarget, SshConnectionConfig, SshCredentialChallenge, SshCredentialInput,
+        SshCredentialKind, SshHostKeyChallenge, SshHostKeyChallengeKind, SshHostScopedChallenge,
+        SshWorkspaceChallenge, TabBarOrientation, TerminalAgentMode, TerminalAgentSessionInfo,
+        TerminalColorSchemeVariant, TerminalCursorStyle, TerminalDetachInput,
+        TerminalDetachedSessionInfo, TerminalExitEvent, TerminalInput, TerminalOutputBacklogInput,
+        TerminalOutputEvent, TerminalPadding, TerminalRenderer, TerminalSessionInfo,
+        TerminalSessionOwnershipInput, TerminalSettings, TerminalSettingsInput, TerminalSizeInput,
+        TerminalTheme, TerminalTitleInput, TerminalTransportKind, TerminalTransportState,
+        TerminalTransportStateEvent, WorkspaceSshVerificationResponse,
     },
     workspace,
     workspace_ssh::{
@@ -59,10 +74,15 @@ const SSH_PENDING_WRITE_LIMIT: usize = 1024 * 1024;
 const SSH_WRITE_CHUNK_LIMIT: usize = 8192;
 const DEFAULT_TERMINAL_FONT_FAMILY: &str =
     "\"Maple Mono\", \"Symbols Nerd Font Mono\", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace";
+const TERMINAL_AGENT_VERSION: &str = env!("CARGO_PKG_VERSION");
+const TERMINAL_AGENT_GITHUB_REPOSITORY: &str = "mslxl/nocturne-term";
+const TERMINAL_AGENT_HTTP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 struct TerminalSession {
     backend: Mutex<TerminalBackend>,
     info: Mutex<TerminalSessionInfo>,
+    host_id: String,
+    reader_token: String,
     window_label: Mutex<String>,
     output_backlog: Mutex<Vec<u8>>,
     output_sequence: Mutex<u64>,
@@ -78,6 +98,82 @@ enum TerminalBackend {
     Ssh {
         commands: Sender<SshWorkerCommand>,
     },
+    Agent {
+        session_id: String,
+        helper_path: String,
+        agent_process: Option<std::process::Child>,
+        local_control: Option<Sender<LocalAgentControlCommand>>,
+        remote: Option<RemoteAgentBackend>,
+    },
+    AgentHistory {
+        registry_session_id: String,
+    },
+}
+
+struct DetachedTerminalRecord {
+    host_id: String,
+    info: TerminalDetachedSessionInfo,
+    session_info: TerminalSessionInfo,
+    session_id: String,
+    helper_path: String,
+    agent_process: Option<std::process::Child>,
+    remote: Option<RemoteAgentRuntime>,
+}
+
+#[derive(Clone)]
+struct RemoteAgentBackend {
+    commands: Sender<RemoteAgentCommand>,
+    live_control: Arc<Mutex<Option<Sender<LocalAgentControlCommand>>>>,
+    runtime: Arc<Mutex<Option<RemoteAgentRuntime>>>,
+}
+
+#[derive(Clone)]
+struct RemoteAgentRuntime {
+    helper_path: String,
+    target_os: RemoteResourceTargetOs,
+    agent_session_id: String,
+    worker_input: SshWorkerInput,
+}
+
+struct PreparedRemoteTerminalAgent {
+    runtime: RemoteAgentRuntime,
+    connection: SftpConnection,
+}
+
+enum RemoteAgentCommand {
+    Write(Vec<u8>, Sender<Result<TerminalAgentResponse>>),
+    Resize(PtySize, Sender<Result<TerminalAgentResponse>>),
+    Rename(String, Sender<Result<TerminalAgentResponse>>),
+    TitleChange(String, Sender<Result<TerminalAgentResponse>>),
+    Close(Sender<Result<TerminalAgentResponse>>),
+    Detach(Sender<Result<TerminalAgentResponse>>),
+    Delete(Sender<Result<TerminalAgentResponse>>),
+}
+
+struct LocalAgentControlCommand {
+    request: AgentProtocolRequest,
+    response: Sender<Result<TerminalAgentResponse>>,
+}
+
+#[derive(serde::Serialize)]
+struct AgentProtocolRequest {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    request_id: String,
+    name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    payload: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone)]
+enum TerminalAgentResponse {
+    Ok,
+    Error { message: String },
+}
+
+enum LocalGoAgentLaunchStatus {
+    Running,
+    Exited(GoAgentListedSession),
 }
 
 enum SshWorkerCommand {
@@ -95,6 +191,8 @@ enum SshPumpAction {
 struct TerminalState {
     next_id: AtomicU64,
     sessions: Mutex<HashMap<String, Arc<TerminalSession>>>,
+    detached_sessions: Mutex<HashMap<String, DetachedTerminalRecord>>,
+    agent_view_sizes: Mutex<HashMap<String, HashMap<String, PtySize>>>,
 }
 
 static TERMINAL_STATE: OnceLock<Arc<TerminalState>> = OnceLock::new();
@@ -611,6 +709,122 @@ fn build_terminal_command(
     command
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+struct GoTerminalAgentLaunchSpec {
+    version: u32,
+    session_id: String,
+    host_id: String,
+    title: String,
+    command: String,
+    args: Vec<String>,
+    cwd: Option<String>,
+    env: BTreeMap<String, String>,
+    cols: u16,
+    rows: u16,
+    pixel_width: u16,
+    pixel_height: u16,
+}
+
+fn build_go_terminal_agent_launch_spec(
+    session_id: &str,
+    host_id: &str,
+    title: &str,
+    settings: &TerminalSettings,
+    cwd_override: Option<&str>,
+    env_overrides: &BTreeMap<String, String>,
+    size: PtySize,
+) -> GoTerminalAgentLaunchSpec {
+    let (command, args) = if let Some(program) = &settings.command {
+        (program.clone(), settings.args.clone())
+    } else {
+        (default_terminal_program(), Vec::new())
+    };
+    let mut env = BTreeMap::new();
+    env.insert("TERM".to_string(), "xterm-256color".to_string());
+    env.insert("COLORTERM".to_string(), "truecolor".to_string());
+    env.insert("TERM_PROGRAM".to_string(), "Nocturne".to_string());
+    env.insert("NOCTURNE".to_string(), "1".to_string());
+    env.insert("NOCTURNE_IMAGE_PROTOCOL".to_string(), "iip".to_string());
+    env.insert("ITERM_SESSION_ID".to_string(), "nocturne".to_string());
+    env.extend(env_overrides.clone());
+    GoTerminalAgentLaunchSpec {
+        version: 1,
+        session_id: session_id.to_string(),
+        host_id: host_id.to_string(),
+        title: title.to_string(),
+        command,
+        args,
+        cwd: cwd_override
+            .map(ToOwned::to_owned)
+            .or_else(|| settings.cwd.clone()),
+        env,
+        cols: size.cols,
+        rows: size.rows,
+        pixel_width: size.pixel_width,
+        pixel_height: size.pixel_height,
+    }
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct GoAgentResponse {
+    #[serde(rename = "type")]
+    kind: String,
+    request_id: Option<String>,
+    ok: bool,
+    error: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct GoAgentEvent {
+    #[serde(rename = "type")]
+    kind: String,
+    event: Option<String>,
+    data: Option<String>,
+    exit: Option<GoAgentExitInfo>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct GoAgentExitInfo {
+    code: Option<u32>,
+    signal: Option<String>,
+    reason: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct GoAgentListLine {
+    #[serde(rename = "type")]
+    kind: String,
+    session: Option<GoAgentListedSession>,
+    count: Option<usize>,
+    error: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct GoAgentListedSession {
+    session_id: String,
+    host_id: String,
+    title: String,
+    command: String,
+    cwd: Option<String>,
+    cols: Option<u16>,
+    rows: Option<u16>,
+    pixel_width: Option<u16>,
+    pixel_height: Option<u16>,
+    status: String,
+    attached_count: Option<u32>,
+}
+
+fn default_terminal_program() -> String {
+    #[cfg(windows)]
+    {
+        env::var("ComSpec").unwrap_or_else(|_| "cmd.exe".to_string())
+    }
+    #[cfg(not(windows))]
+    {
+        env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string())
+    }
+}
+
 fn terminal_command_label(settings: &TerminalSettings) -> String {
     if let Some(command) = &settings.command {
         return command.clone();
@@ -630,6 +844,204 @@ fn remove_terminal_session(id: &str) {
     if let Ok(mut sessions) = state.sessions.lock() {
         sessions.remove(id);
     };
+    remove_agent_view_size(&state, id);
+}
+
+fn remove_agent_view_size(state: &TerminalState, view_session_id: &str) {
+    let Ok(mut sizes) = state.agent_view_sizes.lock() else {
+        return;
+    };
+    sizes.retain(|_, views| {
+        views.remove(view_session_id);
+        !views.is_empty()
+    });
+}
+
+fn record_agent_view_size(
+    state: &TerminalState,
+    registry_session_id: &str,
+    view_session_id: &str,
+    size: PtySize,
+) -> Result<PtySize> {
+    let mut sizes = state
+        .agent_view_sizes
+        .lock()
+        .map_err(|_| invalid_error("terminal agent view sizes lock poisoned"))?;
+    let views = sizes
+        .entry(registry_session_id.to_string())
+        .or_insert_with(HashMap::new);
+    views.insert(view_session_id.to_string(), size);
+    Ok(minimum_agent_view_size(views.values()))
+}
+
+fn minimum_agent_view_size<'a>(sizes: impl Iterator<Item = &'a PtySize>) -> PtySize {
+    let mut result = PtySize {
+        rows: u16::MAX,
+        cols: u16::MAX,
+        pixel_width: u16::MAX,
+        pixel_height: u16::MAX,
+    };
+    let mut saw_size = false;
+    for size in sizes {
+        saw_size = true;
+        result.cols = result.cols.min(size.cols);
+        result.rows = result.rows.min(size.rows);
+        result.pixel_width = result.pixel_width.min(size.pixel_width);
+        result.pixel_height = result.pixel_height.min(size.pixel_height);
+    }
+    if saw_size {
+        result
+    } else {
+        PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        }
+    }
+}
+
+fn next_terminal_session_id(state: &TerminalState) -> (u64, String) {
+    let session_number = state.next_id.fetch_add(1, Ordering::Relaxed) + 1;
+    (session_number, new_terminal_session_id())
+}
+
+fn new_terminal_session_id() -> String {
+    format!("term-{}", uuid::Uuid::new_v4().simple())
+}
+
+fn terminal_agent_response_result(response: TerminalAgentResponse) -> Result<()> {
+    match response {
+        TerminalAgentResponse::Ok => Ok(()),
+        TerminalAgentResponse::Error { message } => Err(terminal_error(message)),
+    }
+}
+
+fn new_agent_request_id() -> String {
+    format!("nocturne-{}", uuid::Uuid::new_v4())
+}
+
+fn agent_protocol_request(name: &str, payload: Option<serde_json::Value>) -> AgentProtocolRequest {
+    AgentProtocolRequest {
+        kind: "request",
+        request_id: new_agent_request_id(),
+        name: name.to_string(),
+        payload,
+    }
+}
+
+fn agent_write_request(bytes: &[u8]) -> AgentProtocolRequest {
+    agent_protocol_request(
+        "write",
+        Some(serde_json::json!({
+            "data": BASE64_STANDARD.encode(bytes),
+        })),
+    )
+}
+
+fn agent_resize_request(size: PtySize) -> AgentProtocolRequest {
+    agent_protocol_request(
+        "resize",
+        Some(serde_json::json!({
+            "cols": size.cols,
+            "rows": size.rows,
+            "pixel_width": size.pixel_width,
+            "pixel_height": size.pixel_height,
+        })),
+    )
+}
+
+fn agent_title_request(name: &str, title: &str) -> AgentProtocolRequest {
+    agent_protocol_request(
+        name,
+        Some(serde_json::json!({
+            "title": title,
+        })),
+    )
+}
+
+fn send_local_agent_control_request(
+    control: &Sender<LocalAgentControlCommand>,
+    request: AgentProtocolRequest,
+) -> Result<TerminalAgentResponse> {
+    let (response_tx, response_rx) = mpsc::channel();
+    control
+        .send(LocalAgentControlCommand {
+            request,
+            response: response_tx,
+        })
+        .map_err(|error| {
+            terminal_error(format!(
+                "failed to send terminal agent control request: {error}"
+            ))
+        })?;
+    response_rx.recv().map_err(|error| {
+        terminal_error(format!(
+            "terminal agent control request did not respond: {error}"
+        ))
+    })?
+}
+
+fn remote_agent_response(
+    backend: &RemoteAgentBackend,
+    build_command: impl FnOnce(Sender<Result<TerminalAgentResponse>>) -> RemoteAgentCommand,
+) -> Result<TerminalAgentResponse> {
+    let (response_tx, response_rx) = mpsc::channel();
+    backend
+        .commands
+        .send(build_command(response_tx))
+        .map_err(|error| terminal_error(format!("failed to send remote agent command: {error}")))?;
+    response_rx
+        .recv()
+        .map_err(|error| terminal_error(format!("remote agent command did not respond: {error}")))?
+}
+
+fn remote_agent_backend(runtime: RemoteAgentRuntime) -> RemoteAgentBackend {
+    let runtime_slot = Arc::new(Mutex::new(Some(runtime)));
+    let live_control = Arc::new(Mutex::new(None));
+    let (command_tx, command_rx) = mpsc::channel();
+    spawn_remote_agent_control_worker(runtime_slot.clone(), command_rx);
+    RemoteAgentBackend {
+        commands: command_tx,
+        live_control,
+        runtime: runtime_slot,
+    }
+}
+
+fn send_remote_agent_backend_request(
+    backend: &RemoteAgentBackend,
+    request: AgentProtocolRequest,
+    build_command: impl FnOnce(Sender<Result<TerminalAgentResponse>>) -> RemoteAgentCommand,
+) -> Result<TerminalAgentResponse> {
+    let live_control = backend
+        .live_control
+        .lock()
+        .map_err(|_| invalid_error("remote terminal agent live control lock poisoned"))?
+        .clone();
+    if let Some(control) = live_control {
+        send_local_agent_control_request(&control, request)
+    } else {
+        remote_agent_response(backend, build_command)
+    }
+}
+
+fn send_agent_backend_request(
+    session_id: &str,
+    helper_path: &str,
+    local_control: Option<&Sender<LocalAgentControlCommand>>,
+    remote: Option<&RemoteAgentBackend>,
+    remote_command: impl FnOnce(Sender<Result<TerminalAgentResponse>>) -> RemoteAgentCommand,
+    local_request: impl FnOnce() -> AgentProtocolRequest,
+    command_name: &str,
+    extra: &[(&str, &str)],
+) -> Result<TerminalAgentResponse> {
+    if let Some(remote) = remote {
+        send_remote_agent_backend_request(remote, local_request(), remote_command)
+    } else if let Some(control) = local_control {
+        send_local_agent_control_request(control, local_request())
+    } else {
+        run_local_go_agent_client(helper_path, session_id, command_name, extra)
+    }
 }
 
 fn kill_terminal_session(session: Arc<TerminalSession>) -> Result<()> {
@@ -639,7 +1051,63 @@ fn kill_terminal_session(session: Arc<TerminalSession>) -> Result<()> {
         TerminalBackend::Ssh { commands } => commands
             .send(SshWorkerCommand::Close)
             .map_err(|error| terminal_error(format!("failed to close ssh session: {error}"))),
+        TerminalBackend::Agent {
+            session_id,
+            helper_path,
+            agent_process,
+            local_control,
+            remote,
+        } => {
+            let response = send_agent_backend_request(
+                session_id,
+                helper_path,
+                local_control.as_ref(),
+                remote.as_ref(),
+                RemoteAgentCommand::Close,
+                || agent_protocol_request("close", None),
+                "close",
+                &[],
+            );
+            if let Some(child) = agent_process.as_mut() {
+                let _ = child.kill();
+            }
+            terminal_agent_response_result(response?)
+        }
+        TerminalBackend::AgentHistory { .. } => Ok(()),
     }
+}
+
+fn detach_agent_terminal_view(session: &Arc<TerminalSession>) -> Result<bool> {
+    let mut backend = session.backend.lock().unwrap();
+    let TerminalBackend::Agent {
+        session_id,
+        helper_path,
+        local_control,
+        remote,
+        ..
+    } = &mut *backend
+    else {
+        return Ok(false);
+    };
+    let response = send_agent_backend_request(
+        session_id,
+        helper_path,
+        local_control.as_ref(),
+        remote.as_ref(),
+        RemoteAgentCommand::Detach,
+        || agent_protocol_request("detach", None),
+        "detach",
+        &[],
+    )?;
+    terminal_agent_response_result(response)?;
+    Ok(true)
+}
+
+fn close_terminal_view_session(session: Arc<TerminalSession>) -> Result<()> {
+    if detach_agent_terminal_view(&session)? {
+        return Ok(());
+    }
+    kill_terminal_session(session)
 }
 
 pub(crate) fn close_terminal_sessions_for_window(window_label: &str) {
@@ -660,7 +1128,7 @@ pub(crate) fn close_terminal_sessions_for_window(window_label: &str) {
     };
 
     for (id, session) in sessions {
-        if let Err(error) = kill_terminal_session(session) {
+        if let Err(error) = close_terminal_view_session(session) {
             eprintln!("failed to close terminal session {id} for window {window_label}: {error}");
         }
         remove_terminal_session(&id);
@@ -746,6 +1214,1986 @@ fn spawn_terminal_waiter(app: AppHandle, session_id: String, mut child: Box<dyn 
     });
 }
 
+fn handle_go_agent_event_line(app: &AppHandle, session_id: &str, line: &str) -> Result<bool> {
+    if line.trim().is_empty() {
+        return Ok(true);
+    }
+    let event = serde_json::from_str::<GoAgentEvent>(line).map_err(terminal_error)?;
+    if event.kind != "event" {
+        return Ok(true);
+    }
+    match event.event.as_deref() {
+        Some("output") | Some("history") => {
+            let data = event
+                .data
+                .ok_or_else(|| terminal_error("terminal agent output event missing data"))?;
+            let bytes = BASE64_STANDARD.decode(data).map_err(terminal_error)?;
+            let sequence = push_output_backlog(session_id, &bytes);
+            let event = TerminalOutputEvent {
+                session_id: session_id.to_string(),
+                sequence: sequence.to_string(),
+                backlog: false,
+                data: BASE64_STANDARD.encode(bytes),
+            };
+            app.emit(TERMINAL_OUTPUT_EVENT, event)
+                .map_err(terminal_error)?;
+            Ok(true)
+        }
+        Some("exit") => {
+            let exit = event.exit.unwrap_or(GoAgentExitInfo {
+                code: None,
+                signal: None,
+                reason: None,
+            });
+            update_terminal_transport_state(app, session_id, TerminalTransportState::Disconnected);
+            emit_terminal_exit(
+                app,
+                session_id.to_string(),
+                exit.code,
+                exit.signal,
+                exit.reason.map(terminal_error),
+            );
+            Ok(false)
+        }
+        Some(_) | None => Ok(true),
+    }
+}
+
+fn handle_go_agent_response_line(
+    line: &str,
+    pending: &mut HashMap<String, Sender<Result<TerminalAgentResponse>>>,
+) -> Result<bool> {
+    if line.trim().is_empty() {
+        return Ok(true);
+    }
+    let Ok(response) = serde_json::from_str::<GoAgentResponse>(line) else {
+        return Ok(false);
+    };
+    if response.kind != "response" {
+        return Ok(false);
+    }
+    let Some(request_id) = response.request_id.as_deref() else {
+        return Ok(true);
+    };
+    if let Some(sender) = pending.remove(request_id) {
+        let _ = sender.send(go_agent_response_from_decoded(response));
+    }
+    Ok(true)
+}
+
+fn go_agent_response_from_decoded(response: GoAgentResponse) -> Result<TerminalAgentResponse> {
+    if response.kind != "response" {
+        return Err(terminal_error("terminal agent did not return a response"));
+    }
+    if response.ok {
+        Ok(TerminalAgentResponse::Ok)
+    } else {
+        Ok(TerminalAgentResponse::Error {
+            message: response
+                .error
+                .unwrap_or_else(|| "terminal agent request failed".to_string()),
+        })
+    }
+}
+
+fn write_agent_control_request(
+    writer: &mut dyn Write,
+    request: &AgentProtocolRequest,
+) -> Result<()> {
+    serde_json::to_writer(&mut *writer, request).map_err(terminal_error)?;
+    writer.write_all(b"\n").map_err(terminal_error)?;
+    writer.flush().map_err(terminal_error)
+}
+
+fn spawn_local_agent_control_writer(
+    mut writer: Box<dyn Write + Send>,
+    receiver: Receiver<LocalAgentControlCommand>,
+    pending: Arc<Mutex<HashMap<String, Sender<Result<TerminalAgentResponse>>>>>,
+) {
+    thread::spawn(move || {
+        for command in receiver {
+            let request_id = command.request.request_id.clone();
+            match pending.lock() {
+                Ok(mut guard) => {
+                    guard.insert(request_id.clone(), command.response.clone());
+                }
+                Err(_) => {
+                    let _ = command.response.send(Err(invalid_error(
+                        "terminal agent response map lock poisoned",
+                    )));
+                    continue;
+                }
+            }
+            if let Err(error) = write_agent_control_request(&mut writer, &command.request) {
+                if let Ok(mut guard) = pending.lock() {
+                    guard.remove(&request_id);
+                }
+                let _ = command.response.send(Err(error));
+                break;
+            }
+        }
+    });
+}
+
+fn spawn_local_go_agent_terminal_reader(
+    app: AppHandle,
+    view_session_id: String,
+    registry_session_id: String,
+    helper_path: String,
+    reader_token: String,
+) -> Sender<LocalAgentControlCommand> {
+    let (control_tx, control_rx) = mpsc::channel();
+    thread::spawn(move || {
+        let mut child = match std::process::Command::new(&helper_path)
+            .arg("client")
+            .arg("subscribe")
+            .arg("--session-id")
+            .arg(&registry_session_id)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+        {
+            Ok(child) => child,
+            Err(error) => {
+                update_terminal_transport_state(
+                    &app,
+                    &view_session_id,
+                    TerminalTransportState::Failed,
+                );
+                emit_terminal_exit(
+                    &app,
+                    view_session_id,
+                    None,
+                    Some(error.to_string()),
+                    Some(terminal_error(error.to_string())),
+                );
+                return;
+            }
+        };
+        let Some(stdin) = child.stdin.take() else {
+            update_terminal_transport_state(&app, &view_session_id, TerminalTransportState::Failed);
+            emit_terminal_exit(
+                &app,
+                view_session_id,
+                None,
+                Some("terminal agent client stdin was not piped".to_string()),
+                Some(terminal_error("terminal agent client stdin was not piped")),
+            );
+            terminate_terminal_agent_client(child);
+            return;
+        };
+        let Some(stdout) = child.stdout.take() else {
+            update_terminal_transport_state(&app, &view_session_id, TerminalTransportState::Failed);
+            emit_terminal_exit(
+                &app,
+                view_session_id,
+                None,
+                Some("terminal agent client stdout was not piped".to_string()),
+                Some(terminal_error("terminal agent client stdout was not piped")),
+            );
+            terminate_terminal_agent_client(child);
+            return;
+        };
+        let pending_responses: Arc<Mutex<HashMap<String, Sender<Result<TerminalAgentResponse>>>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        spawn_local_agent_control_writer(Box::new(stdin), control_rx, pending_responses.clone());
+        let run_reader = || {
+            update_terminal_transport_state(
+                &app,
+                &view_session_id,
+                TerminalTransportState::Connected,
+            );
+            let mut reader = BufReader::new(stdout);
+            loop {
+                let mut line = String::new();
+                let read = match reader.read_line(&mut line) {
+                    Ok(read) => read,
+                    Err(error) => {
+                        update_terminal_transport_state(
+                            &app,
+                            &view_session_id,
+                            TerminalTransportState::Failed,
+                        );
+                        emit_terminal_exit(
+                            &app,
+                            view_session_id,
+                            None,
+                            Some(error.to_string()),
+                            Some(terminal_error(error.to_string())),
+                        );
+                        return;
+                    }
+                };
+                if read == 0 {
+                    update_terminal_transport_state(
+                        &app,
+                        &view_session_id,
+                        TerminalTransportState::Disconnected,
+                    );
+                    return;
+                }
+                if !terminal_reader_token_matches(&view_session_id, &reader_token) {
+                    return;
+                }
+                match pending_responses.lock() {
+                    Ok(mut pending) => match handle_go_agent_response_line(&line, &mut pending) {
+                        Ok(true) => continue,
+                        Ok(false) => {}
+                        Err(error) => {
+                            update_terminal_transport_state(
+                                &app,
+                                &view_session_id,
+                                TerminalTransportState::Failed,
+                            );
+                            emit_terminal_exit(
+                                &app,
+                                view_session_id,
+                                None,
+                                Some(error.to_string()),
+                                Some(error),
+                            );
+                            return;
+                        }
+                    },
+                    Err(_) => {
+                        update_terminal_transport_state(
+                            &app,
+                            &view_session_id,
+                            TerminalTransportState::Failed,
+                        );
+                        emit_terminal_exit(
+                            &app,
+                            view_session_id,
+                            None,
+                            Some("terminal agent response map lock poisoned".to_string()),
+                            Some(invalid_error("terminal agent response map lock poisoned")),
+                        );
+                        return;
+                    }
+                }
+                match handle_go_agent_event_line(&app, &view_session_id, &line) {
+                    Ok(true) => {}
+                    Ok(false) => return,
+                    Err(error) => {
+                        update_terminal_transport_state(
+                            &app,
+                            &view_session_id,
+                            TerminalTransportState::Failed,
+                        );
+                        emit_terminal_exit(
+                            &app,
+                            view_session_id,
+                            None,
+                            Some(error.to_string()),
+                            Some(error),
+                        );
+                        return;
+                    }
+                }
+            }
+        };
+        run_reader();
+        terminate_terminal_agent_client(child);
+    });
+    control_tx
+}
+
+fn fail_all_remote_live_control_pending(
+    pending: &Arc<Mutex<HashMap<String, Sender<Result<TerminalAgentResponse>>>>>,
+    pending_writes: &mut VecDeque<u8>,
+    error: ConfigError,
+) {
+    pending_writes.clear();
+    let responses = match pending.lock() {
+        Ok(mut guard) => guard
+            .drain()
+            .map(|(_, response)| response)
+            .collect::<Vec<_>>(),
+        Err(_) => Vec::new(),
+    };
+    for response in responses {
+        let _ = response.send(Err(error.clone()));
+    }
+}
+
+fn poll_remote_agent_control_requests(
+    channel: &mut Channel,
+    receiver: &Receiver<LocalAgentControlCommand>,
+    pending: &Arc<Mutex<HashMap<String, Sender<Result<TerminalAgentResponse>>>>>,
+    pending_writes: &mut VecDeque<u8>,
+) -> Result<()> {
+    loop {
+        match receiver.try_recv() {
+            Ok(command) => {
+                let request_id = command.request.request_id.clone();
+                match pending.lock() {
+                    Ok(mut guard) => {
+                        guard.insert(request_id.clone(), command.response.clone());
+                    }
+                    Err(_) => {
+                        let _ = command.response.send(Err(invalid_error(
+                            "terminal agent response map lock poisoned",
+                        )));
+                        continue;
+                    }
+                }
+                let serialized_request = serialize_agent_control_request(&command.request)?;
+                if let Err(error) = queue_pending_bytes(pending_writes, &serialized_request) {
+                    fail_all_remote_live_control_pending(pending, pending_writes, error);
+                    return Err(terminal_error(
+                        "failed to queue remote terminal agent control request",
+                    ));
+                }
+                if let Err(error) = drain_remote_agent_pending_writes(channel, pending_writes) {
+                    fail_all_remote_live_control_pending(pending, pending_writes, error);
+                    return Err(terminal_error(
+                        "failed to write remote terminal agent control request",
+                    ));
+                }
+            }
+            Err(mpsc::TryRecvError::Empty) => return Ok(()),
+            Err(mpsc::TryRecvError::Disconnected) => {
+                return Err(terminal_error(
+                    "remote terminal agent live control channel disconnected",
+                ))
+            }
+        }
+    }
+}
+
+fn serialize_agent_control_request(request: &AgentProtocolRequest) -> Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    serde_json::to_writer(&mut bytes, request).map_err(terminal_error)?;
+    bytes.push(b'\n');
+    Ok(bytes)
+}
+
+fn drain_remote_agent_pending_writes(
+    channel: &mut dyn Write,
+    pending: &mut VecDeque<u8>,
+) -> Result<bool> {
+    let mut progressed = false;
+    for _ in 0..16 {
+        if pending.is_empty() {
+            break;
+        }
+        let write_len = pending.len().min(SSH_WRITE_CHUNK_LIMIT);
+        let written = {
+            let contiguous = pending.make_contiguous();
+            match channel.write(&contiguous[..write_len]) {
+                Ok(0) => break,
+                Ok(size) => size,
+                Err(error) if error.kind() == ErrorKind::WouldBlock => break,
+                Err(error) => return Err(terminal_error(error)),
+            }
+        };
+        pending.drain(..written);
+        progressed = true;
+    }
+    Ok(progressed)
+}
+
+fn terminate_terminal_agent_client(mut child: std::process::Child) {
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+fn spawn_local_go_agent_history_then_reader(
+    app: AppHandle,
+    view_session_id: String,
+    registry_session_id: String,
+    helper_path: String,
+    reader_token: String,
+) {
+    thread::spawn(move || {
+        match run_local_go_agent_client_output(&helper_path, &registry_session_id, "history", &[]) {
+            Ok(output) => {
+                for line in output.lines() {
+                    if !terminal_reader_token_matches(&view_session_id, &reader_token) {
+                        return;
+                    }
+                    if let Err(error) = handle_go_agent_event_line(&app, &view_session_id, line) {
+                        update_terminal_transport_state(
+                            &app,
+                            &view_session_id,
+                            TerminalTransportState::Failed,
+                        );
+                        emit_terminal_exit(
+                            &app,
+                            view_session_id,
+                            None,
+                            Some(error.to_string()),
+                            Some(error),
+                        );
+                        return;
+                    }
+                }
+            }
+            Err(error) => {
+                update_terminal_transport_state(
+                    &app,
+                    &view_session_id,
+                    TerminalTransportState::Failed,
+                );
+                emit_terminal_exit(
+                    &app,
+                    view_session_id,
+                    None,
+                    Some(error.to_string()),
+                    Some(error),
+                );
+                return;
+            }
+        }
+        if terminal_reader_token_matches(&view_session_id, &reader_token) {
+            spawn_local_go_agent_terminal_reader(
+                app,
+                view_session_id,
+                registry_session_id,
+                helper_path,
+                reader_token,
+            );
+        }
+    });
+}
+
+fn spawn_local_go_agent_history_reader(
+    app: AppHandle,
+    view_session_id: String,
+    registry_session_id: String,
+    helper_path: String,
+    reader_token: String,
+) {
+    thread::spawn(move || {
+        match run_local_go_agent_client_output(&helper_path, &registry_session_id, "history", &[]) {
+            Ok(output) => {
+                for line in output.lines() {
+                    if !terminal_reader_token_matches(&view_session_id, &reader_token) {
+                        return;
+                    }
+                    if let Err(error) = handle_go_agent_event_line(&app, &view_session_id, line) {
+                        update_terminal_transport_state(
+                            &app,
+                            &view_session_id,
+                            TerminalTransportState::Failed,
+                        );
+                        emit_terminal_exit(
+                            &app,
+                            view_session_id,
+                            None,
+                            Some(error.to_string()),
+                            Some(error),
+                        );
+                        return;
+                    }
+                }
+                update_terminal_transport_state(
+                    &app,
+                    &view_session_id,
+                    TerminalTransportState::Disconnected,
+                );
+            }
+            Err(error) => {
+                update_terminal_transport_state(
+                    &app,
+                    &view_session_id,
+                    TerminalTransportState::Failed,
+                );
+                emit_terminal_exit(
+                    &app,
+                    view_session_id,
+                    None,
+                    Some(error.to_string()),
+                    Some(error),
+                );
+            }
+        }
+    });
+}
+
+fn spawn_remote_agent_terminal_reader(
+    app: AppHandle,
+    session_id: String,
+    reader_token: String,
+    runtime: RemoteAgentRuntime,
+    live_control_slot: Arc<Mutex<Option<Sender<LocalAgentControlCommand>>>>,
+) -> Sender<LocalAgentControlCommand> {
+    let (control_tx, control_rx) = mpsc::channel();
+    if let Ok(mut slot) = live_control_slot.lock() {
+        *slot = Some(control_tx.clone());
+    }
+    thread::spawn(move || {
+        let pending_responses: Arc<Mutex<HashMap<String, Sender<Result<TerminalAgentResponse>>>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let exec = match connect_ssh_exec_session(&runtime.worker_input) {
+            Ok(exec) => exec,
+            Err(error) => {
+                update_terminal_transport_state(&app, &session_id, TerminalTransportState::Failed);
+                emit_terminal_exit(&app, session_id, None, Some(error.to_string()), Some(error));
+                return;
+            }
+        };
+        let command = go_terminal_agent_client_command(
+            runtime.target_os,
+            &runtime.helper_path,
+            &runtime.agent_session_id,
+            "subscribe",
+            &[],
+        );
+        exec.session.set_blocking(false);
+        let channel = match exec_channel(&exec.session, &command) {
+            Ok(channel) => channel,
+            Err(error) => {
+                update_terminal_transport_state(&app, &session_id, TerminalTransportState::Failed);
+                emit_terminal_exit(&app, session_id, None, Some(error.to_string()), Some(error));
+                return;
+            }
+        };
+        update_terminal_transport_state(&app, &session_id, TerminalTransportState::Connected);
+        let mut reader = BufReader::new(channel);
+        let mut pending_writes = VecDeque::new();
+        loop {
+            if let Err(error) = poll_remote_agent_control_requests(
+                reader.get_mut(),
+                &control_rx,
+                &pending_responses,
+                &mut pending_writes,
+            ) {
+                update_terminal_transport_state(&app, &session_id, TerminalTransportState::Failed);
+                emit_terminal_exit(&app, session_id, None, Some(error.to_string()), Some(error));
+                return;
+            }
+            if let Err(error) =
+                drain_remote_agent_pending_writes(reader.get_mut(), &mut pending_writes)
+            {
+                update_terminal_transport_state(&app, &session_id, TerminalTransportState::Failed);
+                emit_terminal_exit(&app, session_id, None, Some(error.to_string()), Some(error));
+                return;
+            }
+            let mut line = String::new();
+            let read = match reader.read_line(&mut line) {
+                Ok(read) => read,
+                Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(10));
+                    continue;
+                }
+                Err(error) => {
+                    update_terminal_transport_state(
+                        &app,
+                        &session_id,
+                        TerminalTransportState::Failed,
+                    );
+                    emit_terminal_exit(
+                        &app,
+                        session_id,
+                        None,
+                        Some(error.to_string()),
+                        Some(terminal_error(error.to_string())),
+                    );
+                    return;
+                }
+            };
+            if read == 0 {
+                update_terminal_transport_state(
+                    &app,
+                    &session_id,
+                    TerminalTransportState::Disconnected,
+                );
+                return;
+            }
+            if !terminal_reader_token_matches(&session_id, &reader_token) {
+                return;
+            }
+            match pending_responses.lock() {
+                Ok(mut pending) => match handle_go_agent_response_line(&line, &mut pending) {
+                    Ok(true) => continue,
+                    Ok(false) => {}
+                    Err(error) => {
+                        update_terminal_transport_state(
+                            &app,
+                            &session_id,
+                            TerminalTransportState::Failed,
+                        );
+                        emit_terminal_exit(
+                            &app,
+                            session_id,
+                            None,
+                            Some(error.to_string()),
+                            Some(error),
+                        );
+                        return;
+                    }
+                },
+                Err(_) => {
+                    update_terminal_transport_state(
+                        &app,
+                        &session_id,
+                        TerminalTransportState::Failed,
+                    );
+                    emit_terminal_exit(
+                        &app,
+                        session_id,
+                        None,
+                        Some("terminal agent response map lock poisoned".to_string()),
+                        Some(invalid_error("terminal agent response map lock poisoned")),
+                    );
+                    return;
+                }
+            }
+            match handle_go_agent_event_line(&app, &session_id, &line) {
+                Ok(true) => {}
+                Ok(false) => return,
+                Err(error) => {
+                    update_terminal_transport_state(
+                        &app,
+                        &session_id,
+                        TerminalTransportState::Failed,
+                    );
+                    emit_terminal_exit(
+                        &app,
+                        session_id,
+                        None,
+                        Some(error.to_string()),
+                        Some(error),
+                    );
+                    return;
+                }
+            }
+        }
+    });
+    control_tx
+}
+
+fn spawn_remote_go_agent_history_then_reader(
+    app: AppHandle,
+    session_id: String,
+    reader_token: String,
+    runtime: RemoteAgentRuntime,
+    live_control_slot: Arc<Mutex<Option<Sender<LocalAgentControlCommand>>>>,
+) {
+    thread::spawn(move || {
+        match run_remote_go_agent_client_output(
+            &runtime.worker_input,
+            runtime.target_os,
+            &runtime.helper_path,
+            &runtime.agent_session_id,
+            "history",
+            &[],
+        ) {
+            Ok(output) => {
+                for line in output.lines() {
+                    if !terminal_reader_token_matches(&session_id, &reader_token) {
+                        return;
+                    }
+                    if let Err(error) = handle_go_agent_event_line(&app, &session_id, line) {
+                        update_terminal_transport_state(
+                            &app,
+                            &session_id,
+                            TerminalTransportState::Failed,
+                        );
+                        emit_terminal_exit(
+                            &app,
+                            session_id,
+                            None,
+                            Some(error.to_string()),
+                            Some(error),
+                        );
+                        return;
+                    }
+                }
+            }
+            Err(error) => {
+                update_terminal_transport_state(&app, &session_id, TerminalTransportState::Failed);
+                emit_terminal_exit(&app, session_id, None, Some(error.to_string()), Some(error));
+                return;
+            }
+        }
+        if terminal_reader_token_matches(&session_id, &reader_token) {
+            spawn_remote_agent_terminal_reader(
+                app,
+                session_id,
+                reader_token,
+                runtime,
+                live_control_slot,
+            );
+        }
+    });
+}
+
+fn spawn_remote_go_agent_history_reader(
+    app: AppHandle,
+    view_session_id: String,
+    registry_session_id: String,
+    reader_token: String,
+    runtime: RemoteAgentRuntime,
+) {
+    thread::spawn(move || {
+        match run_remote_go_agent_client_output(
+            &runtime.worker_input,
+            runtime.target_os,
+            &runtime.helper_path,
+            &registry_session_id,
+            "history",
+            &[],
+        ) {
+            Ok(output) => {
+                for line in output.lines() {
+                    if !terminal_reader_token_matches(&view_session_id, &reader_token) {
+                        return;
+                    }
+                    if let Err(error) = handle_go_agent_event_line(&app, &view_session_id, line) {
+                        update_terminal_transport_state(
+                            &app,
+                            &view_session_id,
+                            TerminalTransportState::Failed,
+                        );
+                        emit_terminal_exit(
+                            &app,
+                            view_session_id,
+                            None,
+                            Some(error.to_string()),
+                            Some(error),
+                        );
+                        return;
+                    }
+                }
+                update_terminal_transport_state(
+                    &app,
+                    &view_session_id,
+                    TerminalTransportState::Disconnected,
+                );
+            }
+            Err(error) => {
+                update_terminal_transport_state(
+                    &app,
+                    &view_session_id,
+                    TerminalTransportState::Failed,
+                );
+                emit_terminal_exit(
+                    &app,
+                    view_session_id,
+                    None,
+                    Some(error.to_string()),
+                    Some(error),
+                );
+            }
+        }
+    });
+}
+
+fn spawn_remote_agent_control_worker(
+    runtime_slot: Arc<Mutex<Option<RemoteAgentRuntime>>>,
+    receiver: Receiver<RemoteAgentCommand>,
+) {
+    thread::spawn(move || {
+        for command in receiver {
+            let runtime = match runtime_slot.lock() {
+                Ok(guard) => guard.clone(),
+                Err(_) => None,
+            };
+            let response = remote_agent_command_response_sender(&command);
+            let Some(runtime) = runtime else {
+                let _ = response.send(Err(terminal_error("remote terminal agent is not ready")));
+                continue;
+            };
+            let result = send_remote_agent_command(&runtime, command);
+            let should_stop = result.is_err();
+            let _ = response.send(result);
+            if should_stop {
+                break;
+            }
+        }
+    });
+}
+
+fn send_remote_agent_command(
+    runtime: &RemoteAgentRuntime,
+    command: RemoteAgentCommand,
+) -> Result<TerminalAgentResponse> {
+    let mut extra = Vec::new();
+    let command_name = match &command {
+        RemoteAgentCommand::Write(bytes, _) => {
+            let data = BASE64_STANDARD.encode(bytes);
+            extra.push(("--data".to_string(), data));
+            "write"
+        }
+        RemoteAgentCommand::Resize(size, _) => {
+            extra.push(("--cols".to_string(), size.cols.to_string()));
+            extra.push(("--rows".to_string(), size.rows.to_string()));
+            extra.push(("--pixel-width".to_string(), size.pixel_width.to_string()));
+            extra.push(("--pixel-height".to_string(), size.pixel_height.to_string()));
+            "resize"
+        }
+        RemoteAgentCommand::Rename(title, _) => {
+            extra.push(("--title".to_string(), title.clone()));
+            "rename"
+        }
+        RemoteAgentCommand::TitleChange(title, _) => {
+            extra.push(("--title".to_string(), title.clone()));
+            "title_change"
+        }
+        RemoteAgentCommand::Close(_) => "close",
+        RemoteAgentCommand::Detach(_) => "detach",
+        RemoteAgentCommand::Delete(_) => "delete",
+    };
+    let extra_refs = extra
+        .iter()
+        .map(|(name, value)| (name.as_str(), value.as_str()))
+        .collect::<Vec<_>>();
+    let output = run_remote_go_agent_client(
+        &runtime.worker_input,
+        runtime.target_os,
+        &runtime.helper_path,
+        &runtime.agent_session_id,
+        command_name,
+        &extra_refs,
+    )?;
+    terminal_agent_response_result(output.clone())?;
+    Ok(output)
+}
+
+fn remote_agent_command_response_sender(
+    command: &RemoteAgentCommand,
+) -> Sender<Result<TerminalAgentResponse>> {
+    match command {
+        RemoteAgentCommand::Write(_, sender)
+        | RemoteAgentCommand::Resize(_, sender)
+        | RemoteAgentCommand::Rename(_, sender)
+        | RemoteAgentCommand::TitleChange(_, sender)
+        | RemoteAgentCommand::Close(sender)
+        | RemoteAgentCommand::Detach(sender)
+        | RemoteAgentCommand::Delete(sender) => sender.clone(),
+    }
+}
+
+fn local_terminal_agent_target() -> Result<(RemoteResourceTargetOs, RemoteResourceTargetArch)> {
+    let target_os = if cfg!(target_os = "windows") {
+        RemoteResourceTargetOs::Windows
+    } else if cfg!(target_os = "macos") {
+        RemoteResourceTargetOs::Macos
+    } else if cfg!(target_os = "linux") {
+        RemoteResourceTargetOs::Linux
+    } else {
+        return Err(invalid_error("local Terminal Agent OS is not supported"));
+    };
+    let target_arch = if cfg!(target_arch = "x86_64") {
+        RemoteResourceTargetArch::X86_64
+    } else if cfg!(target_arch = "aarch64") {
+        RemoteResourceTargetArch::Aarch64
+    } else if cfg!(all(target_arch = "arm", target_pointer_width = "32")) {
+        RemoteResourceTargetArch::Armv7
+    } else if cfg!(target_arch = "x86") {
+        RemoteResourceTargetArch::I686
+    } else {
+        return Err(invalid_error(
+            "local Terminal Agent architecture is not supported",
+        ));
+    };
+    Ok((target_os, target_arch))
+}
+
+fn local_terminal_agent_helper_path(app: &AppHandle) -> Result<String> {
+    let (target_os, target_arch) = local_terminal_agent_target()?;
+    let resource_path = terminal_agent_resource_path(target_os, target_arch);
+    let resource_dir = app.path().resource_dir().map_err(crate::error::io_error)?;
+    for path in terminal_agent_candidate_paths(&resource_dir, &resource_path) {
+        match fs::metadata(&path) {
+            Ok(metadata) if metadata.is_file() => return Ok(path.to_string_lossy().into_owned()),
+            Ok(_) => {
+                return Err(invalid_error(format!(
+                    "bundled Terminal Agent helper is not a file: {}",
+                    path.display()
+                )));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(crate::error::io_error(error)),
+        }
+    }
+    Err(terminal_error(format!(
+        "bundled Terminal Agent helper is missing for {}",
+        resource_path
+    )))
+}
+
+struct SshExecSession {
+    session: Session,
+    _jump_guards: Vec<thread::JoinHandle<()>>,
+}
+
+fn connect_ssh_exec_session(input: &SshWorkerInput) -> Result<SshExecSession> {
+    let mut jump_guards = Vec::new();
+    let tcp = if let Some(proxy_jump_chain) = input.proxy_jump_chain.as_deref() {
+        let chain = connect_proxy_jump_chain(input, proxy_jump_chain)?;
+        jump_guards = chain.guards;
+        chain.stream
+    } else if let Some(proxy_jump) = input.ssh.proxy_jump.as_deref() {
+        let jumps = parse_proxy_jump_chain(proxy_jump)?;
+        let chain = connect_proxy_jump_chain(input, &jumps)?;
+        jump_guards = chain.guards;
+        chain.stream
+    } else {
+        TcpStream::connect((ssh_network_hostname(&input.ssh.hostname), input.ssh.port))
+            .map_err(terminal_error)?
+    };
+    tcp.set_nodelay(true).map_err(terminal_error)?;
+    let mut session = Session::new().map_err(terminal_error)?;
+    session.set_tcp_stream(tcp);
+    session.handshake().map_err(terminal_error)?;
+    verify_ssh_host_key(&session, input)?;
+    authenticate_ssh_session(&session, input)?;
+    session.set_blocking(true);
+    Ok(SshExecSession {
+        session,
+        _jump_guards: jump_guards,
+    })
+}
+
+fn exec_channel(session: &Session, command: &str) -> Result<Channel> {
+    let mut channel = session.channel_session().map_err(terminal_error)?;
+    channel.exec(command).map_err(terminal_error)?;
+    Ok(channel)
+}
+
+fn run_remote_go_agent_client(
+    input: &SshWorkerInput,
+    target_os: RemoteResourceTargetOs,
+    helper_path: &str,
+    session_id: &str,
+    command_name: &str,
+    extra: &[(&str, &str)],
+) -> Result<TerminalAgentResponse> {
+    let exec = connect_ssh_exec_session(input)?;
+    run_remote_go_agent_client_on_session(
+        &exec.session,
+        target_os,
+        helper_path,
+        session_id,
+        command_name,
+        extra,
+    )
+}
+
+fn run_remote_go_agent_client_on_session(
+    session: &Session,
+    target_os: RemoteResourceTargetOs,
+    helper_path: &str,
+    session_id: &str,
+    command_name: &str,
+    extra: &[(&str, &str)],
+) -> Result<TerminalAgentResponse> {
+    let command =
+        go_terminal_agent_client_command(target_os, helper_path, session_id, command_name, extra);
+    let output = run_remote_command(session, &command)?;
+    if output.status != 0 {
+        return Err(terminal_error(format!(
+            "remote terminal agent client failed: {}",
+            output.stderr.trim()
+        )));
+    }
+    let line = output
+        .stdout
+        .lines()
+        .find(|line| !line.trim().is_empty() && line.contains(r#""type":"response""#))
+        .ok_or_else(|| terminal_error("remote terminal agent client did not return a response"))?;
+    go_agent_response_result(line)
+}
+
+fn run_remote_go_agent_client_output(
+    input: &SshWorkerInput,
+    target_os: RemoteResourceTargetOs,
+    helper_path: &str,
+    session_id: &str,
+    command_name: &str,
+    extra: &[(&str, &str)],
+) -> Result<String> {
+    let exec = connect_ssh_exec_session(input)?;
+    run_remote_go_agent_client_output_on_session(
+        &exec.session,
+        target_os,
+        helper_path,
+        session_id,
+        command_name,
+        extra,
+    )
+}
+
+fn run_remote_go_agent_client_output_on_session(
+    session: &Session,
+    target_os: RemoteResourceTargetOs,
+    helper_path: &str,
+    session_id: &str,
+    command_name: &str,
+    extra: &[(&str, &str)],
+) -> Result<String> {
+    let command =
+        go_terminal_agent_client_command(target_os, helper_path, session_id, command_name, extra);
+    let output = run_remote_command(session, &command)?;
+    if output.status != 0 {
+        return Err(terminal_error(format!(
+            "remote terminal agent client failed: {}",
+            output.stderr.trim()
+        )));
+    }
+    Ok(output.stdout)
+}
+
+fn run_remote_go_agent_list(
+    input: &SshWorkerInput,
+    target_os: RemoteResourceTargetOs,
+    helper_path: &str,
+    host_id: &str,
+) -> Result<Vec<GoAgentListedSession>> {
+    let exec = connect_ssh_exec_session(input)?;
+    run_remote_go_agent_list_on_session(&exec.session, target_os, helper_path, host_id)
+}
+
+fn run_remote_go_agent_list_on_session(
+    session: &Session,
+    target_os: RemoteResourceTargetOs,
+    helper_path: &str,
+    host_id: &str,
+) -> Result<Vec<GoAgentListedSession>> {
+    let command = go_terminal_agent_list_command(target_os, helper_path, host_id);
+    let output = run_remote_command(session, &command)?;
+    if output.status != 0 {
+        return Err(terminal_error(format!(
+            "remote terminal agent client list failed: {}",
+            output.stderr.trim()
+        )));
+    }
+    parse_go_agent_session_list(&output.stdout, host_id)
+}
+
+fn go_terminal_agent_client_command(
+    target_os: RemoteResourceTargetOs,
+    helper_path: &str,
+    session_id: &str,
+    command_name: &str,
+    extra: &[(&str, &str)],
+) -> String {
+    let mut args = vec![
+        "client".to_string(),
+        command_name.to_string(),
+        "--session-id".to_string(),
+        session_id.to_string(),
+    ];
+    for (name, value) in extra {
+        args.push((*name).to_string());
+        args.push((*value).to_string());
+    }
+    terminal_agent_managed_command(target_os, helper_path, &args)
+}
+
+fn go_terminal_agent_list_command(
+    target_os: RemoteResourceTargetOs,
+    helper_path: &str,
+    host_id: &str,
+) -> String {
+    terminal_agent_managed_command(
+        target_os,
+        helper_path,
+        &[
+            "client".to_string(),
+            "list".to_string(),
+            "--host-id".to_string(),
+            host_id.to_string(),
+        ],
+    )
+}
+
+fn terminal_agent_managed_command(
+    target_os: RemoteResourceTargetOs,
+    helper_path: &str,
+    args: &[String],
+) -> String {
+    let quoted_args = args
+        .iter()
+        .map(|arg| shell_quote(arg))
+        .collect::<Vec<_>>()
+        .join(" ");
+    match target_os {
+        RemoteResourceTargetOs::Windows => {
+            format!("& {} {}", shell_quote(helper_path), quoted_args)
+        }
+        RemoteResourceTargetOs::Linux | RemoteResourceTargetOs::Macos => {
+            format!("{} {}", shell_quote(helper_path), quoted_args)
+        }
+    }
+}
+
+fn go_agent_response_result(line: &str) -> Result<TerminalAgentResponse> {
+    let response = serde_json::from_str::<GoAgentResponse>(line).map_err(terminal_error)?;
+    if response.kind != "response" {
+        return Err(terminal_error("terminal agent did not return a response"));
+    }
+    if response.ok {
+        Ok(TerminalAgentResponse::Ok)
+    } else {
+        Ok(TerminalAgentResponse::Error {
+            message: response
+                .error
+                .unwrap_or_else(|| "terminal agent request failed".to_string()),
+        })
+    }
+}
+
+fn parse_go_agent_session_list(output: &str, host_id: &str) -> Result<Vec<GoAgentListedSession>> {
+    let mut sessions = Vec::new();
+    let mut saw_complete = false;
+    for line in output.lines().filter(|line| !line.trim().is_empty()) {
+        let entry = serde_json::from_str::<GoAgentListLine>(line).map_err(terminal_error)?;
+        match entry.kind.as_str() {
+            "session" => {
+                let session = entry.session.ok_or_else(|| {
+                    terminal_error("terminal agent list session line missing session")
+                })?;
+                if session.host_id != host_id {
+                    return Err(terminal_error(format!(
+                        "terminal agent list returned session for unexpected host_id {}",
+                        session.host_id
+                    )));
+                }
+                sessions.push(session);
+            }
+            "invalid" => {
+                return Err(terminal_error(format!(
+                    "terminal agent registry is invalid: {}",
+                    entry
+                        .error
+                        .unwrap_or_else(|| "unknown registry error".to_string())
+                )));
+            }
+            "complete" => {
+                saw_complete = true;
+                if let Some(count) = entry.count {
+                    if count != sessions.len() {
+                        return Err(terminal_error(format!(
+                            "terminal agent list count mismatch: expected {count}, got {}",
+                            sessions.len()
+                        )));
+                    }
+                }
+            }
+            other => {
+                return Err(terminal_error(format!(
+                    "terminal agent list returned unsupported line type {other}"
+                )));
+            }
+        }
+    }
+    if !saw_complete {
+        return Err(terminal_error(
+            "terminal agent client list did not return a complete line",
+        ));
+    }
+    Ok(sessions)
+}
+
+fn terminal_detached_info_from_go_session(
+    session: &GoAgentListedSession,
+) -> TerminalDetachedSessionInfo {
+    TerminalDetachedSessionInfo {
+        session_id: session.session_id.clone(),
+        title: session.title.clone(),
+        command: session.command.clone(),
+        cols: session.cols.unwrap_or(80),
+        rows: session.rows.unwrap_or(24),
+        detached: session.status != "exited",
+        attached_count: session.attached_count.unwrap_or(0),
+    }
+}
+
+fn terminal_session_info_from_go_session(session: &GoAgentListedSession) -> TerminalSessionInfo {
+    TerminalSessionInfo {
+        id: session.session_id.clone(),
+        title: session.title.clone(),
+        command: session.command.clone(),
+        cwd: session.cwd.clone(),
+        cols: session.cols.unwrap_or(80),
+        rows: session.rows.unwrap_or(24),
+        pixel_width: session.pixel_width.unwrap_or(0),
+        pixel_height: session.pixel_height.unwrap_or(0),
+        process_id: None,
+        transport: TerminalTransportKind::Agent,
+        transport_state: if session.status == "exited" {
+            TerminalTransportState::Disconnected
+        } else {
+            TerminalTransportState::Connected
+        },
+        agent: Some(TerminalAgentSessionInfo {
+            session_id: session.session_id.clone(),
+        }),
+    }
+}
+
+fn terminal_session_info_from_go_session_with_view_id(
+    session: &GoAgentListedSession,
+    view_session_id: String,
+) -> TerminalSessionInfo {
+    let mut info = terminal_session_info_from_go_session(session);
+    info.id = view_session_id;
+    info
+}
+
+fn terminal_history_session_info_from_go_session(
+    session: &GoAgentListedSession,
+    view_session_id: String,
+) -> TerminalSessionInfo {
+    let mut info = terminal_session_info_from_go_session_with_view_id(session, view_session_id);
+    info.transport_state = TerminalTransportState::Disconnected;
+    info
+}
+
+fn run_local_go_agent_client(
+    helper_path: &str,
+    session_id: &str,
+    command_name: &str,
+    extra: &[(&str, &str)],
+) -> Result<TerminalAgentResponse> {
+    let mut command = std::process::Command::new(helper_path);
+    command
+        .arg("client")
+        .arg(command_name)
+        .arg("--session-id")
+        .arg(session_id);
+    for (name, value) in extra {
+        command.arg(name).arg(value);
+    }
+    let output = command.output().map_err(terminal_error)?;
+    if !output.status.success() {
+        return Err(terminal_error(format!(
+            "terminal agent client failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    let stdout = String::from_utf8(output.stdout).map_err(terminal_error)?;
+    let line = stdout
+        .lines()
+        .find(|line| !line.trim().is_empty() && line.contains(r#""type":"response""#))
+        .ok_or_else(|| terminal_error("terminal agent client did not return a response"))?;
+    go_agent_response_result(line)
+}
+
+fn run_local_go_agent_client_output(
+    helper_path: &str,
+    session_id: &str,
+    command_name: &str,
+    extra: &[(&str, &str)],
+) -> Result<String> {
+    let mut command = std::process::Command::new(helper_path);
+    command
+        .arg("client")
+        .arg(command_name)
+        .arg("--session-id")
+        .arg(session_id);
+    for (name, value) in extra {
+        command.arg(name).arg(value);
+    }
+    let output = command.output().map_err(terminal_error)?;
+    if !output.status.success() {
+        return Err(terminal_error(format!(
+            "terminal agent client failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    String::from_utf8(output.stdout).map_err(terminal_error)
+}
+
+fn run_local_go_agent_list(helper_path: &str, host_id: &str) -> Result<Vec<GoAgentListedSession>> {
+    let output = std::process::Command::new(helper_path)
+        .arg("client")
+        .arg("list")
+        .arg("--host-id")
+        .arg(host_id)
+        .output()
+        .map_err(terminal_error)?;
+    if !output.status.success() {
+        return Err(terminal_error(format!(
+            "terminal agent client list failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    let stdout = String::from_utf8(output.stdout).map_err(terminal_error)?;
+    parse_go_agent_session_list(&stdout, host_id)
+}
+
+fn prepare_remote_terminal_agent_runtime(
+    app: &AppHandle,
+    host: &ConnectionHostEntry,
+    workspace_id: &str,
+    tool_tab_id: Option<&str>,
+    session_id: &str,
+    size: PtySize,
+    accept_new_host_key: bool,
+    update_changed_host_key: bool,
+    credential: Option<SshCredentialInput>,
+    save_credential: bool,
+) -> Result<PreparedRemoteTerminalAgent> {
+    let ssh = host
+        .document
+        .ssh
+        .clone()
+        .ok_or_else(|| invalid_error("ssh connection host requires ssh config"))?;
+    let username = default_ssh_username(&ssh)?;
+    let auth_target = connection_host_auth_target(
+        &host.id,
+        &host.document.name,
+        &username,
+        &ssh.hostname,
+        ssh.port,
+    );
+    let proxy_jump_chain = if matches!(host.source, ConnectionHostSource::OpenSshConfig) {
+        match (host.path.as_deref(), ssh.proxy_jump.as_deref()) {
+            (Some(path), Some(proxy_jump)) => Some(resolve_openssh_proxy_jump_chain(
+                Path::new(path),
+                proxy_jump,
+            )?),
+            _ => None,
+        }
+    } else {
+        None
+    };
+    let connection = connect_sftp_for_host(
+        app,
+        host,
+        SftpAuthScope {
+            workspace_id,
+            source_tool_tab_id: tool_tab_id,
+        },
+        accept_new_host_key,
+        update_changed_host_key,
+        credential.clone(),
+        save_credential,
+        session_id,
+    )?;
+    let detection = detect_remote_resource_target(&connection, host.document.resources.clone())?;
+    let (target_os, target_arch) = match detection {
+        crate::resources::RemoteResourceTargetDetection::Detected { os, arch, .. } => (os, arch),
+        crate::resources::RemoteResourceTargetDetection::Unknown { reason, .. } => {
+            return Err(terminal_error(format!(
+                "Terminal Agent target OS/architecture is unknown: {reason}"
+            )));
+        }
+    };
+    let helper_bytes = match load_terminal_agent_bytes_from_app(app, target_os, target_arch)? {
+        ResourceHelperBytesSource::Bundled(bytes) => bytes,
+        ResourceHelperBytesSource::DownloadRequired(plan) => {
+            download_terminal_agent_after_confirmation(app, &plan)?
+        }
+        ResourceHelperBytesSource::Unavailable { reason } => return Err(terminal_error(reason)),
+    };
+    let plan = plan_terminal_agent_upload(
+        &helper_bytes,
+        target_os,
+        target_arch,
+        TERMINAL_AGENT_VERSION,
+    )?;
+    match terminal_agent_helper_policy(app)? {
+        ResourceHelperPolicy::Never => {
+            return Err(terminal_error(
+                "remote helper policy is Never; Terminal Agent mode cannot start",
+            ));
+        }
+        ResourceHelperPolicy::Ask => {
+            if !confirm_terminal_agent_upload(app, host, &plan) {
+                return Err(terminal_error(
+                    "Terminal Agent helper upload was canceled by the user",
+                ));
+            }
+        }
+        ResourceHelperPolicy::Allow => {}
+    }
+    let home = remote_home_path_from_shell(&connection.session, target_os)?;
+    let helper_path = deploy_terminal_agent_helper(&connection, &plan, &home)?;
+    let worker_input = SshWorkerInput {
+        app: Some(app.clone()),
+        session_id: session_id.to_string(),
+        workspace_id: workspace_id.to_string(),
+        source_tool_tab_id: tool_tab_id.map(ToOwned::to_owned),
+        display_name: host.document.name.clone(),
+        auth_target,
+        ssh,
+        proxy_jump_chain,
+        username,
+        size,
+        trust_path: ssh_known_hosts_path(app)?,
+        accept_new_host_key,
+        update_changed_host_key,
+        credential,
+        save_credential,
+        verification_scope: SshVerificationScope::Workspace,
+    };
+    Ok(PreparedRemoteTerminalAgent {
+        runtime: RemoteAgentRuntime {
+            helper_path,
+            target_os,
+            agent_session_id: session_id.to_string(),
+            worker_input,
+        },
+        connection,
+    })
+}
+
+fn spawn_local_go_terminal_agent(
+    helper_path: &str,
+    launch_spec_json: &str,
+) -> Result<std::process::Child> {
+    let mut child = std::process::Command::new(helper_path)
+        .arg("daemon")
+        .arg("--launch-spec-stdin")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(terminal_error)?;
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| terminal_error("terminal agent daemon stdin was not piped"))?;
+    stdin
+        .write_all(launch_spec_json.as_bytes())
+        .map_err(terminal_error)?;
+    drop(stdin);
+    Ok(child)
+}
+
+fn wait_for_local_go_terminal_agent(
+    helper_path: &str,
+    host_id: &str,
+    session_id: &str,
+) -> Result<LocalGoAgentLaunchStatus> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let mut last_error = None;
+    while std::time::Instant::now() < deadline {
+        match run_local_go_agent_client(helper_path, session_id, "ping", &[]) {
+            Ok(TerminalAgentResponse::Ok) => return Ok(LocalGoAgentLaunchStatus::Running),
+            Ok(TerminalAgentResponse::Error { message }) => {
+                if let Some(session) =
+                    local_go_agent_exited_session(helper_path, host_id, session_id)?
+                {
+                    return Ok(LocalGoAgentLaunchStatus::Exited(session));
+                }
+                last_error = Some(terminal_error(message));
+            }
+            Err(error) => {
+                if let Some(session) =
+                    local_go_agent_exited_session(helper_path, host_id, session_id)?
+                {
+                    return Ok(LocalGoAgentLaunchStatus::Exited(session));
+                }
+                last_error = Some(error);
+            }
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    Err(last_error.unwrap_or_else(|| terminal_error("terminal agent did not start")))
+}
+
+fn local_go_agent_exited_session(
+    helper_path: &str,
+    host_id: &str,
+    session_id: &str,
+) -> Result<Option<GoAgentListedSession>> {
+    let session = run_local_go_agent_list(helper_path, host_id)?
+        .into_iter()
+        .find(|session| session.session_id == session_id && session.status == "exited");
+    Ok(session)
+}
+
+fn go_terminal_agent_launch_background_command(
+    target_os: RemoteResourceTargetOs,
+    helper_path: &str,
+    launch_spec_path: &str,
+) -> String {
+    match target_os {
+        RemoteResourceTargetOs::Windows => format!(
+            "Start-Process -WindowStyle Hidden -FilePath {} -ArgumentList @('daemon','--launch-spec-stdin') -RedirectStandardInput {}",
+            shell_quote(helper_path),
+            shell_quote(launch_spec_path)
+        ),
+        RemoteResourceTargetOs::Linux | RemoteResourceTargetOs::Macos => format!(
+            "nohup {} daemon --launch-spec-stdin < {} >/dev/null 2>&1 &",
+            shell_quote(helper_path),
+            shell_quote(launch_spec_path)
+        ),
+    }
+}
+
+fn wait_for_remote_go_terminal_agent(
+    session: &Session,
+    target_os: RemoteResourceTargetOs,
+    helper_path: &str,
+    session_id: &str,
+) -> Result<()> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let mut last_error = None;
+    while std::time::Instant::now() < deadline {
+        match run_remote_go_agent_client_on_session(
+            session,
+            target_os,
+            helper_path,
+            session_id,
+            "ping",
+            &[],
+        ) {
+            Ok(TerminalAgentResponse::Ok) => return Ok(()),
+            Ok(TerminalAgentResponse::Error { message }) => {
+                last_error = Some(terminal_error(message));
+            }
+            Err(error) => {
+                last_error = Some(error);
+            }
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    Err(last_error.unwrap_or_else(|| terminal_error("remote terminal agent did not start")))
+}
+
+fn load_terminal_agent_bytes_from_app(
+    app: &AppHandle,
+    target_os: RemoteResourceTargetOs,
+    target_arch: RemoteResourceTargetArch,
+) -> Result<ResourceHelperBytesSource> {
+    let resource_path = terminal_agent_resource_path(target_os, target_arch);
+    let resource_dir = app.path().resource_dir().map_err(crate::error::io_error)?;
+    for path in terminal_agent_candidate_paths(&resource_dir, &resource_path) {
+        match fs::read(&path) {
+            Ok(bytes) if !bytes.is_empty() => return Ok(ResourceHelperBytesSource::Bundled(bytes)),
+            Ok(_) => {
+                return Err(invalid_error(format!(
+                    "bundled Terminal Agent helper is empty: {}",
+                    path.display()
+                )));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(crate::error::io_error(error)),
+        }
+    }
+    match terminal_agent_download_plan(
+        TERMINAL_AGENT_GITHUB_REPOSITORY,
+        build_info().tag.as_deref(),
+        target_os,
+        target_arch,
+    ) {
+        Some(plan) => Ok(ResourceHelperBytesSource::DownloadRequired(plan)),
+        None => Ok(ResourceHelperBytesSource::Unavailable {
+            reason: "Bundled Terminal Agent helper is missing and this build has no release tag"
+                .to_string(),
+        }),
+    }
+}
+
+fn terminal_agent_download_plan(
+    github_repository: &str,
+    build_tag: Option<&str>,
+    target_os: RemoteResourceTargetOs,
+    target_arch: RemoteResourceTargetArch,
+) -> Option<ResourceHelperDownloadPlan> {
+    let tag = build_tag?.trim();
+    if tag.is_empty() {
+        return None;
+    }
+    let asset_name = format!(
+        "nocturne-terminal-agent-{}-{}-{}{}",
+        tag,
+        terminal_agent_target_os_dir(target_os),
+        terminal_agent_target_arch_dir(target_arch),
+        if target_os == RemoteResourceTargetOs::Windows {
+            ".exe"
+        } else {
+            ""
+        }
+    );
+    let url = format!(
+        "https://github.com/{}/releases/download/{}/{}",
+        github_repository.trim_matches('/'),
+        tag,
+        asset_name
+    );
+    Some(ResourceHelperDownloadPlan {
+        tag: tag.to_string(),
+        asset_name,
+        url: url.clone(),
+        prompt: format!(
+            "The bundled Terminal Agent helper is missing. Download nocturne-terminal-agent from the current app release tag {tag}?\n\n{url}"
+        ),
+    })
+}
+
+fn download_terminal_agent_after_confirmation(
+    app: &AppHandle,
+    plan: &crate::resources::ResourceHelperDownloadPlan,
+) -> Result<Vec<u8>> {
+    let allowed = app
+        .dialog()
+        .message(format!(
+            "The bundled Terminal Agent helper is missing. Download nocturne-terminal-agent from the current app release tag {}?\n\n{}",
+            plan.tag, plan.url
+        ))
+        .title("Download Terminal Agent helper")
+        .kind(MessageDialogKind::Warning)
+        .buttons(MessageDialogButtons::OkCancelCustom(
+            "Download".to_string(),
+            "Cancel".to_string(),
+        ))
+        .blocking_show();
+    if !allowed {
+        return Err(invalid_error(
+            "Terminal Agent helper download was canceled by the user",
+        ));
+    }
+    let client = reqwest::blocking::Client::builder()
+        .timeout(TERMINAL_AGENT_HTTP_TIMEOUT)
+        .build()
+        .map_err(|error| invalid_error(format!("terminal agent HTTP client failed: {error}")))?;
+    let response = client
+        .get(&plan.url)
+        .header(reqwest::header::USER_AGENT, "Nocturne Terminal Agent")
+        .send()
+        .map_err(|error| invalid_error(format!("terminal agent download failed: {error}")))?;
+    if !response.status().is_success() {
+        return Err(invalid_error(format!(
+            "terminal agent download returned HTTP {}",
+            response.status()
+        )));
+    }
+    let bytes = response
+        .bytes()
+        .map_err(|error| invalid_error(format!("terminal agent download read failed: {error}")))?;
+    if bytes.is_empty() {
+        return Err(invalid_error("downloaded Terminal Agent helper is empty"));
+    }
+    Ok(bytes.to_vec())
+}
+
+fn terminal_agent_candidate_paths(resource_dir: &Path, resource_path: &str) -> Vec<PathBuf> {
+    vec![
+        resource_dir.join(resource_path),
+        resource_dir.join("resources").join(resource_path),
+    ]
+}
+
+fn plan_terminal_agent_upload(
+    helper_bytes: &[u8],
+    target_os: RemoteResourceTargetOs,
+    target_arch: RemoteResourceTargetArch,
+    version: &str,
+) -> Result<ResourceHelperUploadPlan> {
+    if helper_bytes.is_empty() {
+        return Err(invalid_error("terminal agent helper bytes cannot be empty"));
+    }
+    let remote_directory = terminal_agent_remote_directory(version);
+    let helper_upload_path = format!(
+        "{}/{}",
+        remote_directory,
+        terminal_agent_executable_name(target_os)
+    );
+    let manifest_upload_path = format!("{remote_directory}/terminal-agent.manifest.json");
+    let helper_sha256 = hex::encode(sha2::Sha256::digest(helper_bytes));
+    let manifest = ResourceHelperManifest {
+        helper_name: "nocturne-terminal-agent".to_string(),
+        purpose: "Terminal detach and remote control".to_string(),
+        version: version.to_string(),
+        target_os,
+        target_arch,
+        upload_path: helper_upload_path.clone(),
+        sha256: helper_sha256.clone(),
+        capabilities: vec![
+            "terminal.pty".to_string(),
+            "terminal.detach".to_string(),
+            "terminal.input".to_string(),
+        ],
+    };
+    let manifest_json = serde_json::to_string(&manifest).map_err(|error| {
+        invalid_error(format!(
+            "terminal agent helper manifest JSON failed: {error}"
+        ))
+    })?;
+    Ok(ResourceHelperUploadPlan {
+        resource_path: terminal_agent_resource_path(target_os, target_arch),
+        manifest,
+        manifest_path: manifest_upload_path.clone(),
+        remote_directory,
+        helper_upload_path: helper_upload_path.clone(),
+        manifest_upload_path,
+        executable_mode: terminal_agent_executable_mode(target_os),
+        verify_sha256_command: terminal_agent_verify_sha256_command(
+            target_os,
+            &helper_upload_path,
+            &helper_sha256,
+        ),
+        launch_stream_command: terminal_agent_managed_command(
+            target_os,
+            &helper_upload_path,
+            &["--help".to_string()],
+        ),
+        helper_bytes: helper_bytes.to_vec(),
+        manifest_json,
+    })
+}
+
+fn deploy_terminal_agent_helper(
+    connection: &SftpConnection,
+    plan: &ResourceHelperUploadPlan,
+    home: &str,
+) -> Result<String> {
+    let sftp = connection.session.sftp().map_err(terminal_error)?;
+    let remote_directory = expand_remote_home(&plan.remote_directory, home);
+    let helper_upload_path = expand_remote_home(&plan.helper_upload_path, home);
+    let manifest_upload_path = expand_remote_home(&plan.manifest_upload_path, home);
+    ensure_terminal_sftp_directory(&sftp, Path::new(&remote_directory))?;
+    write_terminal_sftp_file(
+        &sftp,
+        Path::new(&helper_upload_path),
+        &plan.helper_bytes,
+        0o755,
+    )?;
+    write_terminal_sftp_file(
+        &sftp,
+        Path::new(&manifest_upload_path),
+        plan.manifest_json.as_bytes(),
+        0o644,
+    )?;
+    if let Some(mode) = plan.executable_mode {
+        sftp.setstat(
+            Path::new(&helper_upload_path),
+            FileStat {
+                size: None,
+                uid: None,
+                gid: None,
+                perm: Some(mode),
+                atime: None,
+                mtime: None,
+            },
+        )
+        .map_err(terminal_error)?;
+    }
+    let verify_command = plan
+        .verify_sha256_command
+        .replace(&plan.helper_upload_path, &helper_upload_path);
+    let output = run_remote_command(&connection.session, &verify_command)?;
+    if output.status != 0 {
+        return Err(invalid_error(format!(
+            "uploaded Terminal Agent helper hash verification failed: {}",
+            output.stderr.trim()
+        )));
+    }
+    Ok(helper_upload_path)
+}
+
+fn remote_home_path_from_shell(
+    session: &Session,
+    target_os: RemoteResourceTargetOs,
+) -> Result<String> {
+    let output = run_remote_command(session, remote_home_path_command(target_os))?;
+    let home = output.stdout.trim();
+    if home.is_empty() {
+        return Err(invalid_error("remote HOME is unavailable"));
+    }
+    Ok(home.to_string())
+}
+
+fn remote_home_path_command(target_os: RemoteResourceTargetOs) -> &'static str {
+    match target_os {
+        RemoteResourceTargetOs::Windows => "[Environment]::GetFolderPath('UserProfile')",
+        RemoteResourceTargetOs::Linux | RemoteResourceTargetOs::Macos => "printf %s \"$HOME\"",
+    }
+}
+
+fn expand_remote_home(path: &str, home: &str) -> String {
+    if path == "~" {
+        return home.to_string();
+    }
+    if let Some(rest) = path.strip_prefix("~/") {
+        return format!("{}/{}", home.trim_end_matches('/'), rest);
+    }
+    path.to_string()
+}
+
+fn ensure_terminal_sftp_directory(sftp: &Sftp, path: &Path) -> Result<()> {
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        current.push(component.as_os_str());
+        if current.as_os_str().is_empty() {
+            continue;
+        }
+        if sftp.stat(&current).is_ok() {
+            continue;
+        }
+        sftp.mkdir(&current, 0o755).map_err(terminal_error)?;
+    }
+    Ok(())
+}
+
+fn write_terminal_sftp_file(sftp: &Sftp, path: &Path, bytes: &[u8], mode: i32) -> Result<()> {
+    let mut file = sftp
+        .open_mode(
+            path,
+            OpenFlags::WRITE | OpenFlags::CREATE | OpenFlags::TRUNCATE,
+            mode,
+            OpenType::File,
+        )
+        .map_err(terminal_error)?;
+    file.write_all(bytes).map_err(terminal_error)
+}
+
+fn write_terminal_agent_launch_spec_file(
+    connection: &SftpConnection,
+    path: &str,
+    launch_spec_json: &str,
+) -> Result<()> {
+    let sftp = connection.session.sftp().map_err(terminal_error)?;
+    if let Some(parent) = Path::new(path).parent() {
+        ensure_terminal_sftp_directory(&sftp, parent)?;
+    }
+    write_terminal_sftp_file(&sftp, Path::new(path), launch_spec_json.as_bytes(), 0o600)
+}
+
+fn terminal_agent_resource_path(
+    target_os: RemoteResourceTargetOs,
+    target_arch: RemoteResourceTargetArch,
+) -> String {
+    format!(
+        "nocturne-terminal-agent/{}/{}/{}",
+        terminal_agent_target_os_dir(target_os),
+        terminal_agent_target_arch_dir(target_arch),
+        terminal_agent_executable_name(target_os)
+    )
+}
+
+fn terminal_agent_remote_directory(version: &str) -> String {
+    format!("~/.cache/nocturne/helpers/{version}/nocturne-terminal-agent")
+}
+
+fn terminal_agent_remote_launch_spec_path(
+    target_os: RemoteResourceTargetOs,
+    home: &str,
+    session_id: &str,
+) -> String {
+    match target_os {
+        RemoteResourceTargetOs::Windows => {
+            format!(
+                "{}\\AppData\\Local\\Temp\\nocturne-terminal-agent-{}.json",
+                home.trim_end_matches(['\\', '/']),
+                session_id
+            )
+        }
+        RemoteResourceTargetOs::Linux | RemoteResourceTargetOs::Macos => {
+            format!("/tmp/nocturne-terminal-agent-{session_id}.json")
+        }
+    }
+}
+
+fn remote_default_terminal_program(target_os: RemoteResourceTargetOs) -> String {
+    match target_os {
+        RemoteResourceTargetOs::Windows => "powershell.exe".to_string(),
+        RemoteResourceTargetOs::Linux | RemoteResourceTargetOs::Macos => "/bin/sh".to_string(),
+    }
+}
+
+fn terminal_agent_target_os_dir(target_os: RemoteResourceTargetOs) -> &'static str {
+    match target_os {
+        RemoteResourceTargetOs::Linux => "linux",
+        RemoteResourceTargetOs::Macos => "macos",
+        RemoteResourceTargetOs::Windows => "windows",
+    }
+}
+
+fn terminal_agent_target_arch_dir(target_arch: RemoteResourceTargetArch) -> &'static str {
+    match target_arch {
+        RemoteResourceTargetArch::X86_64 => "x86_64",
+        RemoteResourceTargetArch::Aarch64 => "aarch64",
+        RemoteResourceTargetArch::Armv7 => "armv7",
+        RemoteResourceTargetArch::I686 => "i686",
+    }
+}
+
+fn terminal_agent_executable_name(target_os: RemoteResourceTargetOs) -> &'static str {
+    match target_os {
+        RemoteResourceTargetOs::Windows => "nocturne-terminal-agent.exe",
+        RemoteResourceTargetOs::Linux | RemoteResourceTargetOs::Macos => "nocturne-terminal-agent",
+    }
+}
+
+fn terminal_agent_executable_mode(target_os: RemoteResourceTargetOs) -> Option<u32> {
+    match target_os {
+        RemoteResourceTargetOs::Windows => None,
+        RemoteResourceTargetOs::Linux | RemoteResourceTargetOs::Macos => Some(0o755),
+    }
+}
+
+fn terminal_agent_verify_sha256_command(
+    target_os: RemoteResourceTargetOs,
+    helper_path: &str,
+    expected_sha256: &str,
+) -> String {
+    match target_os {
+        RemoteResourceTargetOs::Linux => format!(
+            "printf '%s  %s\\n' '{expected_sha256}' '{helper_path}' | sha256sum -c -"
+        ),
+        RemoteResourceTargetOs::Macos => format!(
+            "test \"$(shasum -a 256 '{}' | awk '{{print $1}}')\" = '{}'",
+            helper_path, expected_sha256
+        ),
+        RemoteResourceTargetOs::Windows => format!(
+            "if ((Get-FileHash -Algorithm SHA256 '{}').Hash.ToLowerInvariant() -ne '{}') {{ exit 1 }}",
+            helper_path, expected_sha256
+        ),
+    }
+}
+
+fn terminal_agent_helper_policy(app: &AppHandle) -> Result<ResourceHelperPolicy> {
+    let config = effective_application_config(app)?;
+    let table = config
+        .as_table()
+        .ok_or_else(|| invalid_error("effective config must be a TOML table"))?;
+    let value = table
+        .get("files")
+        .and_then(toml::Value::as_table)
+        .and_then(|files| files.get("remote_helper_policy"))
+        .and_then(toml::Value::as_str)
+        .unwrap_or("ask");
+    match value {
+        "ask" => Ok(ResourceHelperPolicy::Ask),
+        "never" => Ok(ResourceHelperPolicy::Never),
+        "allow" => Ok(ResourceHelperPolicy::Allow),
+        _ => Err(invalid_error(
+            "files.remote_helper_policy must be ask, never, or allow",
+        )),
+    }
+}
+
+fn confirm_terminal_agent_upload(
+    app: &AppHandle,
+    host: &ConnectionHostEntry,
+    plan: &ResourceHelperUploadPlan,
+) -> bool {
+    app.dialog()
+        .message(format!(
+            "Upload nocturne-terminal-agent for detachable terminals?\n\nHost: {}\nTarget: {:?} {:?}\nPath: {}\nSHA-256: {}",
+            host.document.name,
+            plan.manifest.target_os,
+            plan.manifest.target_arch,
+            plan.helper_upload_path,
+            plan.manifest.sha256
+        ))
+        .title("Upload Terminal Agent helper")
+        .kind(MessageDialogKind::Warning)
+        .buttons(MessageDialogButtons::OkCancelCustom(
+            "Upload".to_string(),
+            "Cancel".to_string(),
+        ))
+        .blocking_show()
+}
+
+fn terminal_reader_token_matches(session_id: &str, reader_token: &str) -> bool {
+    let Ok(session) = session_by_id(session_id) else {
+        return false;
+    };
+    session.reader_token == reader_token
+}
+
 fn update_terminal_transport_state(
     app: &AppHandle,
     session_id: &str,
@@ -785,6 +3233,7 @@ fn emit_terminal_exit(
     );
 }
 
+#[derive(Clone)]
 pub(crate) struct SshWorkerInput {
     pub(crate) app: Option<AppHandle>,
     pub(crate) session_id: String,
@@ -1945,19 +4394,262 @@ pub(crate) fn create_host_terminal_session(
         input.pixel_width,
         input.pixel_height,
     )?;
-    let host_id = workspace::owned_workspace_tool_host(
+    let host_id = workspace::owned_workspace_tool_host_for_kinds(
         &app,
         &input.workspace_id,
         &input.tool_tab_id,
-        crate::types::WorkspaceToolKind::Terminal,
+        &[
+            crate::types::WorkspaceToolKind::Terminal,
+            crate::types::WorkspaceToolKind::TerminalSessions,
+        ],
     )?;
     let host = connection_host_by_id(&app, &host_id)?;
     validate_connection_host_for_terminal(&host)?;
+    if matches!(
+        effective_terminal_agent_mode(&host),
+        TerminalAgentMode::Enabled
+    ) {
+        return create_agent_host_terminal_session(app, input, host, size);
+    }
     match host.document.protocol {
         ConnectionProtocol::Local => create_local_host_terminal_session(app, input, host, size),
         ConnectionProtocol::Ssh => create_ssh_host_terminal_session(app, input, host, size),
         ConnectionProtocol::Telnet => Err(invalid_error("telnet sessions are not implemented yet")),
     }
+}
+
+fn create_agent_host_terminal_session(
+    app: AppHandle,
+    input: CreateHostTerminalSessionInput,
+    host: ConnectionHostEntry,
+    size: PtySize,
+) -> Result<TerminalSessionInfo> {
+    match host.document.protocol {
+        ConnectionProtocol::Local => {
+            create_local_agent_host_terminal_session(app, input, host, size)
+        }
+        ConnectionProtocol::Ssh => create_ssh_agent_host_terminal_session(app, input, host, size),
+        ConnectionProtocol::Telnet => Err(invalid_error(
+            "Terminal Agent mode is not supported for telnet hosts",
+        )),
+    }
+}
+
+fn create_local_agent_host_terminal_session(
+    app: AppHandle,
+    input: CreateHostTerminalSessionInput,
+    host: ConnectionHostEntry,
+    size: PtySize,
+) -> Result<TerminalSessionInfo> {
+    let config = effective_application_config(&app)?;
+    let mut settings = terminal_settings_from_config(&app, &config, input.resolved_theme)?;
+    let mut env_overrides = terminal_env_from_config(&config)?;
+    let local = host
+        .document
+        .local
+        .clone()
+        .ok_or_else(|| invalid_error("local connection host requires local config"))?;
+    apply_local_host_config(&mut settings, &local);
+    env_overrides.extend(local.env);
+    let command_label = terminal_command_label(&settings);
+    let state = terminal_state();
+    let (session_number, id) = next_terminal_session_id(&state);
+    let title = format!("Session {session_number}");
+    let spec = build_go_terminal_agent_launch_spec(
+        &id,
+        &host.id,
+        &title,
+        &settings,
+        input.cwd.as_deref(),
+        &env_overrides,
+        size,
+    );
+    let spec_json = serde_json::to_string(&spec).map_err(terminal_error)?;
+    let helper_path = local_terminal_agent_helper_path(&app)?;
+    let mut agent_process = Some(spawn_local_go_terminal_agent(&helper_path, &spec_json)?);
+    let launch_status = wait_for_local_go_terminal_agent(&helper_path, &host.id, &id)?;
+    let reader_token = uuid::Uuid::new_v4().to_string();
+    let info = match &launch_status {
+        LocalGoAgentLaunchStatus::Running => TerminalSessionInfo {
+            id: id.clone(),
+            title,
+            command: command_label,
+            cwd: input.cwd.or(settings.cwd),
+            cols: input.cols,
+            rows: input.rows,
+            pixel_width: input.pixel_width,
+            pixel_height: input.pixel_height,
+            process_id: None,
+            transport: TerminalTransportKind::Agent,
+            transport_state: TerminalTransportState::Connected,
+            agent: Some(TerminalAgentSessionInfo {
+                session_id: id.clone(),
+            }),
+        },
+        LocalGoAgentLaunchStatus::Exited(listed) => {
+            terminal_history_session_info_from_go_session(listed, id.clone())
+        }
+    };
+    let backend = match launch_status {
+        LocalGoAgentLaunchStatus::Running => TerminalBackend::Agent {
+            session_id: id.clone(),
+            helper_path: helper_path.clone(),
+            agent_process: agent_process.take(),
+            local_control: None,
+            remote: None,
+        },
+        LocalGoAgentLaunchStatus::Exited(_) => {
+            if let Some(mut child) = agent_process.take() {
+                let _ = child.wait();
+            }
+            TerminalBackend::AgentHistory {
+                registry_session_id: id.clone(),
+            }
+        }
+    };
+    let session = Arc::new(TerminalSession {
+        backend: Mutex::new(backend),
+        info: Mutex::new(info.clone()),
+        host_id: host.id.clone(),
+        reader_token: reader_token.clone(),
+        window_label: Mutex::new(input.window_label),
+        output_backlog: Mutex::new(Vec::new()),
+        output_sequence: Mutex::new(0),
+        output_backlog_start_sequence: Mutex::new(0),
+    });
+    {
+        let mut sessions = state.sessions.lock().unwrap();
+        sessions.insert(id.clone(), session.clone());
+    }
+    let should_spawn_live_reader = matches!(
+        &*session.backend.lock().unwrap(),
+        TerminalBackend::Agent { .. }
+    );
+    if should_spawn_live_reader {
+        let local_control =
+            spawn_local_go_agent_terminal_reader(app, id.clone(), id, helper_path, reader_token);
+        if let Ok(mut backend) = session.backend.lock() {
+            if let TerminalBackend::Agent {
+                local_control: slot,
+                ..
+            } = &mut *backend
+            {
+                *slot = Some(local_control);
+            }
+        }
+    } else {
+        spawn_local_go_agent_history_reader(app, id.clone(), id, helper_path, reader_token);
+    }
+    Ok(info)
+}
+
+fn create_ssh_agent_host_terminal_session(
+    app: AppHandle,
+    input: CreateHostTerminalSessionInput,
+    host: ConnectionHostEntry,
+    size: PtySize,
+) -> Result<TerminalSessionInfo> {
+    let config = effective_application_config(&app)?;
+    let mut settings = terminal_settings_from_config(&app, &config, input.resolved_theme)?;
+    let env_overrides = terminal_env_from_config(&config)?;
+    let state = terminal_state();
+    let (session_number, id) = next_terminal_session_id(&state);
+    let prepared = prepare_remote_terminal_agent_runtime(
+        &app,
+        &host,
+        &input.workspace_id,
+        Some(&input.tool_tab_id),
+        &id,
+        size,
+        input.accept_new_host_key,
+        input.update_changed_host_key,
+        input.credential.clone(),
+        input.save_credential,
+    )?;
+    let runtime = prepared.runtime;
+    if settings.command.is_none() {
+        settings.command = Some(remote_default_terminal_program(runtime.target_os));
+    }
+    let command_label = terminal_command_label(&settings);
+    let title = format!("Session {session_number}");
+    let spec = build_go_terminal_agent_launch_spec(
+        &id,
+        &host.id,
+        &title,
+        &settings,
+        input.cwd.as_deref(),
+        &env_overrides,
+        size,
+    );
+    let spec_json = serde_json::to_string(&spec).map_err(terminal_error)?;
+    let home = remote_home_path_from_shell(&prepared.connection.session, runtime.target_os)?;
+    let launch_spec_path = terminal_agent_remote_launch_spec_path(runtime.target_os, &home, &id);
+    write_terminal_agent_launch_spec_file(&prepared.connection, &launch_spec_path, &spec_json)?;
+    let launch = go_terminal_agent_launch_background_command(
+        runtime.target_os,
+        &runtime.helper_path,
+        &launch_spec_path,
+    );
+    let launch_output = run_remote_command(&prepared.connection.session, &launch)?;
+    if launch_output.status != 0 {
+        return Err(terminal_error(format!(
+            "failed to start remote Terminal Agent: {}",
+            launch_output.stderr.trim()
+        )));
+    }
+    wait_for_remote_go_terminal_agent(
+        &prepared.connection.session,
+        runtime.target_os,
+        &runtime.helper_path,
+        &id,
+    )?;
+    let remote_backend = remote_agent_backend(runtime.clone());
+    let reader_token = uuid::Uuid::new_v4().to_string();
+    let info = TerminalSessionInfo {
+        id: id.clone(),
+        title,
+        command: command_label,
+        cwd: input.cwd.or(settings.cwd),
+        cols: input.cols,
+        rows: input.rows,
+        pixel_width: input.pixel_width,
+        pixel_height: input.pixel_height,
+        process_id: None,
+        transport: TerminalTransportKind::Agent,
+        transport_state: TerminalTransportState::Connected,
+        agent: Some(TerminalAgentSessionInfo {
+            session_id: id.clone(),
+        }),
+    };
+    let session = Arc::new(TerminalSession {
+        backend: Mutex::new(TerminalBackend::Agent {
+            session_id: id.clone(),
+            helper_path: runtime.helper_path.clone(),
+            agent_process: None,
+            local_control: None,
+            remote: Some(remote_backend.clone()),
+        }),
+        info: Mutex::new(info.clone()),
+        host_id: host.id.clone(),
+        reader_token: reader_token.clone(),
+        window_label: Mutex::new(input.window_label),
+        output_backlog: Mutex::new(Vec::new()),
+        output_sequence: Mutex::new(0),
+        output_backlog_start_sequence: Mutex::new(0),
+    });
+    state
+        .sessions
+        .lock()
+        .map_err(|_| invalid_error("terminal sessions lock poisoned"))?
+        .insert(id.clone(), session);
+    spawn_remote_agent_terminal_reader(
+        app,
+        id,
+        reader_token,
+        runtime,
+        remote_backend.live_control.clone(),
+    );
+    Ok(info)
 }
 
 fn create_local_host_terminal_session(
@@ -1986,8 +4678,7 @@ fn create_local_host_terminal_session(
     let process_id = child.process_id();
     let killer = child.clone_killer();
     let state = terminal_state();
-    let session_number = state.next_id.fetch_add(1, Ordering::Relaxed) + 1;
-    let id = format!("term-{session_number}");
+    let (session_number, id) = next_terminal_session_id(&state);
     let session = Arc::new(TerminalSession {
         backend: Mutex::new(TerminalBackend::Local {
             master: pair.master,
@@ -2006,7 +4697,10 @@ fn create_local_host_terminal_session(
             process_id,
             transport: TerminalTransportKind::Local,
             transport_state: TerminalTransportState::Connected,
+            agent: None,
         }),
+        host_id: host.id.clone(),
+        reader_token: uuid::Uuid::new_v4().to_string(),
         window_label: Mutex::new(input.window_label),
         output_backlog: Mutex::new(Vec::new()),
         output_sequence: Mutex::new(0),
@@ -2056,8 +4750,7 @@ fn create_ssh_host_terminal_session(
     );
     let trust_path = ssh_known_hosts_path(&app)?;
     let state = terminal_state();
-    let session_number = state.next_id.fetch_add(1, Ordering::Relaxed) + 1;
-    let id = format!("term-{session_number}");
+    let (_session_number, id) = next_terminal_session_id(&state);
     let worker = SshWorkerInput {
         app: Some(app.clone()),
         session_id: id.clone(),
@@ -2093,7 +4786,10 @@ fn create_ssh_host_terminal_session(
             process_id: None,
             transport: TerminalTransportKind::Ssh,
             transport_state: TerminalTransportState::Resolving,
+            agent: None,
         }),
+        host_id: host.id.clone(),
+        reader_token: uuid::Uuid::new_v4().to_string(),
         window_label: Mutex::new(input.window_label),
         output_backlog: Mutex::new(Vec::new()),
         output_sequence: Mutex::new(0),
@@ -2129,6 +4825,748 @@ pub(crate) fn transfer_terminal_sessions_to_window(
         *window_label = input.window_label.clone();
     }
     Ok(())
+}
+
+#[tauri::command]
+#[specta::specta]
+pub(crate) fn detach_terminal_session(
+    input: TerminalDetachInput,
+) -> Result<TerminalDetachedSessionInfo> {
+    let session = session_by_id(&input.session_id)?;
+    let info = session.info.lock().unwrap().clone();
+    if info.agent.is_none() {
+        return Err(invalid_error(
+            "terminal detach requires an agent-backed terminal session",
+        ));
+    }
+    let mut backend = session.backend.lock().unwrap();
+    let TerminalBackend::Agent {
+        session_id,
+        helper_path,
+        agent_process,
+        local_control,
+        remote,
+    } = &mut *backend
+    else {
+        return Err(invalid_error(
+            "terminal detach requires an agent-backed terminal session",
+        ));
+    };
+    let detach_response = send_agent_backend_request(
+        session_id,
+        helper_path,
+        local_control.as_ref(),
+        remote.as_ref(),
+        RemoteAgentCommand::Detach,
+        || agent_protocol_request("detach", None),
+        "detach",
+        &[],
+    )?;
+    terminal_agent_response_result(detach_response)?;
+    let detached = TerminalDetachedSessionInfo {
+        session_id: session_id.clone(),
+        title: info.title.clone(),
+        command: info.command.clone(),
+        cols: info.cols,
+        rows: info.rows,
+        detached: true,
+        attached_count: 0,
+    };
+    let record = DetachedTerminalRecord {
+        host_id: session.host_id.clone(),
+        info: detached.clone(),
+        session_info: info,
+        session_id: session_id.clone(),
+        helper_path: helper_path.clone(),
+        agent_process: agent_process.take(),
+        remote: remote
+            .as_ref()
+            .and_then(|backend| backend.runtime.lock().ok().and_then(|guard| guard.clone())),
+    };
+    let state = terminal_state();
+    state
+        .detached_sessions
+        .lock()
+        .map_err(|_| invalid_error("terminal detached sessions lock poisoned"))?
+        .insert(session_id.clone(), record);
+    drop(backend);
+    remove_terminal_session(&input.session_id);
+    Ok(detached)
+}
+
+#[tauri::command]
+#[specta::specta]
+pub(crate) fn list_detached_terminal_sessions(
+    app: AppHandle,
+    input: DetachedTerminalSessionsInput,
+) -> Result<Vec<TerminalDetachedSessionInfo>> {
+    let host_id = workspace::owned_workspace_tool_host_for_kinds(
+        &app,
+        &input.workspace_id,
+        &input.tool_tab_id,
+        &[
+            crate::types::WorkspaceToolKind::Terminal,
+            crate::types::WorkspaceToolKind::TerminalSessions,
+        ],
+    )?;
+    let host = connection_host_by_id(&app, &host_id)?;
+    let mut merged = Vec::new();
+    if matches!(host.document.protocol, ConnectionProtocol::Local) {
+        if matches!(
+            effective_terminal_agent_mode(&host),
+            TerminalAgentMode::Enabled
+        ) {
+            let helper_path = local_terminal_agent_helper_path(&app)?;
+            for session in run_local_go_agent_list(&helper_path, &host_id)? {
+                merged.push(terminal_detached_info_from_go_session(&session));
+            }
+        }
+    } else if matches!(host.document.protocol, ConnectionProtocol::Ssh)
+        && matches!(
+            effective_terminal_agent_mode(&host),
+            TerminalAgentMode::Enabled
+        )
+    {
+        let prepared = prepare_remote_terminal_agent_runtime(
+            &app,
+            &host,
+            &input.workspace_id,
+            Some(&input.tool_tab_id),
+            "terminal-agent-list",
+            PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 800,
+                pixel_height: 600,
+            },
+            false,
+            false,
+            None,
+            false,
+        )?;
+        for session in run_remote_go_agent_list(
+            &prepared.runtime.worker_input,
+            prepared.runtime.target_os,
+            &prepared.runtime.helper_path,
+            &host_id,
+        )? {
+            merged.push(terminal_detached_info_from_go_session(&session));
+        }
+    }
+    let state = terminal_state();
+    let sessions = state
+        .detached_sessions
+        .lock()
+        .map_err(|_| invalid_error("terminal detached sessions lock poisoned"))?;
+    for info in sessions
+        .values()
+        .filter(|record| record.host_id == host_id)
+        .map(|record| record.info.clone())
+    {
+        if let Some(existing) = merged
+            .iter_mut()
+            .find(|session| session.session_id == info.session_id)
+        {
+            *existing = info;
+        } else {
+            merged.push(info);
+        }
+    }
+    Ok(merged)
+}
+
+#[tauri::command]
+#[specta::specta]
+pub(crate) fn attach_detached_terminal_session(
+    app: AppHandle,
+    input: AttachDetachedTerminalSessionInput,
+) -> Result<TerminalSessionInfo> {
+    let host_id = workspace::owned_workspace_tool_host_for_kinds(
+        &app,
+        &input.workspace_id,
+        &input.tool_tab_id,
+        &[
+            crate::types::WorkspaceToolKind::Terminal,
+            crate::types::WorkspaceToolKind::TerminalSessions,
+        ],
+    )?;
+    let state = terminal_state();
+    let record = match state
+        .detached_sessions
+        .lock()
+        .map_err(|_| invalid_error("terminal detached sessions lock poisoned"))?
+        .remove(&input.detached_session_id)
+    {
+        Some(record) => record,
+        None => {
+            return attach_registry_terminal_session(app, input, host_id);
+        }
+    };
+    if record.host_id != host_id {
+        state
+            .detached_sessions
+            .lock()
+            .map_err(|_| invalid_error("terminal detached sessions lock poisoned"))?
+            .insert(input.detached_session_id.clone(), record);
+        return Err(invalid_error(
+            "detached terminal session belongs to a different host",
+        ));
+    }
+    let mut session_info = record.session_info;
+    session_info.transport_state = TerminalTransportState::Connected;
+    session_info.agent = Some(TerminalAgentSessionInfo {
+        session_id: record.session_id.clone(),
+    });
+    let session_id = session_info.id.clone();
+    let helper_path = record.helper_path;
+    let daemon_session_id = record.session_id;
+    let registry_session_id = daemon_session_id.clone();
+    let mut remote_runtime = record.remote;
+    if let Some(runtime) = remote_runtime.as_mut() {
+        runtime.worker_input.workspace_id = input.workspace_id.clone();
+        runtime.worker_input.source_tool_tab_id = Some(input.tool_tab_id.clone());
+        runtime.agent_session_id = daemon_session_id.clone();
+    }
+    let remote_backend = remote_runtime.clone().map(remote_agent_backend);
+    let remote_live_control = remote_backend
+        .as_ref()
+        .map(|backend| backend.live_control.clone());
+    let reader_token = uuid::Uuid::new_v4().to_string();
+    let session = Arc::new(TerminalSession {
+        backend: Mutex::new(TerminalBackend::Agent {
+            session_id: daemon_session_id,
+            helper_path: helper_path.clone(),
+            agent_process: record.agent_process,
+            local_control: None,
+            remote: remote_backend,
+        }),
+        info: Mutex::new(session_info.clone()),
+        host_id,
+        reader_token: reader_token.clone(),
+        window_label: Mutex::new(input.window_label),
+        output_backlog: Mutex::new(Vec::new()),
+        output_sequence: Mutex::new(0),
+        output_backlog_start_sequence: Mutex::new(0),
+    });
+    state
+        .sessions
+        .lock()
+        .map_err(|_| invalid_error("terminal sessions lock poisoned"))?
+        .insert(session_id.clone(), session.clone());
+    if let (Some(runtime), Some(live_control)) = (remote_runtime, remote_live_control) {
+        spawn_remote_agent_terminal_reader(app, session_id, reader_token, runtime, live_control);
+    } else {
+        let local_control = spawn_local_go_agent_terminal_reader(
+            app,
+            session_id,
+            registry_session_id,
+            helper_path,
+            reader_token,
+        );
+        if let Ok(mut backend) = session.backend.lock() {
+            if let TerminalBackend::Agent {
+                local_control: slot,
+                ..
+            } = &mut *backend
+            {
+                *slot = Some(local_control);
+            }
+        }
+    }
+    Ok(session_info)
+}
+
+#[tauri::command]
+#[specta::specta]
+pub(crate) fn open_detached_terminal_session_history(
+    app: AppHandle,
+    input: OpenDetachedTerminalSessionHistoryInput,
+) -> Result<TerminalSessionInfo> {
+    let host_id = workspace::owned_workspace_tool_host_for_kinds(
+        &app,
+        &input.workspace_id,
+        &input.tool_tab_id,
+        &[
+            crate::types::WorkspaceToolKind::Terminal,
+            crate::types::WorkspaceToolKind::TerminalSessions,
+        ],
+    )?;
+    let host = connection_host_by_id(&app, &host_id)?;
+    if !matches!(
+        effective_terminal_agent_mode(&host),
+        TerminalAgentMode::Enabled
+    ) {
+        return Err(invalid_error(
+            "terminal agent mode is disabled for this host",
+        ));
+    }
+    let (listed, helper_path, remote_runtime) = match host.document.protocol {
+        ConnectionProtocol::Local => {
+            let helper_path = local_terminal_agent_helper_path(&app)?;
+            let listed = run_local_go_agent_list(&helper_path, &host_id)?
+                .into_iter()
+                .find(|session| session.session_id == input.detached_session_id)
+                .ok_or_else(|| {
+                    missing_error(format!(
+                        "detached terminal session {} not found",
+                        input.detached_session_id
+                    ))
+                })?;
+            (listed, helper_path, None)
+        }
+        ConnectionProtocol::Ssh => {
+            let prepared = prepare_remote_terminal_agent_runtime(
+                &app,
+                &host,
+                &input.workspace_id,
+                Some(&input.tool_tab_id),
+                "terminal-agent-history",
+                PtySize {
+                    rows: 24,
+                    cols: 80,
+                    pixel_width: 800,
+                    pixel_height: 600,
+                },
+                false,
+                false,
+                None,
+                false,
+            )?;
+            let listed = run_remote_go_agent_list_on_session(
+                &prepared.connection.session,
+                prepared.runtime.target_os,
+                &prepared.runtime.helper_path,
+                &host_id,
+            )?
+            .into_iter()
+            .find(|session| session.session_id == input.detached_session_id)
+            .ok_or_else(|| {
+                missing_error(format!(
+                    "detached terminal session {} not found",
+                    input.detached_session_id
+                ))
+            })?;
+            (
+                listed,
+                prepared.runtime.helper_path.clone(),
+                Some(prepared.runtime),
+            )
+        }
+        ConnectionProtocol::Telnet => {
+            return Err(invalid_error(
+                "Terminal Agent mode is not supported for telnet hosts",
+            ));
+        }
+    };
+    if listed.status != "exited" {
+        return Err(invalid_error(
+            "terminal history view only opens exited terminal sessions",
+        ));
+    }
+    let registry_session_id = listed.session_id.clone();
+    let (_session_number, session_id) = next_terminal_session_id(&terminal_state());
+    let session_info = terminal_history_session_info_from_go_session(&listed, session_id.clone());
+    let reader_token = uuid::Uuid::new_v4().to_string();
+    let session = Arc::new(TerminalSession {
+        backend: Mutex::new(TerminalBackend::AgentHistory {
+            registry_session_id: registry_session_id.clone(),
+        }),
+        info: Mutex::new(session_info.clone()),
+        host_id,
+        reader_token: reader_token.clone(),
+        window_label: Mutex::new(input.window_label),
+        output_backlog: Mutex::new(Vec::new()),
+        output_sequence: Mutex::new(0),
+        output_backlog_start_sequence: Mutex::new(0),
+    });
+    terminal_state()
+        .sessions
+        .lock()
+        .map_err(|_| invalid_error("terminal sessions lock poisoned"))?
+        .insert(session_id.clone(), session);
+    if let Some(runtime) = remote_runtime {
+        spawn_remote_go_agent_history_reader(
+            app,
+            session_id,
+            registry_session_id,
+            reader_token,
+            runtime,
+        );
+    } else {
+        spawn_local_go_agent_history_reader(
+            app,
+            session_id,
+            registry_session_id,
+            helper_path,
+            reader_token,
+        );
+    }
+    Ok(session_info)
+}
+
+#[tauri::command]
+#[specta::specta]
+pub(crate) fn delete_detached_terminal_session(
+    app: AppHandle,
+    input: DeleteDetachedTerminalSessionInput,
+) -> Result<()> {
+    let host_id = workspace::owned_workspace_tool_host_for_kinds(
+        &app,
+        &input.workspace_id,
+        &input.tool_tab_id,
+        &[
+            crate::types::WorkspaceToolKind::Terminal,
+            crate::types::WorkspaceToolKind::TerminalSessions,
+        ],
+    )?;
+    let state = terminal_state();
+    let live_session = {
+        let sessions = state
+            .sessions
+            .lock()
+            .map_err(|_| invalid_error("terminal sessions lock poisoned"))?;
+        sessions.get(&input.detached_session_id).cloned()
+    };
+    if let Some(session) = live_session {
+        if session.host_id != host_id {
+            return Err(invalid_error(
+                "terminal session belongs to a different host",
+            ));
+        }
+        match delete_agent_session_from_backend(&session) {
+            Ok(()) => {}
+            Err(_) if terminal_session_is_history_view(&session) => {
+                let registry_session_id = terminal_history_registry_session_id(&session)?;
+                delete_registry_terminal_session(app, &input, &host_id, &registry_session_id)?
+            }
+            Err(error) => return Err(error),
+        }
+        remove_terminal_session(&input.detached_session_id);
+        return Ok(());
+    }
+
+    let record = state
+        .detached_sessions
+        .lock()
+        .map_err(|_| invalid_error("terminal detached sessions lock poisoned"))?
+        .remove(&input.detached_session_id);
+    if let Some(record) = record {
+        if record.host_id != host_id {
+            state
+                .detached_sessions
+                .lock()
+                .map_err(|_| invalid_error("terminal detached sessions lock poisoned"))?
+                .insert(input.detached_session_id.clone(), record);
+            return Err(invalid_error(
+                "detached terminal session belongs to a different host",
+            ));
+        }
+        delete_agent_session_from_record(record)?;
+        return Ok(());
+    }
+
+    delete_registry_terminal_session(app, &input, &host_id, &input.detached_session_id)
+}
+
+fn delete_agent_session_from_backend(session: &Arc<TerminalSession>) -> Result<()> {
+    let mut backend = session.backend.lock().unwrap();
+    let TerminalBackend::Agent {
+        session_id,
+        helper_path,
+        agent_process,
+        local_control: _,
+        remote,
+    } = &mut *backend
+    else {
+        return Err(invalid_error(
+            "terminal session deletion requires an agent-backed session",
+        ));
+    };
+    let response = if let Some(remote) = remote.as_ref() {
+        remote_agent_response(remote, RemoteAgentCommand::Delete)?
+    } else {
+        run_local_go_agent_client(helper_path, session_id, "delete", &[])?
+    };
+    if let Some(child) = agent_process.as_mut() {
+        let _ = child.kill();
+    }
+    terminal_agent_response_result(response)
+}
+
+fn terminal_session_is_history_view(session: &Arc<TerminalSession>) -> bool {
+    let Ok(backend) = session.backend.lock() else {
+        return false;
+    };
+    matches!(&*backend, TerminalBackend::AgentHistory { .. })
+}
+
+fn terminal_history_registry_session_id(session: &Arc<TerminalSession>) -> Result<String> {
+    let backend = session
+        .backend
+        .lock()
+        .map_err(|_| invalid_error("terminal backend lock poisoned"))?;
+    let TerminalBackend::AgentHistory {
+        registry_session_id,
+    } = &*backend
+    else {
+        return Err(invalid_error(
+            "terminal session is not a registry history view",
+        ));
+    };
+    Ok(registry_session_id.clone())
+}
+
+fn delete_agent_session_from_record(record: DetachedTerminalRecord) -> Result<()> {
+    if let Some(runtime) = record.remote {
+        let runtime_slot = Arc::new(Mutex::new(Some(runtime)));
+        let (command_tx, command_rx) = mpsc::channel();
+        spawn_remote_agent_control_worker(runtime_slot.clone(), command_rx);
+        let backend = RemoteAgentBackend {
+            commands: command_tx,
+            live_control: Arc::new(Mutex::new(None)),
+            runtime: runtime_slot,
+        };
+        terminal_agent_response_result(remote_agent_response(&backend, RemoteAgentCommand::Delete)?)
+    } else {
+        terminal_agent_response_result(run_local_go_agent_client(
+            &record.helper_path,
+            &record.session_id,
+            "delete",
+            &[],
+        )?)
+    }
+}
+
+fn delete_registry_terminal_session(
+    app: AppHandle,
+    input: &DeleteDetachedTerminalSessionInput,
+    host_id: &str,
+    registry_session_id: &str,
+) -> Result<()> {
+    let host = connection_host_by_id(&app, host_id)?;
+    if !matches!(
+        effective_terminal_agent_mode(&host),
+        TerminalAgentMode::Enabled
+    ) {
+        return Err(invalid_error(
+            "terminal agent mode is disabled for this host",
+        ));
+    }
+    match host.document.protocol {
+        ConnectionProtocol::Local => {
+            let helper_path = local_terminal_agent_helper_path(&app)?;
+            let exists = run_local_go_agent_list(&helper_path, host_id)?
+                .into_iter()
+                .any(|session| session.session_id == registry_session_id);
+            if !exists {
+                return Err(missing_error(format!(
+                    "detached terminal session {} not found",
+                    registry_session_id
+                )));
+            }
+            terminal_agent_response_result(run_local_go_agent_client(
+                &helper_path,
+                registry_session_id,
+                "delete",
+                &[],
+            )?)
+        }
+        ConnectionProtocol::Ssh => {
+            let prepared = prepare_remote_terminal_agent_runtime(
+                &app,
+                &host,
+                &input.workspace_id,
+                Some(&input.tool_tab_id),
+                "terminal-agent-delete",
+                PtySize {
+                    rows: 24,
+                    cols: 80,
+                    pixel_width: 800,
+                    pixel_height: 600,
+                },
+                false,
+                false,
+                None,
+                false,
+            )?;
+            let exists = run_remote_go_agent_list_on_session(
+                &prepared.connection.session,
+                prepared.runtime.target_os,
+                &prepared.runtime.helper_path,
+                host_id,
+            )?
+            .into_iter()
+            .any(|session| session.session_id == registry_session_id);
+            if !exists {
+                return Err(missing_error(format!(
+                    "detached terminal session {} not found",
+                    registry_session_id
+                )));
+            }
+            terminal_agent_response_result(run_remote_go_agent_client_on_session(
+                &prepared.connection.session,
+                prepared.runtime.target_os,
+                &prepared.runtime.helper_path,
+                registry_session_id,
+                "delete",
+                &[],
+            )?)
+        }
+        ConnectionProtocol::Telnet => Err(invalid_error(
+            "Terminal Agent mode is not supported for telnet hosts",
+        )),
+    }
+}
+
+fn attach_registry_terminal_session(
+    app: AppHandle,
+    input: AttachDetachedTerminalSessionInput,
+    host_id: String,
+) -> Result<TerminalSessionInfo> {
+    let host = connection_host_by_id(&app, &host_id)?;
+    if !matches!(
+        effective_terminal_agent_mode(&host),
+        TerminalAgentMode::Enabled
+    ) {
+        return Err(invalid_error(
+            "terminal agent mode is disabled for this host",
+        ));
+    }
+    let (listed, helper_path, remote_runtime) = match host.document.protocol {
+        ConnectionProtocol::Local => {
+            let helper_path = local_terminal_agent_helper_path(&app)?;
+            let listed = run_local_go_agent_list(&helper_path, &host_id)?
+                .into_iter()
+                .find(|session| session.session_id == input.detached_session_id)
+                .ok_or_else(|| {
+                    missing_error(format!(
+                        "detached terminal session {} not found",
+                        input.detached_session_id
+                    ))
+                })?;
+            (listed, helper_path, None)
+        }
+        ConnectionProtocol::Ssh => {
+            let prepared = prepare_remote_terminal_agent_runtime(
+                &app,
+                &host,
+                &input.workspace_id,
+                Some(&input.tool_tab_id),
+                &input.detached_session_id,
+                PtySize {
+                    rows: 24,
+                    cols: 80,
+                    pixel_width: 800,
+                    pixel_height: 600,
+                },
+                false,
+                false,
+                None,
+                false,
+            )?;
+            let listed = run_remote_go_agent_list_on_session(
+                &prepared.connection.session,
+                prepared.runtime.target_os,
+                &prepared.runtime.helper_path,
+                &host_id,
+            )?
+            .into_iter()
+            .find(|session| session.session_id == input.detached_session_id)
+            .ok_or_else(|| {
+                missing_error(format!(
+                    "detached terminal session {} not found",
+                    input.detached_session_id
+                ))
+            })?;
+            (
+                listed,
+                prepared.runtime.helper_path.clone(),
+                Some(prepared.runtime),
+            )
+        }
+        ConnectionProtocol::Telnet => {
+            return Err(invalid_error(
+                "Terminal Agent mode is not supported for telnet hosts",
+            ));
+        }
+    };
+    if listed.status == "exited" {
+        return Err(invalid_error(
+            "exited terminal sessions can be viewed from history but cannot be attached",
+        ));
+    }
+    if let Some(runtime) = remote_runtime.as_ref() {
+        terminal_agent_response_result(run_remote_go_agent_client(
+            &runtime.worker_input,
+            runtime.target_os,
+            &runtime.helper_path,
+            &listed.session_id,
+            "ping",
+            &[],
+        )?)?;
+    } else {
+        terminal_agent_response_result(run_local_go_agent_client(
+            &helper_path,
+            &listed.session_id,
+            "ping",
+            &[],
+        )?)?;
+    }
+    let (_session_number, session_id) = next_terminal_session_id(&terminal_state());
+    let session_info =
+        terminal_session_info_from_go_session_with_view_id(&listed, session_id.clone());
+    let reader_token = uuid::Uuid::new_v4().to_string();
+    let remote_backend = remote_runtime.clone().map(remote_agent_backend);
+    let remote_live_control = remote_backend
+        .as_ref()
+        .map(|backend| backend.live_control.clone());
+    let session = Arc::new(TerminalSession {
+        backend: Mutex::new(TerminalBackend::Agent {
+            session_id: listed.session_id.clone(),
+            helper_path: helper_path.clone(),
+            agent_process: None,
+            local_control: None,
+            remote: remote_backend,
+        }),
+        info: Mutex::new(session_info.clone()),
+        host_id,
+        reader_token: reader_token.clone(),
+        window_label: Mutex::new(input.window_label),
+        output_backlog: Mutex::new(Vec::new()),
+        output_sequence: Mutex::new(0),
+        output_backlog_start_sequence: Mutex::new(0),
+    });
+    terminal_state()
+        .sessions
+        .lock()
+        .map_err(|_| invalid_error("terminal sessions lock poisoned"))?
+        .insert(session_id.clone(), session);
+    if let (Some(runtime), Some(live_control)) = (remote_runtime, remote_live_control) {
+        spawn_remote_go_agent_history_then_reader(
+            app,
+            session_id,
+            reader_token,
+            runtime,
+            live_control,
+        );
+    } else {
+        spawn_local_go_agent_history_then_reader(
+            app,
+            session_id,
+            listed.session_id,
+            helper_path,
+            reader_token,
+        );
+    }
+    Ok(session_info)
+}
+
+#[tauri::command]
+#[specta::specta]
+pub(crate) fn export_terminal_session_key(_session_id: String) -> Result<String> {
+    Err(invalid_error(
+        "Go Terminal Agent sessions do not expose shared client keys",
+    ))
 }
 
 #[tauri::command]
@@ -2170,6 +5608,32 @@ pub(crate) fn write_terminal(input: TerminalInput) -> Result<()> {
         TerminalBackend::Ssh { commands } => commands
             .send(SshWorkerCommand::Write(input.data.into_bytes()))
             .map_err(|error| terminal_error(format!("failed to write ssh session: {error}"))),
+        TerminalBackend::Agent {
+            session_id,
+            helper_path,
+            local_control,
+            remote,
+            ..
+        } => {
+            let data = BASE64_STANDARD.encode(input.data.as_bytes());
+            let bytes = input.data.into_bytes();
+            let local_bytes = bytes.clone();
+            terminal_agent_response_result(send_agent_backend_request(
+                session_id,
+                helper_path,
+                local_control.as_ref(),
+                remote.as_ref(),
+                |sender| RemoteAgentCommand::Write(bytes, sender),
+                || agent_write_request(&local_bytes),
+                "write",
+                &[("--data", data.as_str())],
+            )?)
+        }
+        TerminalBackend::AgentHistory {
+            registry_session_id,
+        } => Err(invalid_error(format!(
+            "terminal history view for registry session {registry_session_id} is read-only"
+        ))),
     }
 }
 
@@ -2197,6 +5661,114 @@ pub(crate) fn resize_terminal(input: TerminalSizeInput) -> Result<()> {
         TerminalBackend::Ssh { commands } => commands
             .send(SshWorkerCommand::Resize(size))
             .map_err(|error| terminal_error(format!("failed to resize ssh session: {error}"))),
+        TerminalBackend::Agent {
+            session_id,
+            helper_path,
+            local_control,
+            remote,
+            ..
+        } => {
+            let state = terminal_state();
+            let agent_size = record_agent_view_size(&state, session_id, &input.session_id, size)?;
+            let cols = agent_size.cols.to_string();
+            let rows = agent_size.rows.to_string();
+            let pixel_width = agent_size.pixel_width.to_string();
+            let pixel_height = agent_size.pixel_height.to_string();
+            terminal_agent_response_result(send_agent_backend_request(
+                session_id,
+                helper_path,
+                local_control.as_ref(),
+                remote.as_ref(),
+                |sender| RemoteAgentCommand::Resize(agent_size, sender),
+                || agent_resize_request(agent_size),
+                "resize",
+                &[
+                    ("--cols", cols.as_str()),
+                    ("--rows", rows.as_str()),
+                    ("--pixel-width", pixel_width.as_str()),
+                    ("--pixel-height", pixel_height.as_str()),
+                ],
+            )?)
+        }
+        TerminalBackend::AgentHistory {
+            registry_session_id,
+        } => Err(invalid_error(format!(
+            "terminal history view for registry session {registry_session_id} cannot be resized"
+        ))),
+    }
+}
+
+#[tauri::command]
+#[specta::specta]
+pub(crate) fn rename_terminal_session(input: TerminalTitleInput) -> Result<()> {
+    let title = input.title.trim().to_string();
+    if title.is_empty() {
+        return Err(invalid_error("terminal title cannot be empty"));
+    }
+    let session = session_by_id(&input.session_id)
+        .map_err(|_| terminal_session_missing_error(&input.session_id))?;
+    let mut backend = session.backend.lock().unwrap();
+    match &mut *backend {
+        TerminalBackend::Local { .. } => Ok(()),
+        TerminalBackend::Ssh { .. } => Ok(()),
+        TerminalBackend::Agent {
+            session_id,
+            helper_path,
+            local_control,
+            remote,
+            ..
+        } => terminal_agent_response_result(send_agent_backend_request(
+            session_id,
+            helper_path,
+            local_control.as_ref(),
+            remote.as_ref(),
+            |sender| RemoteAgentCommand::Rename(title.clone(), sender),
+            || agent_title_request("rename", &title),
+            "rename",
+            &[("--title", title.as_str())],
+        )?),
+        TerminalBackend::AgentHistory {
+            registry_session_id,
+        } => Err(invalid_error(format!(
+            "terminal history view for registry session {registry_session_id} is read-only"
+        ))),
+    }
+}
+
+#[tauri::command]
+#[specta::specta]
+pub(crate) fn update_terminal_title(input: TerminalTitleInput) -> Result<()> {
+    let title = input.title.trim().to_string();
+    if title.is_empty() {
+        return Err(invalid_error("terminal title cannot be empty"));
+    }
+    let session = session_by_id(&input.session_id)
+        .map_err(|_| terminal_session_missing_error(&input.session_id))?;
+    let mut backend = session.backend.lock().unwrap();
+    match &mut *backend {
+        TerminalBackend::Local { .. } => Ok(()),
+        TerminalBackend::Ssh { .. } => Ok(()),
+        TerminalBackend::Agent {
+            session_id,
+            helper_path,
+            local_control,
+            remote,
+            ..
+        } => terminal_agent_response_result(send_agent_backend_request(
+            session_id,
+            helper_path,
+            local_control.as_ref(),
+            remote.as_ref(),
+            |sender| RemoteAgentCommand::TitleChange(title.clone(), sender),
+            || agent_title_request("title_change", &title),
+            "title_change",
+            &[("--title", title.as_str())],
+        )?),
+        TerminalBackend::AgentHistory {
+            registry_session_id,
+        } => Err(invalid_error(format!(
+            "terminal history view for registry session {registry_session_id} is read-only"
+        ))),
     }
 }
 
@@ -2207,7 +5779,7 @@ pub(crate) fn close_terminal_session(session_id: String) -> Result<()> {
         Ok(session) => session,
         Err(_) => return Ok(()),
     };
-    kill_terminal_session(session)?;
+    close_terminal_view_session(session)?;
     remove_terminal_session(&session_id);
     Ok(())
 }
@@ -2216,6 +5788,427 @@ pub(crate) fn close_terminal_session(session_id: String) -> Result<()> {
 mod tests {
     use super::*;
     use crate::config::parse_toml;
+    use std::io::{Error, ErrorKind};
+
+    fn test_remote_agent_backend(command_tx: Sender<RemoteAgentCommand>) -> RemoteAgentBackend {
+        RemoteAgentBackend {
+            commands: command_tx,
+            live_control: Arc::new(Mutex::new(None)),
+            runtime: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    #[test]
+    fn remote_agent_backend_prefers_live_control_connection() {
+        let (fallback_tx, fallback_rx) = mpsc::channel();
+        let (live_tx, live_rx) = mpsc::channel();
+        let backend = RemoteAgentBackend {
+            commands: fallback_tx,
+            live_control: Arc::new(Mutex::new(Some(live_tx))),
+            runtime: Arc::new(Mutex::new(None)),
+        };
+
+        let requester = thread::spawn(move || {
+            send_agent_backend_request(
+                "registry-session",
+                "unused-helper",
+                None,
+                Some(&backend),
+                |sender| RemoteAgentCommand::Write(b"ignored fallback".to_vec(), sender),
+                || agent_write_request(b"hello"),
+                "write",
+                &[("--data", "aGVsbG8=")],
+            )
+        });
+
+        let live_command = live_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("remote live control should receive write request");
+        assert_eq!(live_command.request.name, "write");
+        assert_eq!(live_command.request.kind, "request");
+        assert!(
+            live_command.request.request_id.starts_with("nocturne-"),
+            "live request should carry a generated request_id"
+        );
+        assert!(
+            fallback_rx
+                .recv_timeout(Duration::from_millis(100))
+                .is_err(),
+            "remote write should not start a short helper command when live control is available"
+        );
+        live_command
+            .response
+            .send(Ok(TerminalAgentResponse::Ok))
+            .expect("send live response");
+        assert!(matches!(
+            requester.join().expect("request thread panicked"),
+            Ok(TerminalAgentResponse::Ok)
+        ));
+    }
+
+    #[test]
+    fn remote_live_control_pending_writes_retry_after_would_block() {
+        struct FlakyWriter {
+            fail_once: bool,
+            written: Vec<u8>,
+        }
+
+        impl Write for FlakyWriter {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                if self.fail_once {
+                    self.fail_once = false;
+                    return Err(Error::from(ErrorKind::WouldBlock));
+                }
+                self.written.extend_from_slice(buf);
+                Ok(buf.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let request = agent_protocol_request(
+            "write",
+            Some(serde_json::json!({
+                "data": "aGVsbG8="
+            })),
+        );
+        let serialized = serialize_agent_control_request(&request).expect("serialize request");
+        let mut pending = VecDeque::new();
+        queue_pending_bytes(&mut pending, &serialized).expect("queue request");
+        let mut writer = FlakyWriter {
+            fail_once: true,
+            written: Vec::new(),
+        };
+
+        assert!(
+            !drain_remote_agent_pending_writes(&mut writer, &mut pending).expect("first drain"),
+            "WouldBlock should leave the request queued"
+        );
+        assert_eq!(pending.len(), serialized.len());
+        assert!(writer.written.is_empty());
+
+        assert!(
+            drain_remote_agent_pending_writes(&mut writer, &mut pending).expect("second drain"),
+            "request should drain after backpressure clears"
+        );
+        assert!(pending.is_empty());
+        assert_eq!(writer.written, serialized);
+    }
+
+    #[test]
+    fn closing_agent_terminal_view_detaches_without_closing_daemon() {
+        let state = terminal_state();
+        let view_session_id = "test-close-view-detaches-view";
+        let registry_session_id = "test-close-view-detaches-registry";
+        remove_terminal_session(view_session_id);
+        let (command_tx, command_rx) = mpsc::channel();
+        let remote_backend = test_remote_agent_backend(command_tx);
+        let session = Arc::new(TerminalSession {
+            backend: Mutex::new(TerminalBackend::Agent {
+                session_id: registry_session_id.to_string(),
+                helper_path: "unused-helper".to_string(),
+                agent_process: None,
+                local_control: None,
+                remote: Some(remote_backend),
+            }),
+            info: Mutex::new(TerminalSessionInfo {
+                id: view_session_id.to_string(),
+                title: "Attached view".to_string(),
+                command: "bash".to_string(),
+                cwd: None,
+                cols: 80,
+                rows: 24,
+                pixel_width: 800,
+                pixel_height: 600,
+                process_id: None,
+                transport: TerminalTransportKind::Agent,
+                transport_state: TerminalTransportState::Connected,
+                agent: Some(TerminalAgentSessionInfo {
+                    session_id: registry_session_id.to_string(),
+                }),
+            }),
+            host_id: "host-a".to_string(),
+            reader_token: "reader-token".to_string(),
+            window_label: Mutex::new("main".to_string()),
+            output_backlog: Mutex::new(Vec::new()),
+            output_sequence: Mutex::new(0),
+            output_backlog_start_sequence: Mutex::new(0),
+        });
+        state
+            .sessions
+            .lock()
+            .expect("terminal sessions lock")
+            .insert(view_session_id.to_string(), session);
+
+        let closer = thread::spawn(move || close_terminal_session(view_session_id.to_string()));
+        let command = command_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("close_terminal_session sends a daemon command");
+        match command {
+            RemoteAgentCommand::Detach(response_tx) => {
+                response_tx
+                    .send(Ok(TerminalAgentResponse::Ok))
+                    .expect("send detach response");
+            }
+            RemoteAgentCommand::Close(_) => {
+                panic!("closing an attached Terminal view must detach, not close the daemon")
+            }
+            RemoteAgentCommand::Delete(_) => {
+                panic!("closing an attached Terminal view must not delete the daemon")
+            }
+            RemoteAgentCommand::Write(_, _)
+            | RemoteAgentCommand::Resize(_, _)
+            | RemoteAgentCommand::Rename(_, _)
+            | RemoteAgentCommand::TitleChange(_, _) => {
+                panic!("unexpected command while closing attached Terminal view")
+            }
+        }
+        closer
+            .join()
+            .expect("close thread panicked")
+            .expect("close view succeeds");
+        assert!(
+            session_by_id(view_session_id).is_err(),
+            "view-local session should be removed after detach"
+        );
+    }
+
+    #[test]
+    fn detach_agent_terminal_view_returns_registry_session_id() {
+        let state = terminal_state();
+        let view_session_id = "test-detach-view-id";
+        let registry_session_id = "test-detach-registry-id";
+        remove_terminal_session(view_session_id);
+        {
+            let mut detached = state
+                .detached_sessions
+                .lock()
+                .expect("detached sessions lock");
+            detached.remove(registry_session_id);
+            detached.remove(view_session_id);
+        }
+        let (command_tx, command_rx) = mpsc::channel();
+        let remote_backend = test_remote_agent_backend(command_tx);
+        let session = Arc::new(TerminalSession {
+            backend: Mutex::new(TerminalBackend::Agent {
+                session_id: registry_session_id.to_string(),
+                helper_path: "unused-helper".to_string(),
+                agent_process: None,
+                local_control: None,
+                remote: Some(remote_backend),
+            }),
+            info: Mutex::new(TerminalSessionInfo {
+                id: view_session_id.to_string(),
+                title: "Attached view".to_string(),
+                command: "bash".to_string(),
+                cwd: None,
+                cols: 120,
+                rows: 30,
+                pixel_width: 1000,
+                pixel_height: 700,
+                process_id: None,
+                transport: TerminalTransportKind::Agent,
+                transport_state: TerminalTransportState::Connected,
+                agent: Some(TerminalAgentSessionInfo {
+                    session_id: registry_session_id.to_string(),
+                }),
+            }),
+            host_id: "host-a".to_string(),
+            reader_token: "reader-token".to_string(),
+            window_label: Mutex::new("main".to_string()),
+            output_backlog: Mutex::new(Vec::new()),
+            output_sequence: Mutex::new(0),
+            output_backlog_start_sequence: Mutex::new(0),
+        });
+        state
+            .sessions
+            .lock()
+            .expect("terminal sessions lock")
+            .insert(view_session_id.to_string(), session);
+
+        let detacher = thread::spawn(move || {
+            detach_terminal_session(TerminalDetachInput {
+                session_id: view_session_id.to_string(),
+            })
+        });
+        let command = command_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("detach_terminal_session sends a daemon command");
+        match command {
+            RemoteAgentCommand::Detach(response_tx) => {
+                response_tx
+                    .send(Ok(TerminalAgentResponse::Ok))
+                    .expect("send detach response");
+            }
+            _ => panic!("detach_terminal_session should send detach"),
+        }
+        let detached = detacher
+            .join()
+            .expect("detach thread panicked")
+            .expect("detach succeeds");
+        assert_eq!(detached.session_id, registry_session_id);
+        assert!(session_by_id(view_session_id).is_err());
+        let mut detached_sessions = state
+            .detached_sessions
+            .lock()
+            .expect("detached sessions lock");
+        assert!(detached_sessions.contains_key(registry_session_id));
+        assert!(!detached_sessions.contains_key(view_session_id));
+        detached_sessions.remove(registry_session_id);
+    }
+
+    #[test]
+    fn agent_title_commands_forward_registry_session_title() {
+        let state = terminal_state();
+        let view_session_id = "test-title-view-id";
+        let registry_session_id = "test-title-registry-id";
+        remove_terminal_session(view_session_id);
+        let (command_tx, command_rx) = mpsc::channel();
+        let remote_backend = test_remote_agent_backend(command_tx);
+        let session = Arc::new(TerminalSession {
+            backend: Mutex::new(TerminalBackend::Agent {
+                session_id: registry_session_id.to_string(),
+                helper_path: "unused-helper".to_string(),
+                agent_process: None,
+                local_control: None,
+                remote: Some(remote_backend),
+            }),
+            info: Mutex::new(TerminalSessionInfo {
+                id: view_session_id.to_string(),
+                title: "Attached view".to_string(),
+                command: "bash".to_string(),
+                cwd: None,
+                cols: 120,
+                rows: 30,
+                pixel_width: 1000,
+                pixel_height: 700,
+                process_id: None,
+                transport: TerminalTransportKind::Agent,
+                transport_state: TerminalTransportState::Connected,
+                agent: Some(TerminalAgentSessionInfo {
+                    session_id: registry_session_id.to_string(),
+                }),
+            }),
+            host_id: "host-a".to_string(),
+            reader_token: "reader-token".to_string(),
+            window_label: Mutex::new("main".to_string()),
+            output_backlog: Mutex::new(Vec::new()),
+            output_sequence: Mutex::new(0),
+            output_backlog_start_sequence: Mutex::new(0),
+        });
+        state
+            .sessions
+            .lock()
+            .expect("terminal sessions lock")
+            .insert(view_session_id.to_string(), session);
+
+        let title_updater = thread::spawn(move || {
+            update_terminal_title(TerminalTitleInput {
+                session_id: view_session_id.to_string(),
+                title: "Editor: main.go".to_string(),
+            })
+        });
+        match command_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("update_terminal_title sends a daemon command")
+        {
+            RemoteAgentCommand::TitleChange(title, response_tx) => {
+                assert_eq!(title, "Editor: main.go");
+                response_tx
+                    .send(Ok(TerminalAgentResponse::Ok))
+                    .expect("send title response");
+            }
+            _ => panic!("update_terminal_title should send title_change"),
+        }
+        title_updater
+            .join()
+            .expect("title update thread panicked")
+            .expect("title update succeeds");
+
+        let renamer = thread::spawn(move || {
+            rename_terminal_session(TerminalTitleInput {
+                session_id: view_session_id.to_string(),
+                title: "Build logs".to_string(),
+            })
+        });
+        match command_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("rename_terminal_session sends a daemon command")
+        {
+            RemoteAgentCommand::Rename(title, response_tx) => {
+                assert_eq!(title, "Build logs");
+                response_tx
+                    .send(Ok(TerminalAgentResponse::Ok))
+                    .expect("send rename response");
+            }
+            _ => panic!("rename_terminal_session should send rename"),
+        }
+        renamer
+            .join()
+            .expect("rename thread panicked")
+            .expect("rename succeeds");
+        remove_terminal_session(view_session_id);
+    }
+
+    #[test]
+    fn terminal_session_ids_use_uuid_without_process_counter() {
+        let first = new_terminal_session_id();
+        let second = new_terminal_session_id();
+
+        assert!(first.starts_with("term-"));
+        assert!(second.starts_with("term-"));
+        assert_ne!(
+            first, second,
+            "registry-backed sessions must not collide across app process restarts"
+        );
+        assert_ne!(
+            first, "term-1",
+            "registry session ids cannot include only the in-process counter"
+        );
+        assert!(
+            !first.starts_with("term-1-"),
+            "registry session ids should not encode process-local ordering"
+        );
+    }
+
+    #[test]
+    fn terminal_history_views_keep_registry_session_id_separate_from_view_id() {
+        let session = Arc::new(TerminalSession {
+            backend: Mutex::new(TerminalBackend::AgentHistory {
+                registry_session_id: "registry-session-id".to_string(),
+            }),
+            info: Mutex::new(TerminalSessionInfo {
+                id: "view-session-id".to_string(),
+                title: "History".to_string(),
+                command: "bash".to_string(),
+                cwd: None,
+                cols: 80,
+                rows: 24,
+                pixel_width: 800,
+                pixel_height: 600,
+                process_id: None,
+                transport: TerminalTransportKind::Agent,
+                transport_state: TerminalTransportState::Disconnected,
+                agent: Some(TerminalAgentSessionInfo {
+                    session_id: "registry-session-id".to_string(),
+                }),
+            }),
+            host_id: "host-a".to_string(),
+            reader_token: "reader-token".to_string(),
+            window_label: Mutex::new("main".to_string()),
+            output_backlog: Mutex::new(Vec::new()),
+            output_sequence: Mutex::new(0),
+            output_backlog_start_sequence: Mutex::new(0),
+        });
+
+        assert!(terminal_session_is_history_view(&session));
+        assert_eq!(
+            terminal_history_registry_session_id(&session).expect("history registry session id"),
+            "registry-session-id"
+        );
+    }
 
     #[test]
     fn default_terminal_font_uses_maple_then_nerd_symbols() {
@@ -2225,7 +6218,9 @@ mod tests {
             terminal_settings_from_config_for_test(&config).expect("valid terminal settings");
 
         assert_eq!(settings.font_family, DEFAULT_TERMINAL_FONT_FAMILY);
-        assert!(settings.font_family.starts_with("\"Maple Mono\", \"Symbols Nerd Font Mono\""));
+        assert!(settings
+            .font_family
+            .starts_with("\"Maple Mono\", \"Symbols Nerd Font Mono\""));
         assert!(settings.font_family.ends_with("monospace"));
     }
 
@@ -2321,6 +6316,280 @@ mod tests {
                 .get_env("NOCTURNE_IMAGE_PROTOCOL")
                 .and_then(|value| value.to_str()),
             Some("iip")
+        );
+    }
+
+    #[test]
+    fn terminal_agent_resource_path_uses_target_os_and_arch() {
+        assert_eq!(
+            terminal_agent_resource_path(
+                RemoteResourceTargetOs::Linux,
+                RemoteResourceTargetArch::X86_64
+            ),
+            "nocturne-terminal-agent/linux/x86_64/nocturne-terminal-agent"
+        );
+        assert_eq!(
+            terminal_agent_resource_path(
+                RemoteResourceTargetOs::Windows,
+                RemoteResourceTargetArch::I686
+            ),
+            "nocturne-terminal-agent/windows/i686/nocturne-terminal-agent.exe"
+        );
+    }
+
+    #[test]
+    fn terminal_agent_client_command_quotes_arguments() {
+        let command = go_terminal_agent_client_command(
+            RemoteResourceTargetOs::Linux,
+            "/tmp/nocturne agent",
+            "session'withquote",
+            "write",
+            &[("--data", "abc+123/=")],
+        );
+
+        assert_eq!(
+            command,
+            "'/tmp/nocturne agent' 'client' 'write' '--session-id' 'session'\"'\"'withquote' '--data' 'abc+123/='"
+        );
+    }
+
+    #[test]
+    fn terminal_agent_launch_spec_path_uses_windows_path_separator() {
+        let path = terminal_agent_remote_launch_spec_path(
+            RemoteResourceTargetOs::Windows,
+            r"C:\Users\Ada",
+            "session-a",
+        );
+
+        assert_eq!(
+            path,
+            r"C:\Users\Ada\AppData\Local\Temp\nocturne-terminal-agent-session-a.json"
+        );
+        assert!(!path.contains("/AppData/"));
+    }
+
+    #[test]
+    fn terminal_agent_daemon_launch_reads_stdin_spec() {
+        let command = go_terminal_agent_launch_background_command(
+            RemoteResourceTargetOs::Linux,
+            "/tmp/nocturne-agent",
+            "/tmp/session-a.json",
+        );
+
+        assert_eq!(
+            command,
+            "nohup '/tmp/nocturne-agent' daemon --launch-spec-stdin < '/tmp/session-a.json' >/dev/null 2>&1 &"
+        );
+    }
+
+    #[test]
+    fn go_terminal_agent_launch_spec_contains_session_and_host_identity() {
+        let settings = TerminalSettings {
+            command: Some("/bin/zsh".to_string()),
+            args: vec!["-l".to_string()],
+            cwd: Some("/repo".to_string()),
+            ..TerminalSettings::default()
+        };
+        let spec = build_go_terminal_agent_launch_spec(
+            "session-a",
+            "host-a",
+            "Session 1",
+            &settings,
+            None,
+            &BTreeMap::new(),
+            PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 800,
+                pixel_height: 480,
+            },
+        );
+        let json = serde_json::to_string(&spec).expect("serializes launch spec");
+
+        assert!(json.contains(r#""version":1"#));
+        assert!(json.contains(r#""session_id":"session-a""#));
+        assert!(json.contains(r#""host_id":"host-a""#));
+        assert!(json.contains(r#""command":"/bin/zsh""#));
+        assert!(json.contains(r#""args":["-l"]"#));
+    }
+
+    #[test]
+    fn parses_terminal_agent_list_sessions_and_complete_count() {
+        let output = concat!(
+            r#"{"type":"session","session":{"session_id":"term-1","host_id":"host-a","title":"Session 1","command":"zsh","cwd":"/repo","agent_version":"0.1.0","protocol_version":1,"cols":100,"rows":30,"pixel_width":900,"pixel_height":500,"endpoint":{"kind":"unix","path":"/tmp/sock"},"transcript":"term-1.ndjson","status":"running","attached_count":2}}"#,
+            "\n",
+            r#"{"type":"complete","count":1}"#,
+            "\n"
+        );
+
+        let sessions = parse_go_agent_session_list(output, "host-a").expect("valid list output");
+
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].session_id, "term-1");
+        assert_eq!(sessions[0].cwd.as_deref(), Some("/repo"));
+        assert_eq!(sessions[0].cols, Some(100));
+        assert_eq!(sessions[0].rows, Some(30));
+        assert_eq!(sessions[0].pixel_width, Some(900));
+        assert_eq!(sessions[0].pixel_height, Some(500));
+        assert_eq!(sessions[0].status, "running");
+        assert_eq!(sessions[0].attached_count, Some(2));
+    }
+
+    #[test]
+    fn terminal_agent_list_rejects_invalid_registry_lines() {
+        let output = r#"{"type":"invalid","path":"wrong.toml","error":"registry filename does not match session_id"}"#;
+
+        let error =
+            parse_go_agent_session_list(output, "host-a").expect_err("invalid line fails fast");
+
+        assert!(format!("{error:?}").contains("registry filename does not match session_id"));
+    }
+
+    #[test]
+    fn terminal_agent_list_requires_complete_line() {
+        let output = r#"{"type":"session","session":{"session_id":"term-1","host_id":"host-a","title":"Session 1","command":"zsh","status":"stale"}}"#;
+
+        let error =
+            parse_go_agent_session_list(output, "host-a").expect_err("missing complete line fails");
+
+        assert!(format!("{error:?}").contains("complete line"));
+    }
+
+    #[test]
+    fn terminal_agent_view_sizes_use_smallest_attached_view() {
+        let state = TerminalState::default();
+        let first = record_agent_view_size(
+            &state,
+            "registry-session",
+            "view-a",
+            PtySize {
+                rows: 40,
+                cols: 120,
+                pixel_width: 1200,
+                pixel_height: 800,
+            },
+        )
+        .expect("records first view size");
+        let second = record_agent_view_size(
+            &state,
+            "registry-session",
+            "view-b",
+            PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 900,
+                pixel_height: 600,
+            },
+        )
+        .expect("records second view size");
+
+        assert_eq!(first.cols, 120);
+        assert_eq!(first.rows, 40);
+        assert_eq!(second.cols, 80);
+        assert_eq!(second.rows, 24);
+        assert_eq!(second.pixel_width, 900);
+        assert_eq!(second.pixel_height, 600);
+
+        remove_agent_view_size(&state, "view-b");
+        let restored = record_agent_view_size(
+            &state,
+            "registry-session",
+            "view-a",
+            PtySize {
+                rows: 40,
+                cols: 120,
+                pixel_width: 1200,
+                pixel_height: 800,
+            },
+        )
+        .expect("records remaining view size");
+        assert_eq!(restored.cols, 120);
+        assert_eq!(restored.rows, 40);
+    }
+
+    #[test]
+    fn maps_terminal_agent_registry_session_to_terminal_info() {
+        let listed = GoAgentListedSession {
+            session_id: "term-9".to_string(),
+            host_id: "host-a".to_string(),
+            title: "Build".to_string(),
+            command: "cargo check".to_string(),
+            cwd: Some("/repo".to_string()),
+            cols: Some(132),
+            rows: Some(40),
+            pixel_width: Some(1200),
+            pixel_height: Some(720),
+            status: "exited".to_string(),
+            attached_count: Some(1),
+        };
+
+        let detached = terminal_detached_info_from_go_session(&listed);
+        let info = terminal_session_info_from_go_session(&listed);
+        let attached_view =
+            terminal_session_info_from_go_session_with_view_id(&listed, "term-42".to_string());
+        let history_view =
+            terminal_history_session_info_from_go_session(&listed, "term-43".to_string());
+
+        assert_eq!(detached.session_id, "term-9");
+        assert!(!detached.detached);
+        assert_eq!(detached.cols, 132);
+        assert_eq!(detached.rows, 40);
+        assert_eq!(detached.attached_count, 1);
+        assert_eq!(info.id, "term-9");
+        assert_eq!(info.cwd.as_deref(), Some("/repo"));
+        assert_eq!(info.transport_state, TerminalTransportState::Disconnected);
+        assert_eq!(info.agent.expect("agent metadata").session_id, "term-9");
+        assert_eq!(attached_view.id, "term-42");
+        assert_eq!(
+            attached_view.agent.expect("agent metadata").session_id,
+            "term-9"
+        );
+        assert_eq!(history_view.id, "term-43");
+        assert_eq!(
+            history_view.agent.expect("agent metadata").session_id,
+            "term-9"
+        );
+        assert_eq!(
+            history_view.transport_state,
+            TerminalTransportState::Disconnected
+        );
+    }
+
+    #[test]
+    fn remote_home_path_command_matches_target_shell() {
+        assert_eq!(
+            remote_home_path_command(RemoteResourceTargetOs::Linux),
+            "printf %s \"$HOME\""
+        );
+        assert_eq!(
+            remote_home_path_command(RemoteResourceTargetOs::Macos),
+            "printf %s \"$HOME\""
+        );
+        assert_eq!(
+            remote_home_path_command(RemoteResourceTargetOs::Windows),
+            "[Environment]::GetFolderPath('UserProfile')"
+        );
+    }
+
+    #[test]
+    fn terminal_agent_upload_plan_contains_detach_capability() {
+        let plan = plan_terminal_agent_upload(
+            b"terminal-agent-binary",
+            RemoteResourceTargetOs::Macos,
+            RemoteResourceTargetArch::Aarch64,
+            "0.1.0",
+        )
+        .expect("valid upload plan");
+
+        assert_eq!(plan.manifest.helper_name, "nocturne-terminal-agent");
+        assert_eq!(plan.manifest.purpose, "Terminal detach and remote control");
+        assert!(plan
+            .manifest
+            .capabilities
+            .contains(&"terminal.detach".to_string()));
+        assert_eq!(
+            plan.resource_path,
+            "nocturne-terminal-agent/macos/aarch64/nocturne-terminal-agent"
         );
     }
 

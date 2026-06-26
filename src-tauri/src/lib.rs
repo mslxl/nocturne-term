@@ -60,10 +60,8 @@ pub use resources::{
 pub use types::*;
 pub use types::{HostResourceConfig, RemoteResourceTargetArch, RemoteResourceTargetOs};
 
-#[cfg_attr(mobile, tauri::mobile_entry_point)]
-pub fn run() {
-    let log_file_name = logging::session_log_file_name();
-    let builder = Builder::<tauri::Wry>::new()
+fn create_app_specta_builder() -> Builder<tauri::Wry> {
+    Builder::<tauri::Wry>::new()
         .commands(collect_commands![
             config::get_config_root,
             config::get_config_snapshot,
@@ -74,9 +72,17 @@ pub fn run() {
             terminal::create_host_terminal_session,
             terminal::existing_terminal_session_info,
             terminal::transfer_terminal_sessions_to_window,
+            terminal::detach_terminal_session,
+            terminal::list_detached_terminal_sessions,
+            terminal::attach_detached_terminal_session,
+            terminal::open_detached_terminal_session_history,
+            terminal::delete_detached_terminal_session,
+            terminal::export_terminal_session_key,
             terminal::take_terminal_output_backlog,
             terminal::write_terminal,
             terminal::resize_terminal,
+            terminal::rename_terminal_session,
+            terminal::update_terminal_title,
             terminal::close_terminal_session,
             terminal_schemes::list_terminal_color_schemes,
             terminal_schemes::read_terminal_color_scheme,
@@ -150,12 +156,25 @@ pub fn run() {
         .typ::<types::PortForwardSshVerificationRequiredEvent>()
         .typ::<types::WorkspaceDockGroupRole>()
         .typ::<types::WorkspaceDockLayout>()
-        .typ::<types::PortForwardSnapshot>();
+        .typ::<types::PortForwardSnapshot>()
+}
+
+#[cfg(debug_assertions)]
+fn export_app_bindings_from_builder(builder: &Builder<tauri::Wry>) {
+    let bindings_path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../src/lib/bindings.ts");
+    builder
+        .export(Typescript::default(), bindings_path)
+        .expect("failed to export Tauri command bindings");
+}
+
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
+    let log_file_name = logging::session_log_file_name();
+    let builder = create_app_specta_builder();
 
     #[cfg(debug_assertions)]
-    builder
-        .export(Typescript::default(), "../src/lib/bindings.ts")
-        .expect("failed to export Tauri command bindings");
+    export_app_bindings_from_builder(&builder);
 
     let tauri_builder = tauri::Builder::default().enable_macos_default_menu(false);
     #[cfg(target_os = "macos")]

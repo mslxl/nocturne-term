@@ -17,7 +17,7 @@
  * other running Tauri windows.
  */
 export async function createServer(options = {}) {
-  const devUrl = process.env.TAURI_TEST_DEV_URL ?? "http://localhost:1420/";
+  const devUrl = process.env.TAURI_TEST_DEV_URL ?? "http://127.0.0.1:1420/";
   const devPort = Number(new URL(devUrl).port);
   const requestedPort = options.server?.port;
 

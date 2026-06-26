@@ -711,9 +711,7 @@ impl HostPortForwardWorker {
                 Ok(HostPortForwardWorkerCommand::StopRule {
                     rule_id: stopped,
                     done,
-                })
-                    if stopped == rule_id =>
-                {
+                }) if stopped == rule_id => {
                     self.stop_rule(&stopped);
                     let _ = set_rule_status(
                         &self.host_id,
@@ -1046,9 +1044,9 @@ fn stop_rule_on_host_runtime(host_id: &str, rule_id: &str) -> Result<()> {
             })
     };
     match command_sent {
-        Some(Ok(())) => done_receiver
-            .recv()
-            .map_err(|_| invalid_error("Host port forwarding worker stopped before rule stop completed"))?,
+        Some(Ok(())) => done_receiver.recv().map_err(|_| {
+            invalid_error("Host port forwarding worker stopped before rule stop completed")
+        })?,
         None => {}
         Some(Err(_)) => {
             return Err(invalid_error("Host port forwarding worker is unavailable"));

@@ -1,4 +1,8 @@
 {
   "identifier": "com.mslxl.nocturne.dev",
-  "productName": "nocturne-dev"
+  "productName": "nocturne-dev",
+  "build": {
+    "beforeDevCommand": "pnpm dev",
+    "devUrl": "http://127.0.0.1:1420"
+  }
 }

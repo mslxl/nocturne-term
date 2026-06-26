@@ -87,6 +87,8 @@ export type TerminalPane = {
   titleOverride: string;
   status: TerminalStatus;
   readOnly: boolean;
+  agentBacked: boolean;
+  agentSessionId: string;
   reconnectPending: boolean;
   everConnected: boolean;
   connectionHostId: string;
@@ -132,7 +134,8 @@ type TerminalTabContext = {
   tabs: () => TerminalTab[];
   setGlobalError: (message: string) => void;
   notifySelectionChange?: () => void;
-  notifyTitleChange?: () => void;
+  notifyTitleChange?: (paneId: string, title: string) => void;
+  notifyPaneTitleRefresh?: () => void;
   requestReconnect?: (paneId: string) => void;
 };
 
@@ -165,6 +168,7 @@ export function createTerminalTabFromPane(pane: TerminalPane): TerminalTab {
 export function createTerminalPane(info: TerminalSessionInfo, tabId: string): TerminalPane {
   const size = normalizeTerminalSessionSize(info);
   const initialOutput = initialTransportOutput(info);
+  const status = terminalStatusFromTransportState(info.transport_state);
   return {
     id: info.id,
     tabId,
@@ -173,13 +177,15 @@ export function createTerminalPane(info: TerminalSessionInfo, tabId: string): Te
     command: info.command,
     currentDirectory: info.cwd ?? "",
     titleOverride: "",
-    status: info.transport_state === "connected" ? "running" : "starting",
-    readOnly: false,
+    status,
+    readOnly: status === "disconnected",
+    agentBacked: info.agent !== null,
+    agentSessionId: info.agent?.session_id ?? "",
     reconnectPending: false,
-    everConnected: info.transport_state === "connected",
+    everConnected: info.transport_state === "connected" || status === "disconnected",
     connectionHostId: "",
     reconnectTrust: {},
-    exitText: "",
+    exitText: status === "disconnected" ? "History" : "",
     error: "",
     viewContainers: new Map(),
     views: new Map(),
@@ -215,12 +221,14 @@ export function retargetTerminalPaneSession(pane: TerminalPane, info: TerminalSe
   pane.command = info.command;
   pane.currentDirectory = info.cwd ?? "";
   pane.titleOverride = "";
-  pane.status = info.transport_state === "connected" ? "running" : "starting";
-  pane.readOnly = false;
+  pane.status = terminalStatusFromTransportState(info.transport_state);
+  pane.readOnly = pane.status === "disconnected";
+  pane.agentBacked = info.agent !== null;
+  pane.agentSessionId = info.agent?.session_id ?? "";
   pane.reconnectPending = false;
-  pane.everConnected = info.transport_state === "connected";
+  pane.everConnected = info.transport_state === "connected" || pane.status === "disconnected";
   pane.reconnectTrust = {};
-  pane.exitText = "";
+  pane.exitText = pane.status === "disconnected" ? "History" : "";
   pane.error = "";
   pane.decoder = new TextDecoder();
   pane.outputQueue = [];
@@ -242,6 +250,13 @@ export function retargetTerminalPaneSession(pane: TerminalPane, info: TerminalSe
       pane.outputQueue.push(initialOutput);
     }
   }
+}
+
+function terminalStatusFromTransportState(state: TerminalTransportState): TerminalStatus {
+  if (state === "connected") return "running";
+  if (state === "disconnected") return "disconnected";
+  if (state === "failed") return "error";
+  return "starting";
 }
 
 function initialTransportOutput(info: TerminalSessionInfo): string {
@@ -388,6 +403,10 @@ export function createTerminalTabController(context: TerminalTabContext) {
         term.onTitleChange((title) => {
           pane.titleOverride = title;
           refreshPaneTitle(pane);
+          const trimmed = title.trim();
+          if (trimmed && pane.agentBacked && !pane.readOnly) {
+            context.notifyTitleChange?.(pane.id, trimmed);
+          }
         }),
         term.parser.registerOscHandler(7, (data) => {
           pane.currentDirectory = parseOsc7Directory(data);
@@ -659,7 +678,7 @@ export function createTerminalTabController(context: TerminalTabContext) {
     pane.title = derivePaneTitle(pane);
     const tab = tabById(pane.tabId);
     if (tab && tab.activePaneId === pane.id) refreshTerminalTabTitle(tab);
-    context.notifyTitleChange?.();
+    context.notifyPaneTitleRefresh?.();
   }
 
   function scheduleOutputFlush(pane: TerminalPane) {

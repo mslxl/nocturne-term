@@ -288,6 +288,119 @@ jobs:
 
           gh release upload "$RELEASE_TAG" "$upload_file" --clobber
 
+  build_terminal_agents:
+    name: Build Terminal Agent ${{ matrix.label }}
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: Linux x64
+            platform: ubuntu-22.04
+            agent-target: linux/x86_64
+            artifact-path: linux/x86_64
+            binary-name: nocturne-terminal-agent
+            asset-suffix: ""
+          - label: Linux ARM64
+            platform: ubuntu-22.04
+            agent-target: linux/aarch64
+            artifact-path: linux/aarch64
+            binary-name: nocturne-terminal-agent
+            asset-suffix: ""
+          - label: Linux ARMv7
+            platform: ubuntu-22.04
+            agent-target: linux/armv7
+            artifact-path: linux/armv7
+            binary-name: nocturne-terminal-agent
+            asset-suffix: ""
+          - label: macOS Intel
+            platform: macos-15-intel
+            agent-target: macos/x86_64
+            artifact-path: macos/x86_64
+            binary-name: nocturne-terminal-agent
+            asset-suffix: ""
+          - label: macOS Apple Silicon
+            platform: macos-15
+            agent-target: macos/aarch64
+            artifact-path: macos/aarch64
+            binary-name: nocturne-terminal-agent
+            asset-suffix: ""
+          - label: Windows x64
+            platform: windows-latest
+            agent-target: windows/x86_64
+            artifact-path: windows/x86_64
+            binary-name: nocturne-terminal-agent.exe
+            asset-suffix: .exe
+          - label: Windows x86
+            platform: windows-latest
+            agent-target: windows/i686
+            artifact-path: windows/i686
+            binary-name: nocturne-terminal-agent.exe
+            asset-suffix: .exe
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.1.2
+          run_install: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.23.x"
+
+      - name: Install JavaScript dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build Terminal Agent
+        shell: bash
+        env:
+          CGO_ENABLED: 0
+          NOCTURNE_TERMINAL_AGENT_TARGETS: ${{ matrix.agent-target }}
+        run: pnpm build:terminal-agents
+
+      - name: Upload Terminal Agent
+        uses: actions/upload-artifact@v4
+        with:
+          name: terminal-agent-${{ matrix.agent-target }}
+          path: src-tauri/resources/nocturne-terminal-agent
+
+      - name: Upload Terminal Agent release asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+          AGENT_SOURCE: src-tauri/resources/nocturne-terminal-agent/${{ matrix.artifact-path }}
+          AGENT_ASSET: nocturne-terminal-agent-${{ needs.prepare.outputs.tag }}-${{ matrix.artifact-path }}
+          AGENT_BINARY: ${{ matrix.binary-name }}
+          AGENT_ASSET_SUFFIX: ${{ matrix.asset-suffix }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          asset_name="${AGENT_ASSET//\//-}${AGENT_ASSET_SUFFIX}"
+          source_file="${AGENT_SOURCE}/${AGENT_BINARY}"
+
+          if [[ ! -f "$source_file" ]]; then
+            echo "Terminal Agent binary was not produced at ${source_file}" >&2
+            exit 1
+          fi
+
+          upload_dir="$(mktemp -d)"
+          upload_file="${upload_dir}/${asset_name}"
+          cp "$source_file" "$upload_file"
+
+          gh release upload "$RELEASE_TAG" "$upload_file" --clobber
+
   prepare_ripgrep_helpers:
     name: Prepare ripgrep helpers
     needs: prepare
@@ -325,6 +438,7 @@ jobs:
     name: Build ${{ matrix.label }}
     needs:
       - prepare
+      - build_terminal_agents
       - build_resource_monitor_agents
       - prepare_ripgrep_helpers
     strategy:
@@ -463,6 +577,13 @@ jobs:
         with:
           pattern: resource-monitor-agent-*
           path: src-tauri/resources/nocturne-resource-monitor-agent
+          merge-multiple: true
+
+      - name: Download Terminal Agents
+        uses: actions/download-artifact@v4
+        with:
+          pattern: terminal-agent-*
+          path: src-tauri/resources/nocturne-terminal-agent
           merge-multiple: true
 
       - name: Download ripgrep helpers

@@ -10,7 +10,7 @@
   import HostIcon from "$lib/hosts/HostIcon.svelte";
   import HostIconPicker from "$lib/hosts/HostIconPicker.svelte";
   import { inferHostIcon, resolveHostIcon } from "$lib/hosts/icons";
-  import { buildHostFolderTree, compactOptional, cloneHostDocument, emptySshHostDocument, hostAddress, hostFolderPaths, hostHasBlockingDiagnostics, hostSourceLabel, hostSubtitle, setHostProtocol, type HostFolderTreeNode } from "$lib/hosts/model";
+  import { buildHostFolderTree, compactOptional, cloneHostDocument, emptySshHostDocument, hostAddress, hostFolderPaths, hostHasBlockingDiagnostics, hostSourceLabel, hostSubtitle, setHostProtocol, setTerminalAgentMode, terminalAgentAvailableForHost, terminalAgentModeForEditableHost, type HostFolderTreeNode } from "$lib/hosts/model";
   import { hasTauriRuntime } from "$lib/tauri/runtime";
   import { unwrapCommand } from "$lib/terminal/commands";
   import CircleHelp from "~icons/lucide/circle-help";
@@ -50,6 +50,8 @@
   const existingFolders = $derived(hostFolderPaths(hostTree));
   const folderSuggestions = $derived(folderMatches(existingFolders, draft?.folder ?? ""));
   const draftIcon = $derived(draft ? (draft.icon ?? inferHostIcon(draft)) : null);
+  const terminalAgentEditable = $derived(terminalAgentAvailableForHost(selectedHost, editorMode));
+  const terminalAgentEnabled = $derived(draft ? terminalAgentModeForEditableHost(draft) === "enabled" : false);
 
   $effect(() => {
     if (snapshot?.effective_config.root) applyAppPreferences(snapshot.effective_config.root);
@@ -208,6 +210,11 @@
   function updateProtocol(protocol: ConnectionProtocol) {
     if (!draft) return;
     draft = setHostProtocol(draft, protocol);
+  }
+
+  function updateTerminalAgentMode(checked: boolean) {
+    if (!draft || !terminalAgentEditable) return;
+    draft = setTerminalAgentMode(draft, checked ? "enabled" : "disabled");
   }
 
   function localArgsText(document: ConnectionHostDocument) {
@@ -474,6 +481,13 @@
                 {/each}
               </select>
               <small>Where Nocturne saves the host TOML file. It is only selectable for new Nocturne hosts.</small>
+            </label>
+          {/if}
+          {#if terminalAgentEditable}
+            <label class="check">
+              <span>Terminal Agent</span>
+              <input type="checkbox" checked={terminalAgentEnabled} disabled={!terminalAgentEditable} onchange={(event) => updateTerminalAgentMode(event.currentTarget.checked)} />
+              <small>Uses nocturne-terminal-agent for Terminal Sessions on this host. Displayed as Terminals in the workspace.</small>
             </label>
           {/if}
           {#if draft.protocol === "local" && draft.local}

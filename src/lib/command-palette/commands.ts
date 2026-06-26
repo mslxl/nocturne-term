@@ -54,6 +54,16 @@ export const staticPaletteCommands: StaticPaletteCommand[] = [
     },
   },
   {
+    id: "tool.openTerminalSessions",
+    title: { en: "Open Terminals", zh: "打开终端" },
+    scope: { en: "Workspace Tool", zh: "Workspace 工具" },
+    keywords: {
+      en: ["terminal sessions", "sessions", "terminals", "detached", "history", "persistent terminal"],
+      zh: ["终端会话", "会话", "终端", "分离", "历史", "持久终端"],
+      pinyin: ["zhongduanhuihua", "zdhh", "huihua", "hh", "zhongduan", "zd", "fenli", "fl", "lishi", "ls"],
+    },
+  },
+  {
     id: "terminal.splitRight",
     title: { en: "Split Right", zh: "向右拆分" },
     scope: { en: "Terminal", zh: "终端" },

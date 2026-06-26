@@ -11,12 +11,15 @@ use tauri::{AppHandle, Emitter};
 use uuid::Uuid;
 
 use crate::{
-    config::{connection_host_by_id, default_connection_host_id, root_paths},
+    config::{
+        connection_host_by_id, default_connection_host_id, effective_terminal_agent_mode,
+        root_paths,
+    },
     error::{invalid_error, io_error, missing_error, parse_error, Result},
     port_forwarding::{close_host_port_forward_runtime, start_saved_port_forwards_for_host_open},
     types::{
-        ConnectionProtocol, WorkspaceChangedEvent, WorkspaceDispatchInput, WorkspaceDockDirection,
-        WorkspaceDockGroupRole, WorkspaceDockLayout, WorkspaceDockSide,
+        ConnectionProtocol, TerminalAgentMode, WorkspaceChangedEvent, WorkspaceDispatchInput,
+        WorkspaceDockDirection, WorkspaceDockGroupRole, WorkspaceDockLayout, WorkspaceDockSide,
         WorkspaceFloatingWindowState, WorkspaceIntent, WorkspaceLayoutSnapshot, WorkspaceTabState,
         WorkspaceToolKind, WorkspaceToolSlot, WorkspaceToolTab,
     },
@@ -129,6 +132,15 @@ pub(crate) fn owned_workspace_tool_host(
     tool_tab_id: &str,
     expected_kind: WorkspaceToolKind,
 ) -> Result<String> {
+    owned_workspace_tool_host_for_kinds(app, workspace_id, tool_tab_id, &[expected_kind])
+}
+
+pub(crate) fn owned_workspace_tool_host_for_kinds(
+    app: &AppHandle,
+    workspace_id: &str,
+    tool_tab_id: &str,
+    expected_kinds: &[WorkspaceToolKind],
+) -> Result<String> {
     let snapshot = current_snapshot(app)?;
     let workspace = require_workspace(&snapshot, workspace_id)?;
     if !workspace
@@ -150,10 +162,9 @@ pub(crate) fn owned_workspace_tool_host(
             "tool tab {tool_tab_id} owner does not match workspace {workspace_id}"
         )));
     }
-    if tool_tab.kind != expected_kind {
+    if !expected_kinds.iter().any(|kind| *kind == tool_tab.kind) {
         return Err(invalid_error(format!(
-            "tool tab {tool_tab_id} is not a {:?} ToolTab",
-            expected_kind
+            "tool tab {tool_tab_id} is not one of the expected ToolTab kinds"
         )));
     }
     if tool_tab.host_id != workspace.host_id {
@@ -210,15 +221,21 @@ fn workspace_state_path(app: &AppHandle) -> Result<PathBuf> {
 fn default_snapshot(app: &AppHandle) -> Result<WorkspaceLayoutSnapshot> {
     let host_id = default_connection_host_id(app)?;
     let host = connection_host_by_id(app, &host_id)?;
+    let terminal_sessions_enabled = matches!(
+        effective_terminal_agent_mode(&host),
+        TerminalAgentMode::Enabled
+    );
     start_saved_port_forwards_for_host_open(app, &host)?;
     let workspace_id = new_id("workspace");
     let files_tool_id = new_id("tool-files");
     let terminal_tool_id = new_id("tool-terminal");
+    let sessions_tool_id = new_id("tool-terminal-sessions");
     let resources_tool_id = new_id("tool-resources");
     let transfers_tool_id = new_id("tool-transfers");
     let ports_tool_id = new_id("tool-ports");
     let files_slot_id = new_id("slot-files");
     let terminal_slot_id = new_id("slot-terminal");
+    let sessions_slot_id = new_id("slot-terminal-sessions");
     let resources_slot_id = new_id("slot-resources");
     let transfers_slot_id = new_id("slot-transfers");
     let ports_slot_id = new_id("slot-ports");
@@ -234,6 +251,84 @@ fn default_snapshot(app: &AppHandle) -> Result<WorkspaceLayoutSnapshot> {
         .and_then(|files| files.default_path.clone())
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| "~".to_string());
+    let mut owned_tool_tab_ids = vec![
+        files_tool_id.clone(),
+        terminal_tool_id.clone(),
+        resources_tool_id.clone(),
+        transfers_tool_id.clone(),
+        ports_tool_id.clone(),
+    ];
+    if terminal_sessions_enabled {
+        owned_tool_tab_ids.insert(2, sessions_tool_id.clone());
+    }
+    let mut right_group_slots = vec![
+        WorkspaceToolSlot::Owned {
+            id: resources_slot_id.clone(),
+            tool_tab_id: resources_tool_id.clone(),
+        },
+        WorkspaceToolSlot::Owned {
+            id: transfers_slot_id.clone(),
+            tool_tab_id: transfers_tool_id.clone(),
+        },
+    ];
+    if terminal_sessions_enabled {
+        right_group_slots.insert(
+            0,
+            WorkspaceToolSlot::Owned {
+                id: sessions_slot_id.clone(),
+                tool_tab_id: sessions_tool_id.clone(),
+            },
+        );
+    }
+    let mut tool_tabs = vec![
+        WorkspaceToolTab {
+            id: files_tool_id.clone(),
+            kind: WorkspaceToolKind::Files,
+            owner_workspace_id: workspace_id.clone(),
+            host_id: host_id.clone(),
+            title: default_files_path,
+        },
+        WorkspaceToolTab {
+            id: terminal_tool_id.clone(),
+            kind: WorkspaceToolKind::Terminal,
+            owner_workspace_id: workspace_id.clone(),
+            host_id: host_id.clone(),
+            title: default_terminal_title(host.document.protocol),
+        },
+        WorkspaceToolTab {
+            id: resources_tool_id.clone(),
+            kind: WorkspaceToolKind::Resources,
+            owner_workspace_id: workspace_id.clone(),
+            host_id: host_id.clone(),
+            title: "Resources".to_string(),
+        },
+        WorkspaceToolTab {
+            id: transfers_tool_id.clone(),
+            kind: WorkspaceToolKind::Transfers,
+            owner_workspace_id: workspace_id.clone(),
+            host_id: host_id.clone(),
+            title: "Transfers".to_string(),
+        },
+        WorkspaceToolTab {
+            id: ports_tool_id.clone(),
+            kind: WorkspaceToolKind::Ports,
+            owner_workspace_id: workspace_id.clone(),
+            host_id: host_id.clone(),
+            title: "Ports".to_string(),
+        },
+    ];
+    if terminal_sessions_enabled {
+        tool_tabs.insert(
+            2,
+            WorkspaceToolTab {
+                id: sessions_tool_id.clone(),
+                kind: WorkspaceToolKind::TerminalSessions,
+                owner_workspace_id: workspace_id.clone(),
+                host_id: host_id.clone(),
+                title: "Terminals".to_string(),
+            },
+        );
+    }
     Ok(WorkspaceLayoutSnapshot {
         version: 0,
         active_workspace_id: workspace_id.clone(),
@@ -241,13 +336,7 @@ fn default_snapshot(app: &AppHandle) -> Result<WorkspaceLayoutSnapshot> {
             id: workspace_id.clone(),
             host_id: host_id.clone(),
             title: title.clone(),
-            owned_tool_tab_ids: vec![
-                files_tool_id.clone(),
-                terminal_tool_id.clone(),
-                resources_tool_id.clone(),
-                transfers_tool_id.clone(),
-                ports_tool_id.clone(),
-            ],
+            owned_tool_tab_ids,
             layout: WorkspaceDockLayout::Split {
                 direction: WorkspaceDockDirection::Column,
                 children: vec![
@@ -277,17 +366,12 @@ fn default_snapshot(app: &AppHandle) -> Result<WorkspaceLayoutSnapshot> {
                             WorkspaceDockLayout::Group {
                                 id: right_group_id,
                                 role: WorkspaceDockGroupRole::SidePanel,
-                                slots: vec![
-                                    WorkspaceToolSlot::Owned {
-                                        id: resources_slot_id.clone(),
-                                        tool_tab_id: resources_tool_id.clone(),
-                                    },
-                                    WorkspaceToolSlot::Owned {
-                                        id: transfers_slot_id.clone(),
-                                        tool_tab_id: transfers_tool_id.clone(),
-                                    },
-                                ],
-                                active_slot_id: resources_slot_id,
+                                slots: right_group_slots,
+                                active_slot_id: if terminal_sessions_enabled {
+                                    sessions_slot_id.clone()
+                                } else {
+                                    resources_slot_id.clone()
+                                },
                                 collapsed: false,
                             },
                         ],
@@ -307,43 +391,7 @@ fn default_snapshot(app: &AppHandle) -> Result<WorkspaceLayoutSnapshot> {
                 ratios: vec![0.7, 0.3],
             },
         }],
-        tool_tabs: vec![
-            WorkspaceToolTab {
-                id: files_tool_id,
-                kind: WorkspaceToolKind::Files,
-                owner_workspace_id: workspace_id.clone(),
-                host_id: host_id.clone(),
-                title: default_files_path,
-            },
-            WorkspaceToolTab {
-                id: terminal_tool_id,
-                kind: WorkspaceToolKind::Terminal,
-                owner_workspace_id: workspace_id.clone(),
-                host_id: host_id.clone(),
-                title: default_terminal_title(host.document.protocol),
-            },
-            WorkspaceToolTab {
-                id: resources_tool_id,
-                kind: WorkspaceToolKind::Resources,
-                owner_workspace_id: workspace_id.clone(),
-                host_id: host_id.clone(),
-                title: "Resources".to_string(),
-            },
-            WorkspaceToolTab {
-                id: transfers_tool_id,
-                kind: WorkspaceToolKind::Transfers,
-                owner_workspace_id: workspace_id.clone(),
-                host_id: host_id.clone(),
-                title: "Transfers".to_string(),
-            },
-            WorkspaceToolTab {
-                id: ports_tool_id,
-                kind: WorkspaceToolKind::Ports,
-                owner_workspace_id: workspace_id,
-                host_id,
-                title: "Ports".to_string(),
-            },
-        ],
+        tool_tabs,
         floating_windows: Vec::new(),
     })
 }
@@ -443,7 +491,35 @@ fn apply_intent(
         WorkspaceIntent::CreateTerminalToolTab {
             workspace_id,
             target_group_id,
-        } => create_terminal_tool_tab(snapshot, &workspace_id, target_group_id.as_deref()),
+        } => {
+            let host_id = require_workspace(snapshot, &workspace_id)?.host_id.clone();
+            let host = connection_host_by_id(app, &host_id)?;
+            if !matches!(
+                effective_terminal_agent_mode(&host),
+                TerminalAgentMode::Enabled
+            ) {
+                return Err(invalid_error(
+                    "terminal agent mode is disabled for this host",
+                ));
+            }
+            create_terminal_tool_tab(snapshot, &workspace_id, target_group_id.as_deref())
+        }
+        WorkspaceIntent::OpenTerminalSessionsToolTab {
+            workspace_id,
+            target_group_id,
+        } => {
+            let host_id = require_workspace(snapshot, &workspace_id)?.host_id.clone();
+            let host = connection_host_by_id(app, &host_id)?;
+            if !matches!(
+                effective_terminal_agent_mode(&host),
+                TerminalAgentMode::Enabled
+            ) {
+                return Err(invalid_error(
+                    "terminal agent mode is disabled for this host",
+                ));
+            }
+            open_terminal_sessions_tool_tab(snapshot, &workspace_id, target_group_id.as_deref())
+        }
         WorkspaceIntent::OpenResourceMonitorToolTab {
             workspace_id,
             target_group_id,
@@ -457,15 +533,21 @@ fn create_workspace(
     host_id: String,
 ) -> Result<()> {
     let host = connection_host_by_id(app, &host_id)?;
+    let terminal_sessions_enabled = matches!(
+        effective_terminal_agent_mode(&host),
+        TerminalAgentMode::Enabled
+    );
     start_saved_port_forwards_for_host_open(app, &host)?;
     let workspace_id = new_id("workspace");
     let files_tool_id = new_id("tool-files");
     let terminal_tool_id = new_id("tool-terminal");
+    let sessions_tool_id = new_id("tool-terminal-sessions");
     let resources_tool_id = new_id("tool-resources");
     let transfers_tool_id = new_id("tool-transfers");
     let ports_tool_id = new_id("tool-ports");
     let files_slot_id = new_id("slot-files");
     let terminal_slot_id = new_id("slot-terminal");
+    let sessions_slot_id = new_id("slot-terminal-sessions");
     let resources_slot_id = new_id("slot-resources");
     let transfers_slot_id = new_id("slot-transfers");
     let ports_slot_id = new_id("slot-ports");
@@ -484,26 +566,33 @@ fn create_workspace(
     let tool_ids = NewWorkspaceToolIds {
         files_tool_id: files_tool_id.clone(),
         terminal_tool_id: terminal_tool_id.clone(),
+        sessions_tool_id: sessions_tool_id.clone(),
         resources_tool_id: resources_tool_id.clone(),
         transfers_tool_id: transfers_tool_id.clone(),
         ports_tool_id: ports_tool_id.clone(),
         files_slot_id: files_slot_id.clone(),
         terminal_slot_id: terminal_slot_id.clone(),
+        sessions_slot_id: sessions_slot_id.clone(),
         resources_slot_id: resources_slot_id.clone(),
         transfers_slot_id: transfers_slot_id.clone(),
         ports_slot_id: ports_slot_id.clone(),
     };
-    let layout_plan =
-        remembered_workspace_layout(snapshot, &snapshot.active_workspace_id, &tool_ids)?
-            .unwrap_or_else(|| {
-                default_new_workspace_layout(
-                    files_group_id,
-                    terminal_group_id,
-                    right_group_id,
-                    ports_group_id,
-                    &tool_ids,
-                )
-            });
+    let layout_plan = remembered_workspace_layout(
+        snapshot,
+        &snapshot.active_workspace_id,
+        &tool_ids,
+        terminal_sessions_enabled,
+    )?
+    .unwrap_or_else(|| {
+        default_new_workspace_layout(
+            files_group_id,
+            terminal_group_id,
+            right_group_id,
+            ports_group_id,
+            &tool_ids,
+            terminal_sessions_enabled,
+        )
+    });
     snapshot.workspaces.push(WorkspaceTabState {
         id: workspace_id.clone(),
         host_id: host_id.clone(),
@@ -527,6 +616,15 @@ fn create_workspace(
         host_id: host_id.clone(),
         title: default_terminal_title(host.document.protocol),
     });
+    if terminal_sessions_enabled && layout_plan.used.sessions {
+        snapshot.tool_tabs.push(WorkspaceToolTab {
+            id: sessions_tool_id,
+            kind: WorkspaceToolKind::TerminalSessions,
+            owner_workspace_id: workspace_id.clone(),
+            host_id: host_id.clone(),
+            title: "Terminals".to_string(),
+        });
+    }
     if layout_plan.used.resources {
         snapshot.tool_tabs.push(WorkspaceToolTab {
             id: resources_tool_id,
@@ -561,11 +659,13 @@ fn create_workspace(
 struct NewWorkspaceToolIds {
     files_tool_id: String,
     terminal_tool_id: String,
+    sessions_tool_id: String,
     resources_tool_id: String,
     transfers_tool_id: String,
     ports_tool_id: String,
     files_slot_id: String,
     terminal_slot_id: String,
+    sessions_slot_id: String,
     resources_slot_id: String,
     transfers_slot_id: String,
     ports_slot_id: String,
@@ -575,6 +675,7 @@ struct NewWorkspaceToolIds {
 struct NewWorkspaceToolUsage {
     files: bool,
     terminal: bool,
+    sessions: bool,
     resources: bool,
     transfers: bool,
     ports: bool,
@@ -592,15 +693,37 @@ fn default_new_workspace_layout(
     right_group_id: String,
     ports_group_id: String,
     ids: &NewWorkspaceToolIds,
+    sessions_enabled: bool,
 ) -> NewWorkspaceLayoutPlan {
+    let mut owned_tool_tab_ids = vec![
+        ids.files_tool_id.clone(),
+        ids.terminal_tool_id.clone(),
+        ids.resources_tool_id.clone(),
+        ids.transfers_tool_id.clone(),
+        ids.ports_tool_id.clone(),
+    ];
+    let mut right_group_slots = vec![
+        WorkspaceToolSlot::Owned {
+            id: ids.resources_slot_id.clone(),
+            tool_tab_id: ids.resources_tool_id.clone(),
+        },
+        WorkspaceToolSlot::Owned {
+            id: ids.transfers_slot_id.clone(),
+            tool_tab_id: ids.transfers_tool_id.clone(),
+        },
+    ];
+    if sessions_enabled {
+        owned_tool_tab_ids.insert(2, ids.sessions_tool_id.clone());
+        right_group_slots.insert(
+            0,
+            WorkspaceToolSlot::Owned {
+                id: ids.sessions_slot_id.clone(),
+                tool_tab_id: ids.sessions_tool_id.clone(),
+            },
+        );
+    }
     NewWorkspaceLayoutPlan {
-        owned_tool_tab_ids: vec![
-            ids.files_tool_id.clone(),
-            ids.terminal_tool_id.clone(),
-            ids.resources_tool_id.clone(),
-            ids.transfers_tool_id.clone(),
-            ids.ports_tool_id.clone(),
-        ],
+        owned_tool_tab_ids,
         layout: WorkspaceDockLayout::Split {
             direction: WorkspaceDockDirection::Column,
             children: vec![
@@ -630,17 +753,12 @@ fn default_new_workspace_layout(
                         WorkspaceDockLayout::Group {
                             id: right_group_id,
                             role: WorkspaceDockGroupRole::SidePanel,
-                            slots: vec![
-                                WorkspaceToolSlot::Owned {
-                                    id: ids.resources_slot_id.clone(),
-                                    tool_tab_id: ids.resources_tool_id.clone(),
-                                },
-                                WorkspaceToolSlot::Owned {
-                                    id: ids.transfers_slot_id.clone(),
-                                    tool_tab_id: ids.transfers_tool_id.clone(),
-                                },
-                            ],
-                            active_slot_id: ids.resources_slot_id.clone(),
+                            slots: right_group_slots,
+                            active_slot_id: if sessions_enabled {
+                                ids.sessions_slot_id.clone()
+                            } else {
+                                ids.resources_slot_id.clone()
+                            },
                             collapsed: false,
                         },
                     ],
@@ -662,6 +780,7 @@ fn default_new_workspace_layout(
         used: NewWorkspaceToolUsage {
             files: true,
             terminal: true,
+            sessions: sessions_enabled,
             resources: true,
             transfers: true,
             ports: true,
@@ -673,6 +792,7 @@ fn remembered_workspace_layout(
     snapshot: &WorkspaceLayoutSnapshot,
     source_workspace_id: &str,
     ids: &NewWorkspaceToolIds,
+    sessions_enabled: bool,
 ) -> Result<Option<NewWorkspaceLayoutPlan>> {
     let source = match snapshot
         .workspaces
@@ -688,6 +808,7 @@ fn remembered_workspace_layout(
         snapshot,
         source_workspace_id,
         ids,
+        sessions_enabled,
         &mut used,
     )?
     else {
@@ -704,6 +825,20 @@ fn remembered_workspace_layout(
             },
             &mut used,
         )?
+    };
+    let layout = if !sessions_enabled || used.sessions {
+        layout
+    } else {
+        let layout = add_slot_to_first_side_panel_group(
+            layout,
+            WorkspaceToolSlot::Owned {
+                id: ids.sessions_slot_id.clone(),
+                tool_tab_id: ids.sessions_tool_id.clone(),
+            },
+            "Terminals",
+        )?;
+        used.sessions = true;
+        layout
     };
     let Some(layout) = cleanup_dock_layout(Some(layout))? else {
         return Ok(None);
@@ -723,6 +858,7 @@ fn remap_remembered_layout(
     snapshot: &WorkspaceLayoutSnapshot,
     source_workspace_id: &str,
     ids: &NewWorkspaceToolIds,
+    sessions_enabled: bool,
     used: &mut NewWorkspaceToolUsage,
 ) -> Result<Option<WorkspaceDockLayout>> {
     match layout {
@@ -736,9 +872,14 @@ fn remap_remembered_layout(
             let mut active = String::new();
             for slot in slots {
                 let old_slot_id = workspace_slot_id(slot);
-                if let Some(remapped) =
-                    remap_remembered_slot(slot, snapshot, source_workspace_id, ids, used)?
-                {
+                if let Some(remapped) = remap_remembered_slot(
+                    slot,
+                    snapshot,
+                    source_workspace_id,
+                    ids,
+                    sessions_enabled,
+                    used,
+                )? {
                     if old_slot_id == active_slot_id {
                         active = workspace_slot_id(&remapped).to_string();
                     }
@@ -777,9 +918,14 @@ fn remap_remembered_layout(
             let mut remapped_children = Vec::new();
             let mut remapped_ratios = Vec::new();
             for (index, child) in children.iter().enumerate() {
-                if let Some(remapped) =
-                    remap_remembered_layout(child, snapshot, source_workspace_id, ids, used)?
-                {
+                if let Some(remapped) = remap_remembered_layout(
+                    child,
+                    snapshot,
+                    source_workspace_id,
+                    ids,
+                    sessions_enabled,
+                    used,
+                )? {
                     remapped_children.push(remapped);
                     remapped_ratios.push(ratios.get(index).copied().unwrap_or(1.0));
                 }
@@ -802,6 +948,7 @@ fn remap_remembered_slot(
     snapshot: &WorkspaceLayoutSnapshot,
     source_workspace_id: &str,
     ids: &NewWorkspaceToolIds,
+    sessions_enabled: bool,
     used: &mut NewWorkspaceToolUsage,
 ) -> Result<Option<WorkspaceToolSlot>> {
     let WorkspaceToolSlot::Owned { tool_tab_id, .. } = slot else {
@@ -825,6 +972,10 @@ fn remap_remembered_slot(
         WorkspaceToolKind::Terminal if !used.terminal => {
             used.terminal = true;
             Some((ids.terminal_slot_id.clone(), ids.terminal_tool_id.clone()))
+        }
+        WorkspaceToolKind::TerminalSessions if sessions_enabled && !used.sessions => {
+            used.sessions = true;
+            Some((ids.sessions_slot_id.clone(), ids.sessions_tool_id.clone()))
         }
         WorkspaceToolKind::Resources if !used.resources => {
             used.resources = true;
@@ -902,6 +1053,80 @@ fn add_slot_to_first_content_group(
     }
 }
 
+fn add_slot_to_first_side_panel_group(
+    layout: WorkspaceDockLayout,
+    slot: WorkspaceToolSlot,
+    missing_name: &str,
+) -> Result<WorkspaceDockLayout> {
+    match layout {
+        WorkspaceDockLayout::Group {
+            id,
+            role,
+            mut slots,
+            active_slot_id,
+            ..
+        } if role == WorkspaceDockGroupRole::SidePanel => {
+            let slot_id = workspace_slot_id(&slot).to_string();
+            slots.push(slot);
+            Ok(WorkspaceDockLayout::Group {
+                id,
+                role,
+                slots,
+                active_slot_id: if active_slot_id.is_empty() {
+                    slot_id
+                } else {
+                    active_slot_id
+                },
+                collapsed: false,
+            })
+        }
+        WorkspaceDockLayout::Group { .. } => Ok(layout),
+        WorkspaceDockLayout::Split {
+            direction,
+            children,
+            ratios,
+        } => {
+            let mut inserted = false;
+            let mut next_children = Vec::new();
+            for child in children {
+                if inserted {
+                    next_children.push(child);
+                    continue;
+                }
+                let before = count_side_panel_slots(&child);
+                let next = add_slot_to_first_side_panel_group(child, slot.clone(), missing_name)?;
+                inserted = count_side_panel_slots(&next) > before;
+                next_children.push(next);
+            }
+            if !inserted {
+                return Err(invalid_error(format!(
+                    "remembered layout has no side panel group for {missing_name}"
+                )));
+            }
+            Ok(WorkspaceDockLayout::Split {
+                direction,
+                children: next_children,
+                ratios,
+            })
+        }
+    }
+}
+
+fn count_side_panel_slots(layout: &WorkspaceDockLayout) -> usize {
+    match layout {
+        WorkspaceDockLayout::Group { role, slots, .. } => {
+            if *role == WorkspaceDockGroupRole::SidePanel {
+                slots.len()
+            } else {
+                0
+            }
+        }
+        WorkspaceDockLayout::Split { children, .. } => {
+            children.iter().map(count_side_panel_slots).sum()
+        }
+    }
+}
+
 fn remembered_owned_tool_tab_ids(
     ids: &NewWorkspaceToolIds,
     used: NewWorkspaceToolUsage,
@@ -911,6 +1136,9 @@ fn remembered_owned_tool_tab_ids(
         tool_ids.push(ids.files_tool_id.clone());
     }
     tool_ids.push(ids.terminal_tool_id.clone());
+    if used.sessions {
+        tool_ids.push(ids.sessions_tool_id.clone());
+    }
     if used.resources {
         tool_ids.push(ids.resources_tool_id.clone());
     }
@@ -1376,6 +1604,7 @@ fn inserted_group_role_for_split(
             moved_kind,
             Some(
                 WorkspaceToolKind::Files
+                    | WorkspaceToolKind::TerminalSessions
                     | WorkspaceToolKind::Resources
                     | WorkspaceToolKind::Transfers
                     | WorkspaceToolKind::Ports
@@ -1470,6 +1699,51 @@ fn create_terminal_tool_tab(
         }
         None => add_slot_to_first_group(workspace.layout.clone(), slot)?,
     };
+    Ok(())
+}
+
+fn open_terminal_sessions_tool_tab(
+    snapshot: &mut WorkspaceLayoutSnapshot,
+    workspace_id: &str,
+    target_group_id: Option<&str>,
+) -> Result<()> {
+    let workspace = require_workspace(snapshot, workspace_id)?.clone();
+    if let Some(existing) = snapshot
+        .tool_tabs
+        .iter()
+        .find(|tool_tab| {
+            tool_tab.owner_workspace_id == workspace_id
+                && matches!(tool_tab.kind, WorkspaceToolKind::TerminalSessions)
+        })
+        .cloned()
+    {
+        if let Some(slot_id) = find_owned_slot_for_tool_tab(&workspace.layout, &existing.id) {
+            return activate_tool_slot(snapshot, workspace_id, &slot_id);
+        }
+        let slot = WorkspaceToolSlot::Owned {
+            id: new_id("slot-terminal-sessions"),
+            tool_tab_id: existing.id,
+        };
+        let workspace = require_workspace_mut(snapshot, workspace_id)?;
+        workspace.layout = add_side_panel_slot(workspace.layout.clone(), target_group_id, slot)?;
+        return Ok(());
+    }
+
+    let tool_tab_id = new_id("tool-terminal-sessions");
+    let slot = WorkspaceToolSlot::Owned {
+        id: new_id("slot-terminal-sessions"),
+        tool_tab_id: tool_tab_id.clone(),
+    };
+    snapshot.tool_tabs.push(WorkspaceToolTab {
+        id: tool_tab_id.clone(),
+        kind: WorkspaceToolKind::TerminalSessions,
+        owner_workspace_id: workspace_id.to_string(),
+        host_id: workspace.host_id,
+        title: "Terminals".to_string(),
+    });
+    let workspace = require_workspace_mut(snapshot, workspace_id)?;
+    workspace.owned_tool_tab_ids.push(tool_tab_id);
+    workspace.layout = add_side_panel_slot(workspace.layout.clone(), target_group_id, slot)?;
     Ok(())
 }
 
@@ -1661,7 +1935,11 @@ fn activate_slot(layout: WorkspaceDockLayout, slot_id_value: &str) -> Result<Wor
                 role,
                 slots,
                 active_slot_id: active,
-                collapsed: if contains_requested_slot { false } else { collapsed },
+                collapsed: if contains_requested_slot {
+                    false
+                } else {
+                    collapsed
+                },
             }
         }
         WorkspaceDockLayout::Split {
@@ -1856,6 +2134,14 @@ fn open_resource_monitor_tool_tab(
 }
 
 fn add_resource_monitor_slot(
+    layout: WorkspaceDockLayout,
+    target_group_id: Option<&str>,
+    slot: WorkspaceToolSlot,
+) -> Result<WorkspaceDockLayout> {
+    add_side_panel_slot(layout, target_group_id, slot)
+}
+
+fn add_side_panel_slot(
     layout: WorkspaceDockLayout,
     target_group_id: Option<&str>,
     slot: WorkspaceToolSlot,
@@ -2088,7 +2374,13 @@ fn set_group_collapsed(
 fn map_group(
     layout: WorkspaceDockLayout,
     group_id_value: &str,
-    map: &impl Fn(String, WorkspaceDockGroupRole, Vec<WorkspaceToolSlot>, String, bool) -> WorkspaceDockLayout,
+    map: &impl Fn(
+        String,
+        WorkspaceDockGroupRole,
+        Vec<WorkspaceToolSlot>,
+        String,
+        bool,
+    ) -> WorkspaceDockLayout,
 ) -> Result<WorkspaceDockLayout> {
     match layout {
         WorkspaceDockLayout::Group {
@@ -2791,6 +3083,7 @@ fn intent_name(intent: &WorkspaceIntent) -> &'static str {
         WorkspaceIntent::MoveToolSlotToWorkspaceEdge { .. } => "move_tool_slot_to_workspace_edge",
         WorkspaceIntent::SplitToolSlot { .. } => "split_tool_slot",
         WorkspaceIntent::CreateTerminalToolTab { .. } => "create_terminal_tool_tab",
+        WorkspaceIntent::OpenTerminalSessionsToolTab { .. } => "open_terminal_sessions_tool_tab",
         WorkspaceIntent::OpenResourceMonitorToolTab { .. } => "open_resource_monitor_tool_tab",
     }
 }
@@ -3067,7 +3360,10 @@ mod tests {
             find_group_role_containing_slot(&workspace.layout, "slot-terminal-a"),
             Some(WorkspaceDockGroupRole::Content)
         );
-        assert_eq!(group.iter().map(workspace_slot_id).collect::<Vec<_>>(), vec!["slot-files-a"]);
+        assert_eq!(
+            group.iter().map(workspace_slot_id).collect::<Vec<_>>(),
+            vec!["slot-files-a"]
+        );
         let WorkspaceDockLayout::Split {
             direction,
             children,

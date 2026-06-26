@@ -32,7 +32,7 @@ const portOffset = workerId * 10;
 
 process.env.TAURI_TEST_DRIVER_PORT ??= String(4444 + portOffset);
 process.env.TAURI_TEST_NATIVE_DRIVER_PORT ??= String(9515 + portOffset);
-process.env.TAURI_TEST_DEV_URL ??= "http://localhost:1420/";
+process.env.TAURI_TEST_DEV_URL ??= "http://127.0.0.1:1420/";
 process.env.NOCTURNE_DEV_PORT ??= String(new URL(process.env.TAURI_TEST_DEV_URL).port);
 
 const fetchPatchKey = Symbol.for("nocturne.tauriTest.webdriverSessionRetry");

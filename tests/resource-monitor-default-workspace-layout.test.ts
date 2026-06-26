@@ -12,8 +12,9 @@
  * Expected:
  * The Workspace owns Files, Terminal, Resource Monitor, Transfer Queue, and
  * Ports. Files is docked on the left, Terminal is in the content group,
- * Resource Monitor and Transfer Queue are docked in the right-side group with
- * Resource Monitor active, and Ports is docked in a bottom panel by default.
+ * Terminal Sessions, Resource Monitor, and Transfer Queue are docked in the
+ * right-side group with Terminal Sessions active, and Ports is docked in a
+ * bottom panel by default.
  */
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
@@ -40,6 +41,7 @@ describe("Resource Monitor default Workspace layout", () => {
     assert.deepEqual(workspace.ownedToolTabIds, [
       ids.filesToolId,
       ids.terminalToolId,
+      ids.terminalSessionsToolId,
       ids.resourcesToolId,
       ids.transfersToolId,
       ids.portsToolId,
@@ -48,6 +50,7 @@ describe("Resource Monitor default Workspace layout", () => {
     const kindsById = Object.fromEntries(snapshot.toolTabs.map((toolTab) => [toolTab.id, toolTab.kind]));
     assert.equal(kindsById[ids.filesToolId], "files");
     assert.equal(kindsById[ids.terminalToolId], "terminal");
+    assert.equal(kindsById[ids.terminalSessionsToolId], "terminal_sessions");
     assert.equal(kindsById[ids.resourcesToolId], "resources");
     assert.equal(kindsById[ids.transfersToolId], "transfers");
     assert.equal(kindsById[ids.portsToolId], "ports");
@@ -77,8 +80,8 @@ describe("Resource Monitor default Workspace layout", () => {
     assert.equal(terminalGroup.role, "content");
     assert.deepEqual(ownedToolTabIds(terminalGroup.slots), [ids.terminalToolId]);
     assert.equal(rightGroup.role, "side_panel");
-    assert.deepEqual(ownedToolTabIds(rightGroup.slots), [ids.resourcesToolId, ids.transfersToolId]);
-    assert.equal(rightGroup.activeSlotId, ids.resourcesSlotId);
+    assert.deepEqual(ownedToolTabIds(rightGroup.slots), [ids.terminalSessionsToolId, ids.resourcesToolId, ids.transfersToolId]);
+    assert.equal(rightGroup.activeSlotId, ids.terminalSessionsSlotId);
     assert.equal(portsGroup.role, "side_panel");
     assert.deepEqual(ownedToolTabIds(portsGroup.slots), [ids.portsToolId]);
     assert.equal(portsGroup.activeSlotId, ids.portsSlotId);

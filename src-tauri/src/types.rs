@@ -41,6 +41,7 @@ pub struct ConnectionHostDocument {
     pub resources: Option<HostResourceConfig>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub port_forwards: Vec<PortForwardRule>,
+    pub terminal: Option<HostTerminalConfig>,
     pub protocol: ConnectionProtocol,
     pub local: Option<LocalConnectionConfig>,
     pub ssh: Option<SshConnectionConfig>,
@@ -58,6 +59,7 @@ impl Default for ConnectionHostDocument {
             files: None,
             resources: None,
             port_forwards: Vec::new(),
+            terminal: None,
             protocol: ConnectionProtocol::Local,
             local: None,
             ssh: None,
@@ -291,6 +293,11 @@ pub struct PortForwardNonLoopbackRisk {
     pub reasons: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type, Default)]
+pub struct HostTerminalConfig {
+    pub agent_mode: Option<TerminalAgentMode>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "snake_case")]
 pub enum RemoteResourceTargetOs {
@@ -443,6 +450,7 @@ pub struct ConfigKeyPathInput {
 pub enum WorkspaceToolKind {
     Files,
     Terminal,
+    TerminalSessions,
     Transfers,
     Resources,
     Ports,
@@ -648,6 +656,10 @@ pub enum WorkspaceIntent {
         side: WorkspaceDockSide,
     },
     CreateTerminalToolTab {
+        workspace_id: String,
+        target_group_id: Option<String>,
+    },
+    OpenTerminalSessionsToolTab {
         workspace_id: String,
         target_group_id: Option<String>,
     },
@@ -1014,6 +1026,7 @@ pub struct PaneContextMenuInput {
     pub has_selection: bool,
     pub read_only: bool,
     pub has_multiple_panes: bool,
+    pub can_detach: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
@@ -1048,6 +1061,7 @@ pub enum PaneMenuAction {
     ResetTerminal,
     ToggleReadOnly,
     ChangeTabTitle,
+    DetachSession,
     ZoomSplit,
     ClosePane,
     SplitLeft,
@@ -1202,6 +1216,19 @@ pub enum TerminalTransportKind {
     Local,
     Ssh,
     Telnet,
+    Agent,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum TerminalAgentMode {
+    Enabled,
+    Disabled,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct TerminalAgentSessionInfo {
+    pub session_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
@@ -1363,6 +1390,12 @@ pub struct TerminalInput {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct TerminalTitleInput {
+    pub session_id: String,
+    pub title: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
 pub struct TerminalSessionInfo {
     pub id: String,
     pub title: String,
@@ -1375,6 +1408,7 @@ pub struct TerminalSessionInfo {
     pub process_id: Option<u32>,
     pub transport: TerminalTransportKind,
     pub transport_state: TerminalTransportState,
+    pub agent: Option<TerminalAgentSessionInfo>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
@@ -1386,6 +1420,51 @@ pub struct ExistingTerminalSessionInput {
 pub struct TerminalSessionOwnershipInput {
     pub session_ids: Vec<String>,
     pub window_label: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct TerminalDetachInput {
+    pub session_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct TerminalDetachedSessionInfo {
+    pub session_id: String,
+    pub title: String,
+    pub command: String,
+    pub cols: u16,
+    pub rows: u16,
+    pub detached: bool,
+    pub attached_count: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct DetachedTerminalSessionsInput {
+    pub workspace_id: String,
+    pub tool_tab_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct AttachDetachedTerminalSessionInput {
+    pub workspace_id: String,
+    pub tool_tab_id: String,
+    pub detached_session_id: String,
+    pub window_label: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct OpenDetachedTerminalSessionHistoryInput {
+    pub workspace_id: String,
+    pub tool_tab_id: String,
+    pub detached_session_id: String,
+    pub window_label: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct DeleteDetachedTerminalSessionInput {
+    pub workspace_id: String,
+    pub tool_tab_id: String,
+    pub detached_session_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]

@@ -162,6 +162,9 @@ default_path = "/var/www"
 target_os = "linux"       # optional: linux | macos | windows
 target_arch = "x86_64"    # optional: x86_64 | aarch64 | armv7 | i686
 remote_provider = "auto"  # optional: auto | agent | system_commands
+
+[terminal]
+agent_mode = "enabled"    # optional: enabled | disabled
 ```
 
 `[resources].target_os` and `[resources].target_arch` are optional hints for Resource Monitor helper selection. Leave both unset to let Nocturne detect the remote target at runtime. If only one is set, Nocturne treats the resource target config as incomplete and asks the Workspace to choose rather than guessing.
@@ -172,6 +175,35 @@ Resource Monitor helper according to the remote helper policy, and
 `system_commands` only runs commands already present on the target Host. The
 Resource Monitor ToolTab exposes a compact control that edits this Host field
 for editable Nocturne user hosts.
+
+`[terminal].agent_mode` controls whether new Terminal ToolTabs for the host use
+`nocturne-terminal-agent`. Editable Nocturne user hosts default to `enabled`
+when the field is omitted. Setting `agent_mode = "disabled"` keeps the current
+direct PTY/SSH terminal transport and does not upload or start
+`nocturne-terminal-agent`. The virtual default local host is read-only because
+there is no host TOML to edit, but it still uses Terminal Agent mode by default
+through Nocturne's bundled same-machine helper. Other read-only hosts, including
+OpenSSH-derived hosts, cannot enable Terminal Agent mode in the first
+implementation and behave as disabled.
+
+The runtime supports editable local hosts through a same-machine Terminal Agent
+daemon launched from Nocturne. Editable SSH hosts use a packaged target-platform
+`nocturne-terminal-agent` helper. Nocturne detects or uses the host's configured
+target OS/architecture, uploads the helper through SFTP according to the remote
+helper policy, starts it on the remote Host, and then uses SSH exec channels to
+run helper client commands on that same remote Host. Local and remote control
+paths both go through the helper client with `--session-id`; the helper reads
+the daemon registry, connects to the recorded Unix socket or Windows named pipe
+on the same Host, and proxies request_id-correlated NDJSON. If Terminal Agent
+mode is enabled and the helper cannot be selected, uploaded, verified, started,
+or probed through its registry, session creation fails fast instead of silently
+falling back to direct SSH PTY mode.
+
+The Go rewrite makes the agent a host-level persistent daemon. Nocturne is the
+client that creates launch specs, probes the registry, and reconnects to an
+existing session instead of assuming a one-shot PTY child process. Registry
+files are keyed by `session_id`, and the daemon keeps exited sessions visible
+until the user deletes them.
 
 Example local host:
 
@@ -192,6 +224,9 @@ cwd = "~/Projects/nocturne"
 
 [files]
 default_path = "~/Projects"
+
+[terminal]
+agent_mode = "disabled"
 ```
 
 Future Telnet example:

@@ -107,6 +107,34 @@ default_path = "~/Projects"
 
 The default path is used by the Files tool tab. For local hosts it resolves on the local filesystem. For SSH hosts it resolves on the remote filesystem. It is an initial path only, not an access restriction.
 
+User-created host TOML may include a host-level `[terminal]` table:
+
+```toml
+[terminal]
+agent_mode = "disabled"
+```
+
+Editable Nocturne user hosts default `agent_mode` to `enabled` when omitted.
+The virtual default local host is read-only because it has no host TOML, but it
+still defaults to Terminal Agent mode through the bundled same-machine helper.
+Other read-only hosts, including OpenSSH-derived hosts, cannot enable Terminal
+Agent mode in the first implementation and behave as disabled.
+
+The runtime supports local editable hosts by launching a same-machine Terminal
+Agent daemon from the bundled Go helper. Local and SSH-backed sessions both use
+the helper client path for control: Nocturne passes a `session_id`, the helper
+client loads `<session_id>.toml` from the target host registry, reads the local
+endpoint, and proxies NDJSON requests to the daemon. Editable SSH hosts use a
+packaged target-platform `nocturne-terminal-agent` helper uploaded through SFTP
+according to the remote helper policy. Nocturne starts the helper on the remote
+Host, then runs helper client commands over SSH exec so every control request
+still reaches only the remote Host's local UDS or named-pipe endpoint. If helper
+selection, upload, verification, startup, or registry probing fails while
+`agent_mode` is enabled, session creation fails fast instead of using the direct
+SSH PTY transport.
+
+The persistent daemon and registry contract live in [Terminal Daemon](terminal-daemon.md). In short: Nocturne generates the launch spec, the daemon writes the per-session TOML registry, and the transcript path stays relative inside the daemon-managed state root. CGO stays disabled by default for the Go helper; any Windows ConPTY or PTY exception must be documented in that file and in CI before it is enabled.
+
 Application config may also specify one or more OpenSSH config files through `openssh_config_files`.
 
 If no custom OpenSSH config file list is stored, the default is:

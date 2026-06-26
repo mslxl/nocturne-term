@@ -12,9 +12,24 @@ const resourceMonitorAgentRoot = resolve(
   "resources",
   "nocturne-resource-monitor-agent",
 );
+const terminalAgentRoot = resolve(
+  repoRoot,
+  "src-tauri",
+  "resources",
+  "nocturne-terminal-agent",
+);
 const ripgrepRoot = resolve(repoRoot, "src-tauri", "resources", "ripgrep");
 
 const requiredFiles = [
+  ...[
+    "linux/x86_64/nocturne-terminal-agent",
+    "linux/aarch64/nocturne-terminal-agent",
+    "linux/armv7/nocturne-terminal-agent",
+    "macos/x86_64/nocturne-terminal-agent",
+    "macos/aarch64/nocturne-terminal-agent",
+    "windows/x86_64/nocturne-terminal-agent.exe",
+    "windows/i686/nocturne-terminal-agent.exe",
+  ].map((file) => resolve(terminalAgentRoot, file)),
   ...[
     "linux/x86_64/nocturne-resource-monitor-agent",
     "linux/aarch64/nocturne-resource-monitor-agent",

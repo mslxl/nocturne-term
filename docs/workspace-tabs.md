@@ -37,11 +37,12 @@ Tool tabs are the tabs inside a workspace dock layout:
 type ToolTab =
   | { kind: "files"; ownerWorkspaceId: string; hostId: string }
   | { kind: "terminal"; ownerWorkspaceId: string; hostId: string }
+  | { kind: "terminal_sessions"; ownerWorkspaceId: string; hostId: string }
   | { kind: "transfers"; ownerWorkspaceId: string; hostId: string }
   | { kind: "resources"; ownerWorkspaceId: string; hostId: string };
 ```
 
-The first release includes `files`, `terminal`, `transfers`, and `resources`.
+The first release includes `files`, `terminal`, `terminal_sessions`, `transfers`, `resources`, and `ports`.
 
 ## Tool Tab Ownership
 
@@ -181,6 +182,15 @@ Terminal tool tab titles:
 
 Transfers tool tab titles should be concise, normally `Transfers`.
 
+Terminal Sessions is the internal ToolTab concept for the host-level registry
+view. Its normal user-facing display title is `Terminals`. When the tab is
+shown in a narrow vertical rail, the compact display title may shrink to
+`Terms` to avoid forcing a native scrollbar before the list itself needs to
+scroll. It lists every registry-backed terminal session for the Workspace Host.
+Running or detached rows attach into a normal Terminal ToolTab; exited rows open
+a read-only Terminal ToolTab that shows the saved transcript history and does
+not start a new command.
+
 Resource Monitor tool tab titles should be concise, normally `Resources`.
 
 ## Default Workspace Template
@@ -189,7 +199,8 @@ The default workspace template contains:
 
 - Files tool tab, docked on the left
 - Terminal tool tab, docked in the main content area
-- Resource Monitor tool tab, docked in a right-side dock group and active by default
+- Terminal Sessions tool tab, displayed as `Terminals`, docked in a right-side dock group and active by default
+- Resource Monitor tool tab, docked in the same right-side dock group
 - Transfers tool tab, docked in the same right-side dock group
 
 Files, Terminal, Resources, and Transfers are ordinary dock group ToolTabs. The template chooses their initial placement; the model does not make the left or right areas special.

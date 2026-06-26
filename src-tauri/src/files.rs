@@ -3041,7 +3041,8 @@ mod tests {
             diagnostics: Vec::new(),
         };
 
-        let root_result = list_local_files(&host, Some("/".to_string())).expect("list virtual root");
+        let root_result =
+            list_local_files(&host, Some("/".to_string())).expect("list virtual root");
         let current_drive = root
             .path()
             .components()
@@ -3055,7 +3056,8 @@ mod tests {
             root_result
                 .entries
                 .iter()
-                .any(|entry| entry.name == current_drive && entry.path == format!("{current_drive}/")),
+                .any(|entry| entry.name == current_drive
+                    && entry.path == format!("{current_drive}/")),
             "virtual root should include the current drive; entries: {:?}",
             root_result.entries
         );

@@ -13,9 +13,10 @@
  *
  * Expected:
  * Both default startup Workspaces and newly created Workspaces include Files,
- * Terminal, Resource Monitor, Transfer Queue, and Ports. The root layout is a
- * column split whose top area is the three-column Files/Terminal/Resources row
- * and whose bottom panel contains Ports by default.
+ * Terminal, Resource Monitor, Transfer Queue, and Ports, with Terminal Sessions
+ * added only when Terminal Agent mode is enabled for the Host.
+ * The root layout is a column split whose top area is the three-column
+ * Files/Terminal/Resources row and whose bottom panel contains Ports by default.
  */
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
@@ -28,29 +29,35 @@ describe("Resource Monitor backend default Workspace layout", () => {
     const createWorkspaceDefault = extractFunctionSource(source, "default_new_workspace_layout");
 
     assert.match(defaultSnapshot, /let resources_tool_id = new_id\("tool-resources"\)/);
+    assert.match(defaultSnapshot, /let sessions_tool_id = new_id\("tool-terminal-sessions"\)/);
     assert.match(defaultSnapshot, /let resources_slot_id = new_id\("slot-resources"\)/);
+    assert.match(defaultSnapshot, /let sessions_slot_id = new_id\("slot-terminal-sessions"\)/);
     assert.match(defaultSnapshot, /let ports_tool_id = new_id\("tool-ports"\)/);
     assert.match(defaultSnapshot, /let ports_slot_id = new_id\("slot-ports"\)/);
     assert.match(defaultSnapshot, /let right_group_id = new_id\("group-resources-transfers"\)/);
     assert.match(defaultSnapshot, /let ports_group_id = new_id\("group-ports"\)/);
 
     assert.match(defaultSnapshot, /WorkspaceToolKind::Resources/);
+    assert.match(defaultSnapshot, /WorkspaceToolKind::TerminalSessions/);
     assert.match(defaultSnapshot, /WorkspaceToolKind::Transfers/);
     assert.match(defaultSnapshot, /WorkspaceToolKind::Ports/);
 
     for (const functionSource of [defaultSnapshot, createWorkspaceDefault]) {
       assert.match(functionSource, /resources_tool_id/);
+      assert.match(functionSource, /sessions_tool_id/);
       assert.match(functionSource, /transfers_tool_id/);
       assert.match(functionSource, /ports_tool_id/);
-      assert.match(functionSource, /owned_tool_tab_ids: vec!\[[\s\S]*resources_tool_id(?:\.clone\(\))?[\s\S]*transfers_tool_id(?:\.clone\(\))?[\s\S]*ports_tool_id(?:\.clone\(\))?[\s\S]*\]/);
+      assert.match(functionSource, /let mut owned_tool_tab_ids = vec!\[[\s\S]*resources_tool_id(?:\.clone\(\))?[\s\S]*transfers_tool_id(?:\.clone\(\))?[\s\S]*ports_tool_id(?:\.clone\(\))?[\s\S]*\]/);
+      assert.match(functionSource, /if (?:terminal_)?sessions_enabled \{[\s\S]*owned_tool_tab_ids\.insert\(2, (?:ids\.)?sessions_tool_id(?:\.clone\(\))?\)/);
       assert.match(functionSource, /direction: WorkspaceDockDirection::Column/);
       assert.match(functionSource, /direction: WorkspaceDockDirection::Row/);
-      assert.match(functionSource, /role: WorkspaceDockGroupRole::SidePanel,[\s\S]*active_slot_id: (?:ids\.)?resources_slot_id/);
+      assert.match(functionSource, /active_slot_id: if (?:terminal_)?sessions_enabled \{[\s\S]*(?:ids\.)?sessions_slot_id(?:\.clone\(\))?[\s\S]*\} else \{[\s\S]*(?:ids\.)?resources_slot_id(?:\.clone\(\))?/);
       assert.match(functionSource, /role: WorkspaceDockGroupRole::SidePanel,[\s\S]*active_slot_id: (?:ids\.)?ports_slot_id/);
       assert.match(functionSource, /ratios: vec!\[0\.7, 0\.3\]/);
       assert.match(functionSource, /ratios: vec!\[0\.24, 0\.52, 0\.24\]/);
       assert.doesNotMatch(functionSource, /group-transfers/);
     }
+    assert.match(createWorkspaceDefault, /sessions: sessions_enabled/);
     assert.match(createWorkspaceDefault, /resources: true/);
     assert.match(createWorkspaceDefault, /transfers: true/);
     assert.match(createWorkspaceDefault, /ports: true/);

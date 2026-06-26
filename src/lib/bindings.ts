@@ -13,6 +13,12 @@ export const commands = {
 	createHostTerminalSession: (input: CreateHostTerminalSessionInput) => typedError<TerminalSessionInfo, ConfigError>(__TAURI_INVOKE("create_host_terminal_session", { input })),
 	existingTerminalSessionInfo: (input: ExistingTerminalSessionInput) => typedError<TerminalSessionInfo, ConfigError>(__TAURI_INVOKE("existing_terminal_session_info", { input })),
 	transferTerminalSessionsToWindow: (input: TerminalSessionOwnershipInput) => typedError<null, ConfigError>(__TAURI_INVOKE("transfer_terminal_sessions_to_window", { input })),
+	detachTerminalSession: (input: TerminalDetachInput) => typedError<TerminalDetachedSessionInfo, ConfigError>(__TAURI_INVOKE("detach_terminal_session", { input })),
+	listDetachedTerminalSessions: (input: DetachedTerminalSessionsInput) => typedError<TerminalDetachedSessionInfo[], ConfigError>(__TAURI_INVOKE("list_detached_terminal_sessions", { input })),
+	attachDetachedTerminalSession: (input: AttachDetachedTerminalSessionInput) => typedError<TerminalSessionInfo, ConfigError>(__TAURI_INVOKE("attach_detached_terminal_session", { input })),
+	openDetachedTerminalSessionHistory: (input: OpenDetachedTerminalSessionHistoryInput) => typedError<TerminalSessionInfo, ConfigError>(__TAURI_INVOKE("open_detached_terminal_session_history", { input })),
+	deleteDetachedTerminalSession: (input: DeleteDetachedTerminalSessionInput) => typedError<null, ConfigError>(__TAURI_INVOKE("delete_detached_terminal_session", { input })),
+	exportTerminalSessionKey: (sessionId: string) => typedError<string, ConfigError>(__TAURI_INVOKE("export_terminal_session_key", { sessionId })),
 	takeTerminalOutputBacklog: (input: TerminalOutputBacklogInput) => typedError<{
 	session_id: string,
 	sequence: string,
@@ -21,6 +27,8 @@ export const commands = {
 } | null, ConfigError>(__TAURI_INVOKE("take_terminal_output_backlog", { input })),
 	writeTerminal: (input: TerminalInput) => typedError<null, ConfigError>(__TAURI_INVOKE("write_terminal", { input })),
 	resizeTerminal: (input: TerminalSizeInput) => typedError<null, ConfigError>(__TAURI_INVOKE("resize_terminal", { input })),
+	renameTerminalSession: (input: TerminalTitleInput) => typedError<null, ConfigError>(__TAURI_INVOKE("rename_terminal_session", { input })),
+	updateTerminalTitle: (input: TerminalTitleInput) => typedError<null, ConfigError>(__TAURI_INVOKE("update_terminal_title", { input })),
 	closeTerminalSession: (sessionId: string) => typedError<null, ConfigError>(__TAURI_INVOKE("close_terminal_session", { sessionId })),
 	listTerminalColorSchemes: () => typedError<TerminalColorSchemeEntry[], ConfigError>(__TAURI_INVOKE("list_terminal_color_schemes")),
 	readTerminalColorScheme: (id: string) => typedError<TerminalColorSchemeEntry, ConfigError>(__TAURI_INVOKE("read_terminal_color_scheme", { id })),
@@ -117,6 +125,13 @@ export type AppMenuPopupInput = {
 
 export type AppMenuRoot = "file" | "edit" | "view" | "window";
 
+export type AttachDetachedTerminalSessionInput = {
+	workspace_id: string,
+	tool_tab_id: string,
+	detached_session_id: string,
+	window_label: string,
+};
+
 export type ConfigDocumentTarget = "main" | "profile";
 
 export type ConfigError = { kind: "Io"; message: {
@@ -192,6 +207,7 @@ export type ConnectionHostDocument_Deserialize = {
 	files: HostFilesConfig | null,
 	resources: HostResourceConfig | null,
 	port_forwards?: PortForwardRule_Deserialize[],
+	terminal: HostTerminalConfig | null,
 	protocol: ConnectionProtocol,
 	local: LocalConnectionConfig | null,
 	ssh: SshConnectionConfig | null,
@@ -207,6 +223,7 @@ export type ConnectionHostDocument_Serialize = {
 	files: HostFilesConfig | null,
 	resources: HostResourceConfig | null,
 	port_forwards?: PortForwardRule_Serialize[],
+	terminal: HostTerminalConfig | null,
 	protocol: ConnectionProtocol,
 	local: LocalConnectionConfig | null,
 	ssh: SshConnectionConfig | null,
@@ -253,6 +270,17 @@ export type CreateHostTerminalSessionInput = {
 	update_changed_host_key: boolean,
 	credential: SshCredentialInput | null,
 	save_credential: boolean,
+};
+
+export type DeleteDetachedTerminalSessionInput = {
+	workspace_id: string,
+	tool_tab_id: string,
+	detached_session_id: string,
+};
+
+export type DetachedTerminalSessionsInput = {
+	workspace_id: string,
+	tool_tab_id: string,
 };
 
 export type EffectiveConfigDocument = {
@@ -458,6 +486,10 @@ export type HostResourceConfig = {
 	remote_provider: ResourceRemoteProviderMode | null,
 };
 
+export type HostTerminalConfig = {
+	agent_mode: TerminalAgentMode | null,
+};
+
 export type LocalConnectionConfig = {
 	command: string | null,
 	args: string[],
@@ -471,6 +503,13 @@ export type MainConfigDocument = {
 	root: ConfigTable,
 };
 
+export type OpenDetachedTerminalSessionHistoryInput = {
+	workspace_id: string,
+	tool_tab_id: string,
+	detached_session_id: string,
+	window_label: string,
+};
+
 export type PaneContextMenuInput = {
 	x: number | null,
 	y: number | null,
@@ -479,9 +518,10 @@ export type PaneContextMenuInput = {
 	has_selection: boolean,
 	read_only: boolean,
 	has_multiple_panes: boolean,
+	can_detach: boolean,
 };
 
-export type PaneMenuAction = "copy" | "paste" | "reset_terminal" | "toggle_read_only" | "change_tab_title" | "zoom_split" | "close_pane" | "split_left" | "split_right" | "split_up" | "split_down";
+export type PaneMenuAction = "copy" | "paste" | "reset_terminal" | "toggle_read_only" | "change_tab_title" | "detach_session" | "zoom_split" | "close_pane" | "split_left" | "split_right" | "split_up" | "split_down";
 
 export type PaneMenuEvent = {
 	action: PaneMenuAction,
@@ -799,6 +839,12 @@ export type TelnetConnectionConfig = {
 	port: number,
 };
 
+export type TerminalAgentMode = "enabled" | "disabled";
+
+export type TerminalAgentSessionInfo = {
+	session_id: string,
+};
+
 export type TerminalColorScheme = {
 	id: string,
 	name: string,
@@ -848,6 +894,20 @@ export type TerminalColorSchemeSource = "builtin" | "user" | "legacy";
 export type TerminalColorSchemeVariant = "light" | "dark";
 
 export type TerminalCursorStyle = "block" | "underline" | "bar";
+
+export type TerminalDetachInput = {
+	session_id: string,
+};
+
+export type TerminalDetachedSessionInfo = {
+	session_id: string,
+	title: string,
+	command: string,
+	cols: number,
+	rows: number,
+	detached: boolean,
+	attached_count: number,
+};
 
 export type TerminalInput = {
 	session_id: string,
@@ -909,6 +969,7 @@ export type TerminalSessionInfo = {
 	process_id: number | null,
 	transport: TerminalTransportKind,
 	transport_state: TerminalTransportState,
+	agent: TerminalAgentSessionInfo | null,
 };
 
 export type TerminalSessionOwnershipInput = {
@@ -966,7 +1027,12 @@ export type TerminalTheme = {
 	bright_white: string,
 };
 
-export type TerminalTransportKind = "local" | "ssh" | "telnet";
+export type TerminalTitleInput = {
+	session_id: string,
+	title: string,
+};
+
+export type TerminalTransportKind = "local" | "ssh" | "telnet" | "agent";
 
 export type TerminalTransportState = "resolving" | "connecting" | "verifying_host_key" | "authenticating" | "waiting_for_workspace_verification" | "connected" | "disconnected" | "failed";
 
@@ -1063,7 +1129,7 @@ export type WorkspaceFloatingWindowState_Serialize = {
 	layout: WorkspaceDockLayout_Serialize,
 };
 
-export type WorkspaceIntent = { kind: "create_workspace"; host_id: string } | { kind: "activate_workspace"; workspace_id: string } | { kind: "rename_workspace"; workspace_id: string; title: string } | { kind: "close_workspace"; workspace_id: string } | { kind: "close_other_workspaces"; workspace_id: string } | { kind: "close_workspaces_to_right"; workspace_id: string } | { kind: "activate_tool_slot"; workspace_id: string; slot_id: string } | { kind: "set_dock_group_collapsed"; workspace_id: string; group_id: string; collapsed: boolean } | { kind: "close_tool_slot"; workspace_id: string; slot_id: string } | { kind: "close_other_tool_slots"; workspace_id: string; slot_id: string } | { kind: "close_tool_slots_to_right"; workspace_id: string; slot_id: string } | { kind: "mirror_tool_tab"; source_tool_tab_id: string; target_workspace_id: string; target_group_id: string } | { kind: "float_tool_slot"; workspace_id: string; slot_id: string } | { kind: "close_floating_window"; floating_window_id: string } | { kind: "move_tool_slot_to_group"; workspace_id: string; slot_id: string; target_group_id: string } | { kind: "move_tool_slot_to_split"; workspace_id: string; slot_id: string; target_slot_id: string; side: WorkspaceDockSide } | { kind: "move_tool_slot_to_workspace_edge"; workspace_id: string; slot_id: string; side: WorkspaceDockSide } | { kind: "split_tool_slot"; workspace_id: string; target_slot_id: string; tool_tab_id: string; side: WorkspaceDockSide } | { kind: "create_terminal_tool_tab"; workspace_id: string; target_group_id: string | null } | { kind: "open_resource_monitor_tool_tab"; workspace_id: string; target_group_id: string | null };
+export type WorkspaceIntent = { kind: "create_workspace"; host_id: string } | { kind: "activate_workspace"; workspace_id: string } | { kind: "rename_workspace"; workspace_id: string; title: string } | { kind: "close_workspace"; workspace_id: string } | { kind: "close_other_workspaces"; workspace_id: string } | { kind: "close_workspaces_to_right"; workspace_id: string } | { kind: "activate_tool_slot"; workspace_id: string; slot_id: string } | { kind: "set_dock_group_collapsed"; workspace_id: string; group_id: string; collapsed: boolean } | { kind: "close_tool_slot"; workspace_id: string; slot_id: string } | { kind: "close_other_tool_slots"; workspace_id: string; slot_id: string } | { kind: "close_tool_slots_to_right"; workspace_id: string; slot_id: string } | { kind: "mirror_tool_tab"; source_tool_tab_id: string; target_workspace_id: string; target_group_id: string } | { kind: "float_tool_slot"; workspace_id: string; slot_id: string } | { kind: "close_floating_window"; floating_window_id: string } | { kind: "move_tool_slot_to_group"; workspace_id: string; slot_id: string; target_group_id: string } | { kind: "move_tool_slot_to_split"; workspace_id: string; slot_id: string; target_slot_id: string; side: WorkspaceDockSide } | { kind: "move_tool_slot_to_workspace_edge"; workspace_id: string; slot_id: string; side: WorkspaceDockSide } | { kind: "split_tool_slot"; workspace_id: string; target_slot_id: string; tool_tab_id: string; side: WorkspaceDockSide } | { kind: "create_terminal_tool_tab"; workspace_id: string; target_group_id: string | null } | { kind: "open_terminal_sessions_tool_tab"; workspace_id: string; target_group_id: string | null } | { kind: "open_resource_monitor_tool_tab"; workspace_id: string; target_group_id: string | null };
 
 export type WorkspaceLayoutSnapshot = WorkspaceLayoutSnapshot_Serialize | WorkspaceLayoutSnapshot_Deserialize;
 
@@ -1115,7 +1181,7 @@ export type WorkspaceTabState_Serialize = {
 	layout: WorkspaceDockLayout_Serialize,
 };
 
-export type WorkspaceToolKind = "files" | "terminal" | "transfers" | "resources" | "ports";
+export type WorkspaceToolKind = "files" | "terminal" | "terminal_sessions" | "transfers" | "resources" | "ports";
 
 export type WorkspaceToolSlot = { kind: "owned"; id: string; tool_tab_id: string } | { kind: "mirror"; id: string; tool_tab_id: string; owner_workspace_id: string } | { kind: "floating_placeholder"; id: string; tool_tab_id: string; floating_window_id: string } | { kind: "closed_source"; id: string; previous_title: string; owner_workspace_title: string };
 

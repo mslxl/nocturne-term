@@ -72,6 +72,25 @@ describe("Dock ToolTab bar placement source", () => {
     assert.doesNotMatch(source, /\.tool-tab\.active\s*\{[^}]*transform:/);
   });
 
+  it("keeps vertical ToolTab rails compressed instead of showing native scrollbars", async () => {
+    const source = await readFile(new URL("../src/lib/workspace/components/WorkspaceDockGroup.svelte", import.meta.url), "utf8");
+    const pageSource = await readFile(new URL("../src/routes/+page.svelte", import.meta.url), "utf8");
+    const appThemeSource = await readFile(new URL("../src/lib/styles/app-theme.css", import.meta.url), "utf8");
+
+    assert.match(source, /if \(kind === "terminal_sessions"\) return "Terms";/);
+    assert.match(source, /groupCollapsed \|\| tabbarPlacement === "left" \|\| tabbarPlacement === "right" \? compactSlotTitle\(slot, tool\) : fullTitle/);
+    assert.match(source, /\.workspace-dock-group\.tabbar-left \.tool-tabbar,[\s\S]*\.workspace-dock-group\.tabbar-right \.tool-tabbar\s*\{[\s\S]*flex-direction:\s*column;[\s\S]*align-items:\s*stretch;[\s\S]*overflow:\s*hidden;[\s\S]*scrollbar-width:\s*none;/);
+    assert.match(source, /\.workspace-dock-group\.tabbar-left \.tool-tab,[\s\S]*\.workspace-dock-group\.tabbar-right \.tool-tab\s*\{[\s\S]*flex:\s*0 1 auto;[\s\S]*height:\s*auto;[\s\S]*min-height:\s*0;[\s\S]*padding:\s*2px 0;/);
+    assert.match(source, /\.tool-tab \.tool-title\s*\{[\s\S]*min-height:\s*0;[\s\S]*max-height:\s*100%;[\s\S]*overflow:\s*hidden;/);
+    assert.match(source, /\.workspace-dock-group\s*\{[\s\S]*box-sizing:\s*border-box;/);
+    assert.match(source, /\.tool-tabbar\s*\{[\s\S]*box-sizing:\s*border-box;/);
+    assert.match(source, /\.tool-surface\s*\{[\s\S]*box-sizing:\s*border-box;/);
+    assert.match(source, /\.tool-pane\s*\{[\s\S]*box-sizing:\s*border-box;/);
+    assert.match(pageSource, /:global\(html\),\s*:global\(body\)\s*\{[\s\S]*height:\s*100%;[\s\S]*overflow:\s*hidden;/);
+    assert.match(appThemeSource, /html,\s*body\s*\{[\s\S]*height:\s*100%;[\s\S]*overflow:\s*hidden;/);
+    assert.doesNotMatch(source, /\.workspace-dock-group\.tabbar-left \.tool-tabbar,[\s\S]*\.workspace-dock-group\.tabbar-right \.tool-tabbar\s*\{[\s\S]*overflow-y:\s*auto;/);
+  });
+
   it("does not recompute explicit demo group roles from current bounds", async () => {
     const source = await readFile(new URL("../src/lib/workspace/state.svelte.ts", import.meta.url), "utf8");
 

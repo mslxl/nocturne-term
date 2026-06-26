@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const srcTauri = resolve(repoRoot, "src-tauri");
-const helperManifest = resolve(repoRoot, "crates", "nocturne-resource-monitor-agent", "Cargo.toml");
+const helperManifest = resolve(repoRoot, "tools", "nocturne-resource-monitor-agent", "Cargo.toml");
 const helperCrate = dirname(helperManifest);
 const outputRoot = resolve(srcTauri, "resources", "nocturne-resource-monitor-agent");
 const requestedTargets = new Set(

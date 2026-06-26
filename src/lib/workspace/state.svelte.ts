@@ -133,10 +133,12 @@ function applyDemoWorkspaceIntent(
     const workspaceId = `workspace-demo-${next.version + 1}`;
     const filesToolId = `files-demo-${next.version + 1}`;
     const terminalToolId = `terminal-demo-${next.version + 1}`;
+    const terminalSessionsToolId = `terminal-sessions-demo-${next.version + 1}`;
     const transfersToolId = `transfers-demo-${next.version + 1}`;
     const resourcesToolId = `resources-demo-${next.version + 1}`;
     const filesSlotId = `slot-files-demo-${next.version + 1}`;
     const terminalSlotId = `slot-terminal-demo-${next.version + 1}`;
+    const terminalSessionsSlotId = `slot-terminal-sessions-demo-${next.version + 1}`;
     const transfersSlotId = `slot-transfers-demo-${next.version + 1}`;
     const resourcesSlotId = `slot-resources-demo-${next.version + 1}`;
     const hostTitle = intent.host_id === "demo-remote" ? "Demo Remote" : "Local Shell";
@@ -147,7 +149,7 @@ function applyDemoWorkspaceIntent(
       id: workspaceId,
       host_id: intent.host_id,
       title,
-      owned_tool_tab_ids: [filesToolId, terminalToolId, resourcesToolId, transfersToolId],
+      owned_tool_tab_ids: [filesToolId, terminalToolId, terminalSessionsToolId, resourcesToolId, transfersToolId],
       layout: {
         kind: "split",
         direction: "row",
@@ -173,9 +175,10 @@ function applyDemoWorkspaceIntent(
             kind: "group",
             id: `group-resources-transfers-demo-${next.version + 1}`,
             role: "side_panel",
-            active_slot_id: resourcesSlotId,
+            active_slot_id: terminalSessionsSlotId,
             collapsed: false,
             slots: [
+              { kind: "owned", id: terminalSessionsSlotId, tool_tab_id: terminalSessionsToolId },
               { kind: "owned", id: resourcesSlotId, tool_tab_id: resourcesToolId },
               { kind: "owned", id: transfersSlotId, tool_tab_id: transfersToolId },
             ],
@@ -197,6 +200,13 @@ function applyDemoWorkspaceIntent(
         owner_workspace_id: workspaceId,
         host_id: intent.host_id,
         title: terminalTitle,
+      },
+      {
+        id: terminalSessionsToolId,
+        kind: "terminal_sessions",
+        owner_workspace_id: workspaceId,
+        host_id: intent.host_id,
+        title: "Terminals",
       },
       {
         id: resourcesToolId,
@@ -319,6 +329,41 @@ function applyDemoWorkspaceIntent(
           id: slotId,
           tool_tab_id: toolTabId,
         });
+    return bumpDemoVersion(next);
+  }
+  if (intent.kind === "open_terminal_sessions_tool_tab") {
+    const workspace = requireDemoWorkspace(next, intent.workspace_id);
+    const existing = next.tool_tabs.find(
+      (tool) => tool.owner_workspace_id === workspace.id && tool.kind === "terminal_sessions",
+    );
+    if (existing) {
+      const slot = findDemoOwnedSlotForToolTab(workspace.layout, existing.id);
+      if (slot) {
+        workspace.layout = activateDemoSlot(workspace.layout, slot.id);
+        return bumpDemoVersion(next);
+      }
+      workspace.layout = addDemoTerminalSessionsSlot(workspace.layout, intent.target_group_id, {
+        kind: "owned",
+        id: `slot-terminal-sessions-demo-${next.version + 1}`,
+        tool_tab_id: existing.id,
+      });
+      return bumpDemoVersion(next);
+    }
+
+    const toolTabId = `tool-terminal-sessions-demo-${next.version + 1}`;
+    next.tool_tabs.push({
+      id: toolTabId,
+      kind: "terminal_sessions",
+      owner_workspace_id: workspace.id,
+      host_id: workspace.host_id,
+      title: "Terminals",
+    });
+    workspace.owned_tool_tab_ids.push(toolTabId);
+    workspace.layout = addDemoTerminalSessionsSlot(workspace.layout, intent.target_group_id, {
+      kind: "owned",
+      id: `slot-terminal-sessions-demo-${next.version + 1}`,
+      tool_tab_id: toolTabId,
+    });
     return bumpDemoVersion(next);
   }
   if (intent.kind === "open_resource_monitor_tool_tab") {
@@ -554,6 +599,13 @@ function addDemoResourceSlot(layout: DemoLayout, targetGroupId: string | null, s
     : addDemoSlotToFirstGroup(layout, slot);
 }
 
+function addDemoTerminalSessionsSlot(layout: DemoLayout, targetGroupId: string | null, slot: DemoSlot): DemoLayout {
+  const groupId = targetGroupId ?? firstDemoToolGroupId(layout);
+  return groupId
+    ? addDemoSlotToGroup(layout, groupId, slot)
+    : addDemoSlotToFirstGroup(layout, slot);
+}
+
 function firstDemoTerminalGroupId(layout: DemoLayout): string | null {
   if (layout.kind === "group") {
     return layout.role === "content" ? layout.id : null;
@@ -564,6 +616,10 @@ function firstDemoTerminalGroupId(layout: DemoLayout): string | null {
 function firstDemoToolGroupId(layout: DemoLayout): string | null {
   return firstDemoGroupIdByRole(layout, "side_panel")
     ?? firstDemoGroupIdByRole(layout, "content");
+}
+
+function firstDemoSidePanelGroupId(layout: DemoLayout): string | null {
+  return firstDemoGroupIdByRole(layout, "side_panel");
 }
 
 function firstDemoGroupIdByRole(layout: DemoLayout, role: "content" | "side_panel"): string | null {

@@ -1,4 +1,4 @@
-import type { ConnectionHostDocument, ConnectionProtocol, ConnectionHostEntry, LocalConnectionConfig, SshConnectionConfig } from "$lib/bindings";
+import type { ConnectionHostDocument, ConnectionProtocol, ConnectionHostEntry, LocalConnectionConfig, SshConnectionConfig, TerminalAgentMode } from "$lib/bindings";
 import { catalogIcon } from "$lib/hosts/icons";
 
 export type HostFolderTreeNode = {
@@ -18,6 +18,7 @@ export function emptySshHostDocument(id = ""): ConnectionHostDocument {
     icon: catalogIcon("lucide:server"),
     files: null,
     resources: null,
+    terminal: null,
     protocol: "ssh",
     local: null,
     ssh: {
@@ -42,6 +43,7 @@ export function emptyLocalHostDocument(id = ""): ConnectionHostDocument {
     icon: catalogIcon("lucide:terminal"),
     files: null,
     resources: null,
+    terminal: null,
     protocol: "local",
     local: {
       command: null,
@@ -75,6 +77,27 @@ export function setHostProtocol(document: ConnectionHostDocument, protocol: Conn
 
 export function cloneHostDocument(document: ConnectionHostDocument): ConnectionHostDocument {
   return JSON.parse(JSON.stringify(document)) as ConnectionHostDocument;
+}
+
+export function terminalAgentModeForEditableHost(document: ConnectionHostDocument): TerminalAgentMode {
+  return document.terminal?.agent_mode ?? "enabled";
+}
+
+export function setTerminalAgentMode(document: ConnectionHostDocument, mode: TerminalAgentMode): ConnectionHostDocument {
+  const next = cloneHostDocument(document);
+  next.terminal = mode === "enabled" ? null : { agent_mode: "disabled" };
+  return next;
+}
+
+export function terminalAgentAvailableForHost(entry: ConnectionHostEntry | null, editorMode: "existing" | "new"): boolean {
+  return editorMode === "new" || (entry?.source === "user" && !entry.read_only);
+}
+
+export function terminalAgentEnabledForHost(entry: ConnectionHostEntry | null): boolean {
+  if (!entry) return false;
+  if (entry.source === "virtual" && entry.document.protocol === "local") return true;
+  if (entry.source !== "user" || entry.read_only) return false;
+  return terminalAgentModeForEditableHost(entry.document) === "enabled";
 }
 
 export function hostAddress(entry: ConnectionHostEntry): string {
