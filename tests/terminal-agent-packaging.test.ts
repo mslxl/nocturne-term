@@ -143,15 +143,15 @@ describe("Terminal Agent packaging", () => {
     assert.match(clientSource, /proxyInputRequests/);
     assert.match(mainSource, /runClient\(args\[1:\], stdin, stdout\)/);
     assert.match(mainSource, /ProxySessionRequestWithInput\(stdout, stdin/);
-    assert.match(clientSource, /WriteSessionHistory\(writer, sessionID, request\.RequestID\)/);
+    assert.match(clientSource, /WriteSessionHistory\(writer, registry\.SessionID, request\.RequestID\)/);
     assert.match(clientSource, /Name:\s+"ping"/);
     assert.match(clientSource, /isHeartbeatResponseLine/);
     assert.match(daemonTestSource, /TestStreamProxyForwardsInputRequestsOnSubscriptionConnection/);
     assert.match(daemonTestSource, /expected detach to close the subscription connection/);
     assert.match(windowsTransport, /github\.com\/Microsoft\/go-winio/);
     assert.match(windowsTransport, /SecurityDescriptor:\s+"D:P\(A;;GA;;;OW\)"/);
-    assert.match(windowsPty, /github\.com\/qsocket\/conpty-go/);
-    assert.match(windowsPty, /syscall\.EscapeArg/);
+    assert.match(windowsPty, /NewProc\("CreatePseudoConsole"\)/);
+    assert.match(windowsPty, /windows\.ComposeCommandLine/);
     assert.match(terminalDaemonDoc, /CGO stays disabled by default/);
     assert.match(terminalDaemonDoc, /Windows PTY path uses the ConPTY API without CGO/);
     assert.match(terminalDaemonDoc, /One daemon owns exactly one terminal session/);
@@ -162,7 +162,7 @@ describe("Terminal Agent packaging", () => {
     assert.match(terminalDaemonDoc, /client delete --session-id/);
     assert.match(terminalDaemonDoc, /removes both the transcript and registry/);
     assert.match(terminalDaemonDoc, /both local and SSH-backed sessions/);
-    assert.match(terminalDaemonDoc, /native system confirmation dialog/);
+    assert.match(terminalDaemonDoc, /native system\s+confirmation dialog/);
     assert.match(terminalDaemonDoc, /Nocturne forwards interactive terminal title changes as `title_change`/);
     assert.match(terminalRuntime, /run_local_go_agent_client/);
     assert.match(terminalRuntime, /run_local_go_agent_list/);
