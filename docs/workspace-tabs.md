@@ -177,8 +177,10 @@ Files tool tab titles:
 
 Terminal tool tab titles:
 
-- may have a user alias
-- must still show the running program or current directory after the alias
+- are derived from the live terminal title or current directory
+- append the registry session name after the running program or current directory for Terminal Agent sessions
+- must not append that registry session name when Terminal Agent mode is disabled
+- do not have a separate user-editable ToolTab alias; user naming belongs to the Terminal Sessions registry row
 - should avoid repeating host identity unless displayed as a mirror in another workspace
 
 Transfers tool tab titles should be concise, normally `Transfers`.
@@ -188,6 +190,12 @@ view. Its normal user-facing display title is `Terminals`. When the tab is
 shown in a narrow vertical rail, the compact display title may shrink to
 `Terms` to avoid forcing a native scrollbar before the list itself needs to
 scroll. It lists every registry-backed terminal session for the Workspace Host.
+Rows use the registry title as their primary name, not cwd; sessions that the
+user has not renamed use the generated session codename written to the registry.
+Rename and single-session delete live in the row context menu, and rename is
+sent to the daemon so the registry remains the display authority. Already open
+Terminal ToolTab tooltips show this same registry title instead of the
+underlying session id.
 Running or detached rows attach into a normal Terminal ToolTab; exited rows open
 a read-only Terminal ToolTab that shows the saved transcript history and does
 not start a new command. The list supports an explicit selection mode with

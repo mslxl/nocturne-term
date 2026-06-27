@@ -52,4 +52,5 @@ describe("terminal keybindings", () => {
     assert.equal(map["terminal.findNext"], "Ctrl+G");
     assert.equal(map["terminal.findPrevious"], "Ctrl+Shift+G");
   });
+
 });

@@ -5,21 +5,18 @@
   import "overlayscrollbars/overlayscrollbars.css";
   import RefreshCw from "~icons/lucide/refresh-cw";
   import Trash2 from "~icons/lucide/trash-2";
+  import Check from "~icons/lucide/check";
   import PlugZap from "~icons/lucide/plug-zap";
   import ScrollText from "~icons/lucide/scroll-text";
   import SquareCheck from "~icons/lucide/square-check";
-  import SquareMousePointer from "~icons/lucide/square-mouse-pointer";
+  import Circle from "~icons/lucide/circle";
+  import X from "~icons/lucide/x";
   import ListChecks from "~icons/lucide/list-checks";
   import RotateCcwSquare from "~icons/lucide/rotate-ccw-square";
   import { commands, type TerminalDetachedSessionInfo, type WorkspaceToolTab } from "$lib/bindings";
   import { hasTauriRuntime } from "$lib/tauri/runtime";
   import { unwrapCommand } from "$lib/terminal/commands";
-  import {
-    compactTerminalPathTitle,
-    compactTerminalTitle,
-    isGeneratedSessionTitle,
-    isPathLikeTitle,
-  } from "$lib/terminal/tab-title";
+  import { compactTerminalPathTitle } from "$lib/terminal/tab-title";
 
   type Props = {
     active?: boolean;
@@ -29,9 +26,10 @@
     onAttach: (sessionId: string, sourceToolTabId: string) => Promise<void>;
     onOpenHistory: (sessionId: string, sourceToolTabId: string) => Promise<void>;
     onDeleted?: () => void | Promise<void>;
+    onSessionsChanged?: (sessions: TerminalDetachedSessionInfo[]) => void | Promise<void>;
   };
 
-  let { active = true, revision = 0, toolTab, workspaceId, onAttach, onOpenHistory, onDeleted }: Props = $props();
+  let { active = true, revision = 0, toolTab, workspaceId, onAttach, onOpenHistory, onDeleted, onSessionsChanged }: Props = $props();
   let sessions = $state<TerminalDetachedSessionInfo[]>([]);
   let loading = $state(false);
   let error = $state("");
@@ -40,6 +38,9 @@
   let sessionsOverflow = $state(false);
   let selectedSessionIds = $state(new Set<string>());
   let selecting = $state(false);
+  let renamingSessionId = $state("");
+  let renameDraft = $state("");
+  let sessionContextMenu = $state<{ sessionId: string; left: number; top: number } | null>(null);
   let lastLoadedRevision = -1;
   let wasActive = false;
   const overlayOptions = {
@@ -67,6 +68,23 @@
   });
 
   $effect(() => {
+    if (!sessionContextMenu) return;
+    const close = (event: PointerEvent) => {
+      if (event.target instanceof Element && event.target.closest("[data-session-context-menu]")) return;
+      closeSessionContextMenu();
+    };
+    const closeOnKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") closeSessionContextMenu();
+    };
+    document.addEventListener("pointerdown", close, { capture: true });
+    document.addEventListener("keydown", closeOnKey, { capture: true });
+    return () => {
+      document.removeEventListener("pointerdown", close, { capture: true });
+      document.removeEventListener("keydown", closeOnKey, { capture: true });
+    };
+  });
+
+  $effect(() => {
     sessions.length;
     loading;
     error;
@@ -91,6 +109,7 @@
   async function refreshSessions() {
     if (!hasTauriRuntime()) {
       sessions = [];
+      void notifySessionsChanged(sessions);
       return;
     }
     loading = true;
@@ -101,12 +120,17 @@
           tool_tab_id: toolTab.id,
         }),
       );
+      void notifySessionsChanged(sessions);
       error = "";
     } catch (cause) {
       error = cause instanceof Error ? cause.message : String(cause);
     } finally {
       loading = false;
     }
+  }
+
+  async function notifySessionsChanged(nextSessions: TerminalDetachedSessionInfo[]) {
+    await onSessionsChanged?.(nextSessions);
   }
 
   async function attachSession(session: TerminalDetachedSessionInfo) {
@@ -137,6 +161,7 @@
       }),
     );
     sessions = sessions.filter((item) => item.session_id !== session.session_id);
+    void notifySessionsChanged(sessions);
     selectedSessionIds = withoutSelectedSessions(new Set([session.session_id]));
     await onDeleted?.();
   }
@@ -162,9 +187,90 @@
     }
     const deletedIds = new Set(sessionsToDelete.map((session) => session.session_id));
     sessions = sessions.filter((item) => !deletedIds.has(item.session_id));
+    void notifySessionsChanged(sessions);
     selectedSessionIds = withoutSelectedSessions(deletedIds);
     selecting = false;
     await onDeleted?.();
+  }
+
+  function openSessionContextMenu(event: MouseEvent, session: TerminalDetachedSessionInfo) {
+    if (selecting) return;
+    event.preventDefault();
+    event.stopPropagation();
+    sessionContextMenu = {
+      sessionId: session.session_id,
+      left: event.clientX,
+      top: event.clientY,
+    };
+  }
+
+  function closeSessionContextMenu() {
+    sessionContextMenu = null;
+  }
+
+  function contextMenuSession() {
+    const sessionId = sessionContextMenu?.sessionId;
+    return sessionId ? (sessions.find((session) => session.session_id === sessionId) ?? null) : null;
+  }
+
+  function renameSessionFromContextMenu(session: TerminalDetachedSessionInfo) {
+    closeSessionContextMenu();
+    startRenamingSession(session);
+  }
+
+  async function deleteSessionFromContextMenu(session: TerminalDetachedSessionInfo) {
+    closeSessionContextMenu();
+    await deleteSession(session);
+  }
+
+  function startRenamingSession(session: TerminalDetachedSessionInfo) {
+    renamingSessionId = session.session_id;
+    renameDraft = sessionDisplayTitle(session);
+  }
+
+  function cancelRenamingSession() {
+    renamingSessionId = "";
+    renameDraft = "";
+  }
+
+  async function commitRenamingSession(session: TerminalDetachedSessionInfo) {
+    if (renamingSessionId !== session.session_id) return;
+    const title = renameDraft.trim();
+    if (!title) {
+      cancelRenamingSession();
+      return;
+    }
+    if (title !== session.title.trim()) {
+      await unwrapCommand(
+        commands.renameDetachedTerminalSession({
+          workspace_id: workspaceId,
+          tool_tab_id: toolTab.id,
+          detached_session_id: session.session_id,
+          title,
+        }),
+      );
+      sessions = sessions.map((item) => (item.session_id === session.session_id ? { ...item, title } : item));
+      void notifySessionsChanged(sessions);
+      await refreshSessions();
+    }
+    cancelRenamingSession();
+  }
+
+  function handleRenameKeydown(event: KeyboardEvent, session: TerminalDetachedSessionInfo) {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      cancelRenamingSession();
+      return;
+    }
+    if (event.key === "Enter") {
+      event.preventDefault();
+      void commitRenamingSession(session);
+    }
+  }
+
+  function focusRenameInput(node: HTMLInputElement) {
+    void tick().then(() => node.focus());
+    return {};
   }
 
   function statusLabel(session: TerminalDetachedSessionInfo) {
@@ -188,6 +294,10 @@
       nextSelection.delete(sessionId);
     }
     selectedSessionIds = nextSelection;
+  }
+
+  function toggleSessionSelected(sessionId: string) {
+    toggleSessionSelection(sessionId, !selectedSessionIds.has(sessionId));
   }
 
   function enterSelectionMode(sessionId?: string) {
@@ -230,11 +340,7 @@
 
   function sessionDisplayTitle(session: TerminalDetachedSessionInfo) {
     const title = session.title.trim();
-    const cwd = session.cwd?.trim() ?? "";
-    if (title && !isGeneratedSessionTitle(title) && !isPathLikeTitle(title)) return title;
-    if (cwd) return compactTerminalPathTitle(cwd);
-    if (title && !isGeneratedSessionTitle(title)) return compactTerminalTitle(title);
-    return session.command.trim() || session.session_id;
+    return title || session.session_id;
   }
 
   function sessionSubtitle(session: TerminalDetachedSessionInfo) {
@@ -262,32 +368,67 @@
         data-session-id={session.session_id}
         data-detached={session.detached}
         data-selecting={selecting}
+        data-selected={selectedSessionIds.has(session.session_id)}
+        oncontextmenu={(event) => openSessionContextMenu(event, session)}
       >
         {#if selecting}
-          <label class="session-select" aria-label={`Select ${sessionDisplayTitle(session)}`}>
-            <input
-              type="checkbox"
-              checked={selectedSessionIds.has(session.session_id)}
-              onchange={(event) => toggleSessionSelection(session.session_id, event.currentTarget.checked)}
-            />
-          </label>
+          <button
+            type="button"
+            class="session-select-indicator"
+            aria-label={`${selectedSessionIds.has(session.session_id) ? "Deselect" : "Select"} ${sessionDisplayTitle(session)}`}
+            aria-pressed={selectedSessionIds.has(session.session_id)}
+            title={selectedSessionIds.has(session.session_id) ? "Selected" : "Select"}
+            onclick={() => toggleSessionSelected(session.session_id)}
+          >
+            {#if selectedSessionIds.has(session.session_id)}
+              <Check />
+            {:else}
+              <Circle />
+            {/if}
+          </button>
         {/if}
-        <div class="session-main">
-          <strong title={sessionTooltip(session)}>{sessionDisplayTitle(session)}</strong>
-          <span title={sessionSubtitle(session)}>{sessionSubtitle(session)}</span>
-        </div>
+        {#if renamingSessionId === session.session_id}
+          <div class="session-main">
+            <input
+              class="session-rename-input"
+              aria-label={`Rename ${sessionDisplayTitle(session)}`}
+              bind:value={renameDraft}
+              onkeydown={(event) => handleRenameKeydown(event, session)}
+              onblur={() => void commitRenamingSession(session)}
+              use:focusRenameInput
+            />
+            <span title={sessionSubtitle(session)}>{sessionSubtitle(session)}</span>
+          </div>
+        {:else if selecting}
+          <button
+            type="button"
+            class="session-main"
+            onclick={() => toggleSessionSelected(session.session_id)}
+          >
+            <strong title={sessionTooltip(session)}>{sessionDisplayTitle(session)}</strong>
+            <span title={sessionSubtitle(session)}>{sessionSubtitle(session)}</span>
+          </button>
+        {:else}
+          <div class="session-main">
+            <strong title={sessionTooltip(session)}>{sessionDisplayTitle(session)}</strong>
+            <span title={sessionSubtitle(session)}>{sessionSubtitle(session)}</span>
+          </div>
+        {/if}
         <div class="session-meta">
           <span title={statusLabel(session)}>{statusLabel(session)}</span>
         </div>
         <div class="session-actions">
-          {#if selecting}
+          {#if renamingSessionId === session.session_id}
             <button
               type="button"
-              aria-label={`Select only ${sessionDisplayTitle(session)}`}
-              title="Select Only"
-              onclick={() => enterSelectionMode(session.session_id)}
+              aria-label={`Save ${sessionDisplayTitle(session)}`}
+              title="Save"
+              onclick={() => void commitRenamingSession(session)}
             >
-              <SquareMousePointer />
+              <Check />
+            </button>
+            <button type="button" aria-label="Cancel rename" title="Cancel" onclick={cancelRenamingSession}>
+              <X />
             </button>
           {:else if session.detached}
             <button
@@ -308,15 +449,6 @@
               <ScrollText />
             </button>
           {/if}
-          <button
-            type="button"
-            class="danger"
-            aria-label={`Delete ${sessionDisplayTitle(session)}`}
-            title="Delete"
-            onclick={() => void deleteSession(session)}
-          >
-            <Trash2 />
-          </button>
         </div>
       </li>
     {/each}
@@ -364,18 +496,28 @@
       <div class="sessions-status">Loading</div>
     {:else if sessions.length === 0}
       <div class="sessions-status">No sessions</div>
-    {:else if sessionsOverflow}
+    {:else}
       <OverlayScrollbarsComponent element="div" class="sessions-body-scroll" options={overlayOptions} defer>
         <div class="sessions-scroll-body">
           {@render sessionRows()}
         </div>
       </OverlayScrollbarsComponent>
-    {:else}
-      <div class="sessions-list-frame">
-        {@render sessionRows()}
-      </div>
     {/if}
   </div>
+  {#if sessionContextMenu}
+    {@const menuSession = contextMenuSession()}
+    {#if menuSession}
+      <div
+        class="session-context-menu"
+        style={`left: ${sessionContextMenu.left}px; top: ${sessionContextMenu.top}px;`}
+        role="menu"
+        data-session-context-menu="true"
+      >
+        <button type="button" role="menuitem" onclick={() => renameSessionFromContextMenu(menuSession)}>Rename</button>
+        <button type="button" role="menuitem" class="danger" onclick={() => void deleteSessionFromContextMenu(menuSession)}>Delete</button>
+      </div>
+    {/if}
+  {/if}
 </section>
 
 <style>
@@ -390,6 +532,7 @@
     background: color-mix(in srgb, var(--app-bg) 96%, var(--app-control));
     color: var(--app-fg);
     font-size: 12px;
+    container-type: inline-size;
   }
 
   header {
@@ -472,15 +615,6 @@
     grid-template-rows: minmax(0, 1fr);
   }
 
-  .sessions-list-frame {
-    min-width: 0;
-    min-height: 0;
-    height: 100%;
-    overflow: hidden;
-    display: grid;
-    align-content: start;
-  }
-
   .sessions-status {
     min-width: 0;
     min-height: 0;
@@ -509,7 +643,8 @@
   li {
     min-width: 0;
     display: grid;
-    grid-template-columns: minmax(0, 1fr) auto 56px;
+    grid-template-columns: minmax(0, 1fr) auto auto;
+    grid-template-areas: "main meta actions";
     align-items: center;
     gap: 8px;
     min-height: 44px;
@@ -518,21 +653,31 @@
   }
 
   li[data-selecting="true"] {
-    grid-template-columns: 18px minmax(0, 1fr) auto 56px;
+    grid-template-columns: 22px minmax(0, 1fr) auto 0;
+    grid-template-areas: "select main meta actions";
+    padding-left: 7px;
   }
 
-  .session-select {
-    width: 18px;
+  li[data-selected="true"] {
+    background: color-mix(in srgb, var(--app-accent) 13%, transparent);
+  }
+
+  .session-select-indicator {
+    grid-area: select;
+    width: 20px;
     height: 22px;
     display: grid;
     place-items: center;
+    color: color-mix(in srgb, var(--app-fg) 40%, transparent);
   }
 
-  .session-select input {
+  .session-select-indicator[aria-pressed="true"] {
+    color: var(--app-accent);
+  }
+
+  .session-select-indicator :global(svg) {
     width: 13px;
     height: 13px;
-    margin: 0;
-    accent-color: var(--app-accent);
   }
 
   li[data-detached="false"] {
@@ -540,9 +685,17 @@
   }
 
   .session-main {
+    grid-area: main;
     min-width: 0;
     display: grid;
     gap: 2px;
+    width: 100%;
+    height: auto;
+    place-items: stretch;
+    text-align: left;
+    border-radius: 4px;
+    color: inherit;
+    cursor: default;
   }
 
   .session-main strong,
@@ -553,25 +706,105 @@
     white-space: nowrap;
   }
 
+  .session-main:disabled {
+    opacity: 1;
+  }
+
+  .session-main:active:not(:disabled) {
+    background: transparent;
+  }
+
   .session-main span,
+  .session-rename-input,
   .session-meta {
     color: color-mix(in srgb, var(--app-fg) 56%, transparent);
   }
 
+  .session-rename-input {
+    min-width: 0;
+    height: 20px;
+    border: 1px solid color-mix(in srgb, var(--app-accent) 58%, var(--app-border));
+    border-radius: 5px;
+    padding: 0 6px;
+    outline: none;
+    background: color-mix(in srgb, var(--app-bg) 82%, var(--app-control));
+    color: var(--app-fg);
+    font: inherit;
+  }
+
   .session-meta {
+    grid-area: meta;
     min-width: 48px;
     display: grid;
     justify-items: end;
   }
 
   .session-actions {
+    grid-area: actions;
+    min-width: 22px;
     display: flex;
     align-items: center;
     justify-content: flex-end;
     gap: 3px;
   }
 
+  li[data-selecting="true"] .session-actions {
+    width: 0;
+    overflow: hidden;
+  }
+
+  @container (max-width: 190px) {
+    li {
+      grid-template-columns: minmax(0, 1fr) auto;
+      grid-template-areas:
+        "main actions"
+        "meta actions";
+      row-gap: 2px;
+    }
+
+    li[data-selecting="true"] {
+      grid-template-columns: 22px minmax(0, 1fr);
+      grid-template-areas:
+        "select main"
+        "select meta";
+    }
+
+    .session-meta {
+      min-width: 0;
+      justify-items: start;
+    }
+
+    .session-actions {
+      align-self: center;
+    }
+  }
+
   .danger {
     color: var(--app-danger);
+  }
+
+  .session-context-menu {
+    position: fixed;
+    z-index: 200;
+    min-width: 132px;
+    display: grid;
+    gap: 2px;
+    padding: 5px;
+    border: 1px solid var(--app-border);
+    border-radius: 6px;
+    background: color-mix(in srgb, var(--app-bg) 96%, var(--app-control));
+    box-shadow: 0 14px 32px color-mix(in srgb, #000 24%, transparent);
+  }
+
+  .session-context-menu button {
+    width: 100%;
+    height: 26px;
+    justify-content: start;
+    padding: 0 8px;
+    text-align: left;
+  }
+
+  .session-context-menu button:hover {
+    background: var(--app-hover);
   }
 </style>

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"testing"
@@ -83,6 +84,59 @@ func TestWriteInitialRegistryAndListByHost(t *testing.T) {
 	}
 	if sessionLine.Session.Endpoint.Kind == "" || sessionLine.Session.Endpoint.Path == "" {
 		t.Fatalf("expected endpoint display metadata in listed session: %+v", sessionLine.Session.Endpoint)
+	}
+}
+
+func TestCreateInitialRegistryUsesGeneratedTitleWhenLaunchTitleIsSessionPlaceholder(t *testing.T) {
+	temp := t.TempDir()
+	setStateEnv(t, temp)
+
+	registry, err := CreateInitialRegistry(LaunchSpec{
+		Version:   1,
+		SessionID: "session-generated-title",
+		HostID:    "host-a",
+		Title:     "Session 7",
+		Command:   "bash",
+		Cols:      80,
+		Rows:      24,
+	})
+	if err != nil {
+		t.Fatalf("CreateInitialRegistry failed: %v", err)
+	}
+
+	if registry.Title == "Session 7" {
+		t.Fatalf("registry kept generated UI placeholder title")
+	}
+	if !regexp.MustCompile(`^[A-Z][A-Za-z]+[A-Z][A-Za-z]+$`).MatchString(registry.Title) {
+		t.Fatalf("registry generated title is not a session codename: %q", registry.Title)
+	}
+}
+
+func TestRenameRegistrySessionUpdatesListedTitle(t *testing.T) {
+	temp := t.TempDir()
+	setStateEnv(t, temp)
+	if err := WriteInitialRegistry(LaunchSpec{
+		Version:   1,
+		SessionID: "session-rename",
+		HostID:    "host-a",
+		Title:     "Build",
+		Command:   "bash",
+		Cols:      80,
+		Rows:      24,
+	}); err != nil {
+		t.Fatalf("WriteInitialRegistry failed: %v", err)
+	}
+
+	if err := RenameRegistrySession("session-rename", " Release Shell "); err != nil {
+		t.Fatalf("RenameRegistrySession failed: %v", err)
+	}
+
+	var output bytes.Buffer
+	if err := WriteSessionList(&output, "host-a"); err != nil {
+		t.Fatalf("WriteSessionList failed: %v", err)
+	}
+	if !strings.Contains(output.String(), `"title":"Release Shell"`) {
+		t.Fatalf("list did not use renamed registry title:\n%s", output.String())
 	}
 }
 

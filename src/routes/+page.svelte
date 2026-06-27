@@ -14,6 +14,7 @@
     type ConnectionHostIcon,
     type PortForwardSshVerificationRequiredEvent,
     type TabBarOrientation,
+    type TerminalDetachedSessionInfo,
     type TerminalMenuStateInput,
     type TerminalSessionInfo,
     type TerminalSettings,
@@ -53,6 +54,10 @@
   import { isTerminalSessionInactiveMessage } from "$lib/terminal/errors";
   import { DEFAULT_TERMINAL_FONT_FAMILY } from "$lib/terminal/fonts";
   import {
+    mergeAgentSessionNameFromAttachInfo,
+    mergeAgentSessionNamesFromRegistryList,
+  } from "$lib/terminal/session-names";
+  import {
     clearTerminalFindEffects,
     terminalFindSearchKeyChanged,
     terminalFindSnapshot,
@@ -89,6 +94,7 @@
     id: string;
     title: string;
     baseTitle: string;
+    agentSessionName: string;
     command: string;
     currentDirectory: string;
     titleOverride: string;
@@ -109,10 +115,11 @@
   };
 
   type StoredTerminalTab = {
-    customTitle: string;
+    workspaceId: string;
+    toolTabId: string;
     session: StoredSession;
   };
-  type StoredHotTabs = {
+  type StoredReloadTabs = {
     activeIndex: number;
     tabs: StoredTerminalTab[];
   };
@@ -144,7 +151,7 @@
 
   const initialCols = 80;
   const initialRows = 24;
-  const hotTabsStorageKey = "nocturne:dev-hot-tabs";
+  const reloadTabsStorageKey = "nocturne:reload-tabs";
   type TextInputElement = HTMLInputElement | HTMLTextAreaElement;
   type TextEditSnapshot = {
     selectionEnd: number;
@@ -218,6 +225,7 @@
   let tabs = $state<TerminalTab[]>([]);
   let activeId = $state("");
   let terminalRuntimeByToolTabId = $state(new Map<string, TerminalToolRuntime>());
+  let agentSessionNamesById = $state(new Map<string, string>());
   let pendingTerminalRuntimeWorkspaceIds = new Set<string>();
   let terminalTitleRevision = $state(0);
   let activeTerminalWorkspaceId = "";
@@ -296,6 +304,8 @@
   let activeToolSlotOverrideByGroupId = $state<Record<string, string>>({});
   let activeToolSlotOverrideRevision = $state(0);
   let suppressToolTabClickSlotId = "";
+  let reloadSnapshotQueued = false;
+  let pageMounted = false;
   let toolTabPointerDrag = $state<{
     workspaceId: string;
     slotId: string;
@@ -370,6 +380,13 @@
     },
   });
 
+  $effect(() => {
+    terminalRuntimeByToolTabId;
+    activeTerminalToolTabId;
+    activeId;
+    if (pageMounted) scheduleReloadTabsSnapshot();
+  });
+
   function publishWorkspaceDebugSnapshot(next: WorkspaceLayoutSnapshot | null) {
     if (typeof window !== "undefined") {
       Object.assign(window, {
@@ -407,6 +424,15 @@
 
   function terminalRuntimeTabs() {
     return Array.from(terminalRuntimeByToolTabId.values()).map((runtime) => runtime.tab);
+  }
+
+  function scheduleReloadTabsSnapshot() {
+    if (floatingWindowId || reloadSnapshotQueued) return;
+    reloadSnapshotQueued = true;
+    queueMicrotask(() => {
+      reloadSnapshotQueued = false;
+      storeReloadTabsSnapshot();
+    });
   }
 
   async function loadSettings() {
@@ -724,10 +750,12 @@
   }
 
   function setTerminalRuntime(toolTabId: string, runtime: TerminalToolRuntime) {
+    applyAgentSessionNameToTerminal(runtime.tab);
     const next = new Map(terminalRuntimeByToolTabId);
     next.set(toolTabId, runtime);
     terminalRuntimeByToolTabId = next;
     syncLegacyTerminalTabState();
+    scheduleReloadTabsSnapshot();
     publishWorkspaceDebugSnapshot(workspaceSnapshot);
   }
 
@@ -736,12 +764,14 @@
     next.delete(toolTabId);
     terminalRuntimeByToolTabId = next;
     syncLegacyTerminalTabState();
+    scheduleReloadTabsSnapshot();
     publishWorkspaceDebugSnapshot(workspaceSnapshot);
   }
 
   function syncLegacyTerminalTabState() {
     tabs = terminalRuntimeTabs();
     activeId = activeTerminalToolTabId;
+    scheduleReloadTabsSnapshot();
   }
 
   function activeTerminalRuntime(): TerminalToolRuntime | null {
@@ -785,13 +815,13 @@
   }
 
   function terminalSessionTooltip(session: TerminalSession, displayTitle: string) {
-    const lines = [displayTitle.trim() || "Terminal"];
+    const registryTitle = session.agentSessionName.trim();
+    const lines = [registryTitle || displayTitle.trim() || "Terminal"];
     const cwd = session.currentDirectory.trim();
     const command = session.command.trim();
-    const agentSessionId = session.agentSessionId.trim();
-    if (cwd && cwd !== lines[0]) lines.push(cwd);
+    if (displayTitle.trim() && displayTitle.trim() !== lines[0]) lines.push(displayTitle.trim());
+    if (cwd && cwd !== lines[0] && cwd !== displayTitle.trim()) lines.push(cwd);
     if (command) lines.push(`Command: ${command}`);
-    if (agentSessionId) lines.push(`Session: ${agentSessionId}`);
     return lines.join("\n");
   }
 
@@ -800,6 +830,41 @@
     const runtime = terminalRuntimeForToolTab(toolTabId);
     const title = runtime?.tab.title.trim() ?? "";
     return title.length > 0 ? title : null;
+  }
+
+  function updateAgentSessionNamesFromDetachedSessions(sessions: TerminalDetachedSessionInfo[]) {
+    const next = mergeAgentSessionNamesFromRegistryList(agentSessionNamesById, sessions);
+    const changed = next !== agentSessionNamesById;
+    if (!changed) return;
+    agentSessionNamesById = next;
+    applyAgentSessionNamesToOpenTerminals();
+  }
+
+  function updateAgentSessionNameFromInfo(info: TerminalSessionInfo) {
+    const next = mergeAgentSessionNameFromAttachInfo(agentSessionNamesById, info);
+    if (next === agentSessionNamesById) return;
+    agentSessionNamesById = next;
+  }
+
+  function applyAgentSessionNamesToOpenTerminals() {
+    let changed = false;
+    for (const runtime of terminalRuntimeByToolTabId.values()) {
+      if (applyAgentSessionNameToTerminal(runtime.tab)) changed = true;
+    }
+    if (!changed) return;
+    terminalTitleRevision += 1;
+    scheduleReloadTabsSnapshot();
+    publishWorkspaceDebugSnapshot(workspaceSnapshot);
+  }
+
+  function applyAgentSessionNameToTerminal(tab: TerminalTab) {
+    const session = tab.session;
+    if (!session.agentBacked || !session.agentSessionId) return false;
+    const name = agentSessionNamesById.get(session.agentSessionId)?.trim() ?? session.agentSessionName.trim();
+    if (!name || session.agentSessionName === name) return false;
+    session.agentSessionName = name;
+    refreshTerminalTabTitle(tab);
+    return true;
   }
 
   function terminalSessionIdForToolTab(tool: WorkspaceToolTab | string | null): string | undefined {
@@ -1364,6 +1429,7 @@
       tabs = [...tabs, tab];
     }
     activeId = tab.id;
+    scheduleReloadTabsSnapshot();
     hostSessionRetryBySessionId = {
       ...hostSessionRetryBySessionId,
       [session.id]: {
@@ -1516,12 +1582,14 @@
   }
 
   function bindTerminalSessionToToolTab(tool: WorkspaceToolTab, info: TerminalSessionInfo) {
+    updateAgentSessionNameFromInfo(info);
     const tab = createTerminalTab(info);
     tab.id = tool.id;
     tab.session.tabId = tool.id;
     setTerminalRuntime(tool.id, { toolTabId: tool.id, tab });
     activeTerminalToolTabId = tool.id;
     activeId = tool.id;
+    scheduleReloadTabsSnapshot();
     return tab;
   }
 
@@ -1958,6 +2026,7 @@
 
   async function activateTab(id: string) {
     activeId = id;
+    scheduleReloadTabsSnapshot();
     const tab = tabs.find((item) => item.id === id);
     if (!tab) return;
     await tick();
@@ -1993,6 +2062,7 @@
       activeId = tabs[Math.max(0, index - 1)]?.id ?? tabs[0]?.id ?? "";
       if (activeId) await activateTab(activeId);
     }
+    scheduleReloadTabsSnapshot();
     syncTerminalMenuState();
   }
 
@@ -2187,6 +2257,7 @@
       activeId = tabs.at(-1)?.id ?? "";
       if (activeId) await activateTab(activeId);
     }
+    scheduleReloadTabsSnapshot();
   }
 
   async function restoreCreatedTabForRedo(): Promise<TerminalUndoAction> {
@@ -2199,6 +2270,7 @@
   async function restoreClosedTab(action: Extract<TerminalUndoAction, { kind: "close_tab" }>) {
     tabs = [...tabs.slice(0, action.index), action.tab, ...tabs.slice(action.index)];
     activeId = action.tab.id;
+    scheduleReloadTabsSnapshot();
     await tick();
     await mountAndFitTab(action.tab);
     action.tab.session.term?.focus();
@@ -2213,6 +2285,7 @@
       activeId = tabs.at(-1)?.id ?? "";
       if (activeId) await activateTab(activeId);
     }
+    scheduleReloadTabsSnapshot();
   }
 
   function startDockResize(
@@ -2714,6 +2787,10 @@
     if (document.visibilityState === "hidden") handleWindowBlur();
   }
 
+  function handlePageHide() {
+    storeReloadTabsSnapshot();
+  }
+
   async function moveActiveTabToNewWindow() {
     const tab = activeTab;
     if (!tab) return;
@@ -2732,12 +2809,15 @@
   }
 
   function storeTabSnapshot(tab: TerminalTab): StoredTerminalTab {
+    const tool = workspaceToolById(tab.id);
     return {
-      customTitle: tab.customTitle,
+      workspaceId: tool?.owner_workspace_id ?? "",
+      toolTabId: tab.id,
       session: {
         id: tab.session.id,
         title: tab.session.title,
         baseTitle: tab.session.baseTitle,
+        agentSessionName: tab.session.agentSessionName,
         command: tab.session.command,
         currentDirectory: tab.session.currentDirectory,
         titleOverride: tab.session.titleOverride,
@@ -2759,13 +2839,17 @@
     };
   }
 
-  function storeHotTabsSnapshot() {
-    if (!isHotModuleReplacement || tabs.length === 0) return;
-    const stored: StoredHotTabs = {
+  function storeReloadTabsSnapshot() {
+    if (floatingWindowId) return;
+    if (tabs.length === 0) {
+      sessionStorage.removeItem(reloadTabsStorageKey);
+      return;
+    }
+    const stored: StoredReloadTabs = {
       activeIndex: Math.max(0, tabs.findIndex((tab) => tab.id === activeId)),
       tabs: tabs.map(storeTabSnapshot),
     };
-    sessionStorage.setItem(hotTabsStorageKey, JSON.stringify(stored));
+    sessionStorage.setItem(reloadTabsStorageKey, JSON.stringify(stored));
   }
 
   async function restoreTabHandoff() {
@@ -2785,6 +2869,7 @@
     const tab = restoreStoredTab(stored, restoredSession);
     tabs = [tab];
     activeId = tab.id;
+    scheduleReloadTabsSnapshot();
     await tick();
     await mountAndFitTab(tab);
     tab.session.term?.focus();
@@ -2792,12 +2877,11 @@
     return true;
   }
 
-  async function restoreHotTabs() {
-    if (!isHotModuleReplacement) return false;
-    const raw = sessionStorage.getItem(hotTabsStorageKey);
+  async function restoreReloadedTabs() {
+    const raw = sessionStorage.getItem(reloadTabsStorageKey);
     if (!raw) return false;
-    sessionStorage.removeItem(hotTabsStorageKey);
-    const stored = JSON.parse(raw) as StoredHotTabs;
+    sessionStorage.removeItem(reloadTabsStorageKey);
+    const stored = JSON.parse(raw) as StoredReloadTabs;
     if (stored.tabs.length === 0) return false;
     const restoredTabs: TerminalTab[] = [];
     for (const storedTab of stored.tabs) {
@@ -2806,6 +2890,7 @@
     }
     tabs = restoredTabs;
     activeId = restoredTabs[Math.min(stored.activeIndex, restoredTabs.length - 1)]?.id ?? restoredTabs[0]?.id ?? "";
+    scheduleReloadTabsSnapshot();
     await tick();
     for (const tab of restoredTabs) await mountAndFitTab(tab);
     const focusedTab = tabs.find((tab) => tab.id === activeId);
@@ -2818,7 +2903,19 @@
 
   async function restoreStoredSession(stored: StoredTerminalTab) {
     const session = stored.session;
-    const restored = session.reconnectPending
+    const reattachesAgentSession = session.agentBacked && session.agentSessionId && !session.readOnly && stored.workspaceId && stored.toolTabId;
+    const restored = reattachesAgentSession
+      ? createTerminalSession(
+          await unwrapCommand(
+            commands.attachDetachedTerminalSession({
+              workspace_id: stored.workspaceId,
+              tool_tab_id: stored.toolTabId,
+              detached_session_id: session.agentSessionId,
+              window_label: currentWindowLabel(),
+            }),
+          ),
+        )
+      : session.reconnectPending
       ? createTerminalSession({
           id: session.id,
           title: session.title,
@@ -2834,8 +2931,27 @@
           agent: null,
         })
       : createTerminalSession(await unwrapCommand(commands.existingTerminalSessionInfo({ session_id: session.id })));
-    restored.title = session.title;
-    restored.baseTitle = session.baseTitle;
+    if (!reattachesAgentSession) {
+      restored.title = session.title;
+      restored.baseTitle = session.baseTitle;
+    }
+    restored.agentSessionName = session.agentSessionName || restored.agentSessionName;
+    if (restored.agentSessionId && restored.agentSessionName) {
+      updateAgentSessionNameFromInfo({
+        id: restored.id,
+        title: restored.agentSessionName,
+        command: restored.command,
+        cwd: restored.currentDirectory || null,
+        cols: restored.lastCols,
+        rows: restored.lastRows,
+        pixel_width: restored.lastPixelWidth,
+        pixel_height: restored.lastPixelHeight,
+        process_id: null,
+        transport: "agent",
+        transport_state: restored.status === "running" ? "connected" : "disconnected",
+        agent: { session_id: restored.agentSessionId },
+      });
+    }
     restored.command = session.command;
     restored.currentDirectory = session.currentDirectory;
     restored.titleOverride = session.titleOverride;
@@ -2857,7 +2973,6 @@
 
   function restoreStoredTab(stored: StoredTerminalTab, restoredSession: TerminalSession) {
     const tab = createTerminalTabFromSession(restoredSession);
-    tab.customTitle = stored.customTitle;
     restoredSession.tabId = tab.id;
     tab.session = restoredSession;
     refreshTerminalTabTitle(tab);
@@ -3045,7 +3160,34 @@
 
   function handleTerminalMenuEvent(event: { command: string }) {
     const command = event.command;
+    if (command === "open_command_palette") {
+      openCommandPalette();
+      return;
+    }
+    if (command === "new_tab") {
+      void openWorkspaceTerminalSession();
+      return;
+    }
+    if (command === "close" || command === "close_tab") {
+      if (activeId) void closeTab(activeId, { recordHistory: true });
+      return;
+    }
+    if (command === "undo") {
+      const input = activeTextInput();
+      if (input) runTextInputEditCommand(input, "undo");
+      return;
+    }
+    if (command === "redo") {
+      const input = activeTextInput();
+      if (input) runTextInputEditCommand(input, "redo");
+      return;
+    }
     if (command === "copy") {
+      const input = activeTextInput();
+      if (input) {
+        runTextInputEditCommand(input, "copy");
+        return;
+      }
       const session = activeSession();
       if (session) void copyTerminalSelection(session.id);
       return;
@@ -3055,9 +3197,71 @@
       if (session) void pasteIntoTerminal(session.id);
       return;
     }
+    if (command === "paste_selection") {
+      void pasteSelectionIntoActiveSession();
+      return;
+    }
     if (command === "select_all") {
+      const input = activeTextInput();
+      if (input) {
+        input.select();
+        syncTerminalMenuState();
+        return;
+      }
       activeSession()?.term?.selectAll?.();
       return;
+    }
+    if (command === "find") {
+      showFind();
+      return;
+    }
+    if (command === "find_next") {
+      findNext();
+      return;
+    }
+    if (command === "find_previous") {
+      findPrevious();
+      return;
+    }
+    if (command === "hide_find_bar") {
+      hideFind();
+      return;
+    }
+    if (command === "use_selection_for_find") {
+      useSelectionForFind();
+      return;
+    }
+    if (command === "jump_to_selection") {
+      jumpToSelection();
+      return;
+    }
+    if (command === "reset_font_size") {
+      resetFontSize();
+      return;
+    }
+    if (command === "increase_font_size") {
+      adjustFontSize(1);
+      return;
+    }
+    if (command === "decrease_font_size") {
+      adjustFontSize(-1);
+      return;
+    }
+    if (command === "toggle_read_only") {
+      const session = activeSession();
+      if (session) toggleTerminalReadOnly(session.id);
+      return;
+    }
+    if (command === "show_previous_tab") {
+      showPreviousTab();
+      return;
+    }
+    if (command === "show_next_tab") {
+      showNextTab();
+      return;
+    }
+    if (command === "move_tab_to_new_window") {
+      void moveActiveTabToNewWindow();
     }
   }
 
@@ -3076,22 +3280,6 @@
     syncTerminalMenuState();
   }
 
-  function changeTabTitleForTerminal(sessionId: string) {
-    const tab = findTabBySessionId(sessionId);
-    changeTabTitle(tab);
-  }
-
-  function changeTabTitle(tab: TerminalTab) {
-    const nextTitle = window.prompt(t("changeTabTitlePrompt"), tab.customTitle || tab.title);
-    if (nextTitle === null) return;
-    tab.customTitle = nextTitle.trim();
-    refreshTerminalTabTitle(tab);
-    const session = tab.session;
-    if (session?.agentBacked && !session.readOnly && tab.customTitle) {
-      void persistTerminalSessionRename(session.id, tab.customTitle);
-    }
-  }
-
   async function persistTerminalProgramTitle(sessionId: string, title: string) {
     const trimmed = title.trim();
     const session = findLocalSessionById(sessionId);
@@ -3101,22 +3289,6 @@
     if (!hasTauriRuntime()) return;
     try {
       await unwrapCommand(commands.updateTerminalTitle({ session_id: sessionId, title: trimmed }));
-      terminalSessionsRevision += 1;
-    } catch (error) {
-      lastPersistedTerminalTitleByAgentSessionId.delete(titleKey);
-      settingsError = error instanceof Error ? error.message : String(error);
-    }
-  }
-
-  async function persistTerminalSessionRename(sessionId: string, title: string) {
-    const trimmed = title.trim();
-    if (!trimmed) return;
-    const session = findLocalSessionById(sessionId);
-    const titleKey = session?.agentSessionId || sessionId;
-    lastPersistedTerminalTitleByAgentSessionId.set(titleKey, trimmed);
-    if (!hasTauriRuntime()) return;
-    try {
-      await unwrapCommand(commands.renameTerminalSession({ session_id: sessionId, title: trimmed }));
       terminalSessionsRevision += 1;
     } catch (error) {
       lastPersistedTerminalTitleByAgentSessionId.delete(titleKey);
@@ -4140,6 +4312,7 @@
   onMount(() => {
     publishTestHooks();
     let mounted = true;
+    pageMounted = true;
     floatingWindowId = currentFloatingWindowId();
     const stopTransferQueueObserver = startTransferQueueObserver();
     void (async () => {
@@ -4200,7 +4373,7 @@
         await restoreTerminalRuntimeForWorkspace(workspaceSnapshot.active_workspace_id);
       }
       if (!floatingWindowId) {
-        const restored = (await restoreTabHandoff()) || (await restoreHotTabs());
+        const restored = (await restoreTabHandoff()) || (await restoreReloadedTabs());
         await ensureStartupSession(restored);
       }
     })().catch((error) => {
@@ -4213,6 +4386,7 @@
     window.addEventListener("click", handleClick, { capture: true });
     window.addEventListener("blur", handleWindowBlur);
     window.addEventListener("focus", syncTerminalMenuState);
+    window.addEventListener("pagehide", handlePageHide);
     document.addEventListener("pointerdown", closeHostPickerOnExternalPointer, { capture: true });
     document.addEventListener("pointerdown", closeToolTabContextMenuOnExternalPointer, { capture: true });
     document.addEventListener("beforeinput", handleTextInputBeforeInput);
@@ -4225,6 +4399,7 @@
     syncTerminalMenuState();
     return () => {
       mounted = false;
+      pageMounted = false;
       window.removeEventListener("keydown", handleKeyboard, { capture: true });
       window.removeEventListener("pointermove", handlePointerMove, { capture: true });
       window.removeEventListener("pointerup", handlePointerUp, { capture: true });
@@ -4232,6 +4407,7 @@
       window.removeEventListener("click", handleClick, { capture: true });
       window.removeEventListener("blur", handleWindowBlur);
       window.removeEventListener("focus", syncTerminalMenuState);
+      window.removeEventListener("pagehide", handlePageHide);
       document.removeEventListener("pointerdown", closeHostPickerOnExternalPointer, { capture: true });
       document.removeEventListener("pointerdown", closeToolTabContextMenuOnExternalPointer, { capture: true });
       document.removeEventListener("beforeinput", handleTextInputBeforeInput);
@@ -4255,10 +4431,11 @@
         return;
       }
       if (isHotModuleReplacement) {
-        storeHotTabsSnapshot();
+        storeReloadTabsSnapshot();
         for (const tab of terminalRuntimeTabs()) disposeTerminalTab(tab);
         return;
       }
+      storeReloadTabsSnapshot();
       for (const tab of terminalRuntimeTabs()) {
         disposeTerminalTab(tab);
       }
@@ -4794,6 +4971,7 @@
       revision={terminalSessionsRevision}
       onAttach={attachDetachedTerminalSession}
       onOpenHistory={openDetachedTerminalSessionHistory}
+      onSessionsChanged={updateAgentSessionNamesFromDetachedSessions}
       onDeleted={() => {
         terminalSessionsRevision += 1;
         return refreshDetachedTerminalPaletteItems();

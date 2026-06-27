@@ -25,7 +25,7 @@ export const terminalKeybindings: KeybindingDefinition[] = [
   },
   {
     command: "terminal.newSession",
-    label: "New Session",
+    label: "New Terminal",
     macDefault: "Meta+T",
     default: "Ctrl+Shift+T",
   },

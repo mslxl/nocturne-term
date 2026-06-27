@@ -11,6 +11,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"strings"
 	"sync"
 	"time"
 )
@@ -231,17 +232,27 @@ func (state *daemonState) handleRequest(client *daemonClient, request rawRequest
 			return fmt.Errorf("resize PTY: %w", err)
 		}
 		client.writeResponse(okResponse(request.RequestID))
-	case "rename", "title_change":
+	case "rename":
 		var payload renamePayload
 		if err := decodePayload(request.Payload, &payload); err != nil {
 			return err
 		}
-		if payload.Title == "" {
+		if strings.TrimSpace(payload.Title) == "" {
 			return errors.New("title is required")
 		}
-		state.registry.Title = payload.Title
-		if err := rewriteRegistry(state.registry); err != nil {
+		title := strings.TrimSpace(payload.Title)
+		state.registry.Title = title
+		if err := RenameRegistrySession(state.registry.SessionID, title); err != nil {
 			return err
+		}
+		client.writeResponse(okResponse(request.RequestID))
+	case "title_change":
+		var payload renamePayload
+		if err := decodePayload(request.Payload, &payload); err != nil {
+			return err
+		}
+		if strings.TrimSpace(payload.Title) == "" {
+			return errors.New("title is required")
 		}
 		client.writeResponse(okResponse(request.RequestID))
 	case "close_view":

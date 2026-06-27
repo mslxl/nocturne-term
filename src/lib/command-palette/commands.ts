@@ -34,8 +34,8 @@ export const staticPaletteCommands: StaticPaletteCommand[] = [
   },
   {
     id: "terminal.newSession",
-    title: { en: "New Session", zh: "新建 Session" },
-    scope: { en: "Session", zh: "Session" },
+    title: { en: "New Terminal", zh: "新建终端" },
+    scope: { en: "Terminal", zh: "终端" },
     shortcut: "Meta+T",
     keywords: {
       en: ["session", "new session", "tab", "new tab", "terminal"],

@@ -428,7 +428,7 @@ func TestDaemonInfoReportsLiveAttachedCount(t *testing.T) {
 	}
 }
 
-func TestDaemonTitleChangePersistsRegistryTitle(t *testing.T) {
+func TestDaemonRenamePersistsRegistryTitleButTitleChangeDoesNot(t *testing.T) {
 	temp := t.TempDir()
 	setStateEnv(t, temp)
 
@@ -453,8 +453,8 @@ func TestDaemonTitleChangePersistsRegistryTitle(t *testing.T) {
 	writeRequest(t, conn, "title-1", "title_change", map[string]string{"title": "Editor: main.go"})
 	expectResponse(t, reader, "title-1")
 	updated := waitForRegistry(t, "session-title-change")
-	if updated.Title != "Editor: main.go" {
-		t.Fatalf("title_change did not persist registry title: %+v", updated)
+	if updated.Title != "Initial title" {
+		t.Fatalf("title_change changed registry session name: %+v", updated)
 	}
 
 	writeRequest(t, conn, "rename-1", "rename", map[string]string{"title": "Build logs"})

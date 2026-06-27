@@ -53,6 +53,32 @@ describe("terminal sessions", () => {
     expect(session.outputQueue.join("")).toContain("[Disconnected: cmd]");
   });
 
+  it("keeps the registry title as the session display name when cwd is known", () => {
+    const session = createTerminalPane(sessionInfo({
+      title: "BraveBeacon",
+      cwd: "C:\\Sources\\nocturne-term",
+    }));
+
+    expect(session.title).toBe("BraveBeacon");
+    expect(session.baseTitle).toBe("BraveBeacon");
+    expect(session.currentDirectory).toBe("C:\\Sources\\nocturne-term");
+  });
+
+  it("retargets to the registry title instead of replacing it with cwd", () => {
+    const session = createTerminalPane(sessionInfo({ title: "OldName" }));
+
+    retargetTerminalPaneSession(session, sessionInfo({
+      id: "term-4",
+      title: "BrightHarbor",
+      cwd: "C:\\Users\\lnslf",
+      agent: { session_id: "registry-term-4" },
+    }));
+
+    expect(session.title).toBe("BrightHarbor");
+    expect(session.baseTitle).toBe("BrightHarbor");
+    expect(session.currentDirectory).toBe("C:\\Users\\lnslf");
+  });
+
   it("drops the input that triggers reconnect instead of writing it into the restarted session", () => {
     const session = {
       id: "term-3",

@@ -3,6 +3,8 @@ package agent
 import (
 	"bufio"
 	"bytes"
+	"crypto/rand"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -46,7 +48,7 @@ func CreateInitialRegistry(spec LaunchSpec) (Registry, error) {
 		Version:         1,
 		SessionID:       spec.SessionID,
 		HostID:          spec.HostID,
-		Title:           spec.Title,
+		Title:           initialRegistryTitle(spec),
 		Command:         spec.Command,
 		Cwd:             spec.Cwd,
 		CreatedAt:       time.Now().UTC().Format(time.RFC3339Nano),
@@ -66,6 +68,27 @@ func CreateInitialRegistry(spec LaunchSpec) (Registry, error) {
 		return Registry{}, err
 	}
 	return registry, nil
+}
+
+func RenameRegistrySession(sessionID string, title string) error {
+	nextTitle := strings.TrimSpace(title)
+	if nextTitle == "" {
+		return errors.New("title is required")
+	}
+	root, err := stateRoot()
+	if err != nil {
+		return err
+	}
+	path, err := registryPath(root, sessionID)
+	if err != nil {
+		return err
+	}
+	registry, err := readRegistry(path)
+	if err != nil {
+		return err
+	}
+	registry.Title = nextTitle
+	return writeRegistryAtomic(root, registry)
 }
 
 func MarkRegistryExited(sessionID string, exit ExitInfo) error {
@@ -286,6 +309,60 @@ func validateID(value string) error {
 
 func transcriptName(sessionID string) string {
 	return sessionID + ".ndjson"
+}
+
+func initialRegistryTitle(spec LaunchSpec) string {
+	title := strings.TrimSpace(spec.Title)
+	if title != "" && !isGeneratedSessionTitle(title) {
+		return title
+	}
+	return randomSessionName(spec.SessionID)
+}
+
+func isGeneratedSessionTitle(title string) bool {
+	return regexp.MustCompile(`^Session \d+$`).MatchString(strings.TrimSpace(title))
+}
+
+func randomSessionName(seed string) string {
+	adjectives := []string{
+		"Adamant", "Adept", "Arcadian", "Auspicious", "Brave", "Charming",
+		"Considerate", "Curious", "Diligent", "Effulgent", "Erudite", "Excellent",
+		"Fabulous", "Friendly", "Glowing", "Gracious", "Inventive", "Joyous",
+		"Judicious", "Kind", "Likable", "Lucky", "Nautical", "Polished",
+		"Profound", "Quiet", "Remarkable", "Sensible", "Sincere", "Sparkling",
+		"Splendid", "Stellar", "Tenacious", "Unflappable", "Verdant", "Wise",
+	}
+	nouns := []string{
+		"Anchor", "Apple", "Apricot", "Beacon", "Bridge", "Cabbage", "Cipher",
+		"Clover", "Compass", "Delta", "Forge", "Harbor", "Ledger", "Matrix",
+		"Melody", "Orbit", "Pilot", "Quartz", "Signal", "Spark", "Summit",
+		"Vector", "Vertex", "Voyage",
+	}
+	value := randomUint32()
+	if value == 0 {
+		value = deterministicNameSeed(seed)
+	}
+	return fmt.Sprintf("%s%s", adjectives[int(value)%len(adjectives)], nouns[int(value>>8)%len(nouns)])
+}
+
+func randomUint32() uint32 {
+	var buffer [4]byte
+	if _, err := rand.Read(buffer[:]); err != nil {
+		return 0
+	}
+	return binary.LittleEndian.Uint32(buffer[:])
+}
+
+func deterministicNameSeed(seed string) uint32 {
+	var value uint32 = 2166136261
+	for _, char := range []byte(seed) {
+		value ^= uint32(char)
+		value *= 16777619
+	}
+	if value == 0 {
+		return 1
+	}
+	return value
 }
 
 func registryPath(root string, sessionID string) (string, error) {

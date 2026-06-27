@@ -125,7 +125,6 @@ Terminal content menu actions:
 
 Terminal session actions:
 
-- Change Tab Title
 - Close
 - Detach
 

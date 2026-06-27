@@ -195,7 +195,6 @@ describe("Terminal Agent packaging", () => {
     assert.doesNotMatch(terminalRuntime, /remote registry delete is not available yet/);
     assert.match(tauriLib, /terminal::delete_detached_terminal_session/);
     assert.match(tauriLib, /terminal::update_terminal_title/);
-    assert.match(tauriLib, /terminal::rename_terminal_session/);
     assert.match(pageSource, /terminal\.deleteDetached:/);
     assert.match(pageSource, /commands\.deleteDetachedTerminalSession/);
     assert.match(pageSource, /Delete this terminal session and its saved transcript\?/);

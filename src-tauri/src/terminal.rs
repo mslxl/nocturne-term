@@ -49,6 +49,7 @@ use crate::{
         DeleteDetachedTerminalSessionInput, DetachedTerminalSessionsInput,
         ExistingTerminalSessionInput, LocalConnectionConfig,
         OpenDetachedTerminalSessionHistoryInput, RemoteResourceTargetArch, RemoteResourceTargetOs,
+        RenameDetachedTerminalSessionInput,
         SshAuthTarget, SshConnectionConfig, SshCredentialChallenge, SshCredentialInput,
         SshCredentialKind, SshHostKeyChallenge, SshHostKeyChallengeKind, SshHostScopedChallenge,
         SshWorkspaceChallenge, TabBarOrientation, TerminalAgentMode, TerminalAgentSessionInfo,
@@ -143,7 +144,6 @@ struct PreparedRemoteTerminalAgent {
 enum RemoteAgentCommand {
     Write(Vec<u8>, Sender<Result<TerminalAgentResponse>>),
     Resize(PtySize, Sender<Result<TerminalAgentResponse>>),
-    Rename(String, Sender<Result<TerminalAgentResponse>>),
     TitleChange(String, Sender<Result<TerminalAgentResponse>>),
     Close(Sender<Result<TerminalAgentResponse>>),
     CloseView(Sender<Result<TerminalAgentResponse>>),
@@ -909,6 +909,77 @@ fn next_terminal_session_id(state: &TerminalState) -> (u64, String) {
 
 fn new_terminal_session_id() -> String {
     format!("term-{}", uuid::Uuid::new_v4().simple())
+}
+
+fn random_terminal_agent_session_title(session_id: &str) -> String {
+    const ADJECTIVES: &[&str] = &[
+        "Adamant",
+        "Adept",
+        "Arcadian",
+        "Auspicious",
+        "Brave",
+        "Charming",
+        "Considerate",
+        "Curious",
+        "Diligent",
+        "Effulgent",
+        "Erudite",
+        "Excellent",
+        "Fabulous",
+        "Friendly",
+        "Glowing",
+        "Gracious",
+        "Inventive",
+        "Joyous",
+        "Judicious",
+        "Kind",
+        "Likable",
+        "Lucky",
+        "Nautical",
+        "Polished",
+        "Profound",
+        "Quiet",
+        "Remarkable",
+        "Sensible",
+        "Sincere",
+        "Sparkling",
+        "Splendid",
+        "Stellar",
+        "Tenacious",
+        "Unflappable",
+        "Verdant",
+        "Wise",
+    ];
+    const NOUNS: &[&str] = &[
+        "Anchor",
+        "Apple",
+        "Apricot",
+        "Beacon",
+        "Bridge",
+        "Cabbage",
+        "Cipher",
+        "Clover",
+        "Compass",
+        "Delta",
+        "Forge",
+        "Harbor",
+        "Ledger",
+        "Matrix",
+        "Melody",
+        "Orbit",
+        "Pilot",
+        "Quartz",
+        "Signal",
+        "Spark",
+        "Summit",
+        "Vector",
+        "Vertex",
+        "Voyage",
+    ];
+    let digest = sha2::Sha256::digest(session_id.as_bytes());
+    let adjective = ADJECTIVES[usize::from(digest[0]) % ADJECTIVES.len()];
+    let noun = NOUNS[usize::from(digest[1]) % NOUNS.len()];
+    format!("{adjective}{noun}")
 }
 
 fn terminal_agent_response_result(response: TerminalAgentResponse) -> Result<()> {
@@ -2052,10 +2123,6 @@ fn send_remote_agent_command(
             extra.push(("--pixel-height".to_string(), size.pixel_height.to_string()));
             "resize"
         }
-        RemoteAgentCommand::Rename(title, _) => {
-            extra.push(("--title".to_string(), title.clone()));
-            "rename"
-        }
         RemoteAgentCommand::TitleChange(title, _) => {
             extra.push(("--title".to_string(), title.clone()));
             "title_change"
@@ -2087,7 +2154,6 @@ fn remote_agent_command_response_sender(
     match command {
         RemoteAgentCommand::Write(_, sender)
         | RemoteAgentCommand::Resize(_, sender)
-        | RemoteAgentCommand::Rename(_, sender)
         | RemoteAgentCommand::TitleChange(_, sender)
         | RemoteAgentCommand::Close(sender)
         | RemoteAgentCommand::CloseView(sender)
@@ -4483,8 +4549,8 @@ fn create_local_agent_host_terminal_session(
     env_overrides.extend(local.env);
     let command_label = terminal_command_label(&settings);
     let state = terminal_state();
-    let (session_number, id) = next_terminal_session_id(&state);
-    let title = format!("Session {session_number}");
+    let (_session_number, id) = next_terminal_session_id(&state);
+    let title = random_terminal_agent_session_title(&id);
     let spec = build_go_terminal_agent_launch_spec(
         &id,
         &host.id,
@@ -4583,7 +4649,7 @@ fn create_ssh_agent_host_terminal_session(
     let mut settings = terminal_settings_from_config(&app, &config, input.resolved_theme)?;
     let env_overrides = terminal_env_from_config(&config)?;
     let state = terminal_state();
-    let (session_number, id) = next_terminal_session_id(&state);
+    let (_session_number, id) = next_terminal_session_id(&state);
     let prepared = prepare_remote_terminal_agent_runtime(
         &app,
         &host,
@@ -4601,7 +4667,7 @@ fn create_ssh_agent_host_terminal_session(
         settings.command = Some(remote_default_terminal_program(runtime.target_os));
     }
     let command_label = terminal_command_label(&settings);
-    let title = format!("Session {session_number}");
+    let title = random_terminal_agent_session_title(&id);
     let spec = build_go_terminal_agent_launch_spec(
         &id,
         &host.id,
@@ -4994,12 +5060,10 @@ pub(crate) fn list_detached_terminal_sessions(
         .filter(|record| record.host_id == host_id)
         .map(|record| record.info.clone())
     {
-        if let Some(existing) = merged
-            .iter_mut()
-            .find(|session| session.session_id == info.session_id)
+        if !merged
+            .iter()
+            .any(|session| session.session_id == info.session_id)
         {
-            *existing = info;
-        } else {
             merged.push(info);
         }
     }
@@ -5297,6 +5361,86 @@ pub(crate) fn delete_detached_terminal_session(
     }
 
     delete_registry_terminal_session(app, &input, &host_id, &input.detached_session_id)
+}
+
+#[tauri::command]
+#[specta::specta]
+pub(crate) fn rename_detached_terminal_session(
+    app: AppHandle,
+    input: RenameDetachedTerminalSessionInput,
+) -> Result<()> {
+    let title = input.title.trim().to_string();
+    if title.is_empty() {
+        return Err(invalid_error("terminal session title cannot be empty"));
+    }
+    let host_id = workspace::owned_workspace_tool_host_for_kinds(
+        &app,
+        &input.workspace_id,
+        &input.tool_tab_id,
+        &[
+            crate::types::WorkspaceToolKind::Terminal,
+            crate::types::WorkspaceToolKind::TerminalSessions,
+        ],
+    )?;
+    rename_registry_terminal_session(app, &input, &host_id, &title)
+}
+
+fn rename_registry_terminal_session(
+    app: AppHandle,
+    input: &RenameDetachedTerminalSessionInput,
+    host_id: &str,
+    title: &str,
+) -> Result<()> {
+    let host = connection_host_by_id(&app, host_id)?;
+    if !matches!(
+        effective_terminal_agent_mode(&host),
+        TerminalAgentMode::Enabled
+    ) {
+        return Err(invalid_error(
+            "terminal agent mode is disabled for this host",
+        ));
+    }
+    match host.document.protocol {
+        ConnectionProtocol::Local => {
+            let helper_path = local_terminal_agent_helper_path(&app)?;
+            terminal_agent_response_result(run_local_go_agent_client(
+                &helper_path,
+                &input.detached_session_id,
+                "rename",
+                &[("--title", title)],
+            )?)
+        }
+        ConnectionProtocol::Ssh => {
+            let prepared = prepare_remote_terminal_agent_runtime(
+                &app,
+                &host,
+                &input.workspace_id,
+                Some(&input.tool_tab_id),
+                "terminal-agent-rename",
+                PtySize {
+                    rows: 24,
+                    cols: 80,
+                    pixel_width: 800,
+                    pixel_height: 600,
+                },
+                false,
+                false,
+                None,
+                false,
+            )?;
+            terminal_agent_response_result(run_remote_go_agent_client(
+                &prepared.runtime.worker_input,
+                prepared.runtime.target_os,
+                &prepared.runtime.helper_path,
+                &input.detached_session_id,
+                "rename",
+                &[("--title", title)],
+            )?)
+        }
+        ConnectionProtocol::Telnet => Err(invalid_error(
+            "Terminal Agent mode is not supported for telnet hosts",
+        )),
+    }
 }
 
 fn delete_agent_session_from_backend(session: &Arc<TerminalSession>) -> Result<()> {
@@ -5731,43 +5875,6 @@ pub(crate) fn resize_terminal(input: TerminalSizeInput) -> Result<()> {
 
 #[tauri::command]
 #[specta::specta]
-pub(crate) fn rename_terminal_session(input: TerminalTitleInput) -> Result<()> {
-    let title = input.title.trim().to_string();
-    if title.is_empty() {
-        return Err(invalid_error("terminal title cannot be empty"));
-    }
-    let session = session_by_id(&input.session_id)
-        .map_err(|_| terminal_session_missing_error(&input.session_id))?;
-    let mut backend = session.backend.lock().unwrap();
-    match &mut *backend {
-        TerminalBackend::Local { .. } => Ok(()),
-        TerminalBackend::Ssh { .. } => Ok(()),
-        TerminalBackend::Agent {
-            session_id,
-            helper_path,
-            local_control,
-            remote,
-            ..
-        } => terminal_agent_response_result(send_agent_backend_request(
-            session_id,
-            helper_path,
-            local_control.as_ref(),
-            remote.as_ref(),
-            |sender| RemoteAgentCommand::Rename(title.clone(), sender),
-            || agent_title_request("rename", &title),
-            "rename",
-            &[("--title", title.as_str())],
-        )?),
-        TerminalBackend::AgentHistory {
-            registry_session_id,
-        } => Err(invalid_error(format!(
-            "terminal history view for registry session {registry_session_id} is read-only"
-        ))),
-    }
-}
-
-#[tauri::command]
-#[specta::specta]
 pub(crate) fn update_terminal_title(input: TerminalTitleInput) -> Result<()> {
     let title = input.title.trim().to_string();
     if title.is_empty() {
@@ -5994,7 +6101,6 @@ mod tests {
             }
             RemoteAgentCommand::Write(_, _)
             | RemoteAgentCommand::Resize(_, _)
-            | RemoteAgentCommand::Rename(_, _)
             | RemoteAgentCommand::TitleChange(_, _) => {
                 panic!("unexpected command while closing attached Terminal view")
             }
@@ -6161,28 +6267,6 @@ mod tests {
             .expect("title update thread panicked")
             .expect("title update succeeds");
 
-        let renamer = thread::spawn(move || {
-            rename_terminal_session(TerminalTitleInput {
-                session_id: view_session_id.to_string(),
-                title: "Build logs".to_string(),
-            })
-        });
-        match command_rx
-            .recv_timeout(Duration::from_secs(1))
-            .expect("rename_terminal_session sends a daemon command")
-        {
-            RemoteAgentCommand::Rename(title, response_tx) => {
-                assert_eq!(title, "Build logs");
-                response_tx
-                    .send(Ok(TerminalAgentResponse::Ok))
-                    .expect("send rename response");
-            }
-            _ => panic!("rename_terminal_session should send rename"),
-        }
-        renamer
-            .join()
-            .expect("rename thread panicked")
-            .expect("rename succeeds");
         remove_terminal_session(view_session_id);
     }
 

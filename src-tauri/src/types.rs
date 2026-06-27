@@ -1062,7 +1062,6 @@ pub enum TerminalMenuCommand {
     ResetFontSize,
     IncreaseFontSize,
     DecreaseFontSize,
-    ChangeTabTitle,
     ToggleReadOnly,
     Minimize,
     Zoom,
@@ -1414,6 +1413,14 @@ pub struct DeleteDetachedTerminalSessionInput {
     pub workspace_id: String,
     pub tool_tab_id: String,
     pub detached_session_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct RenameDetachedTerminalSessionInput {
+    pub workspace_id: String,
+    pub tool_tab_id: String,
+    pub detached_session_id: String,
+    pub title: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]

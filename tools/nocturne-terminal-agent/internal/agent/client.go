@@ -154,6 +154,24 @@ func writeExitedSessionClientResponse(writer io.Writer, registry Registry, reque
 		})
 	case "close", "close_view", "close_run", "detach":
 		return json.NewEncoder(writer).Encode(okResponse(request.RequestID))
+	case "rename":
+		var payload renamePayload
+		if err := json.Unmarshal(request.Payload, &payload); err != nil {
+			return err
+		}
+		if err := RenameRegistrySession(registry.SessionID, payload.Title); err != nil {
+			return err
+		}
+		return json.NewEncoder(writer).Encode(okResponse(request.RequestID))
+	case "title_change":
+		var payload renamePayload
+		if err := json.Unmarshal(request.Payload, &payload); err != nil {
+			return err
+		}
+		if strings.TrimSpace(payload.Title) == "" {
+			return errors.New("title is required")
+		}
+		return json.NewEncoder(writer).Encode(okResponse(request.RequestID))
 	case "delete":
 		if err := DeleteSessionFiles(registry.SessionID); err != nil {
 			return err

@@ -66,7 +66,6 @@ const MENU_JUMP_TO_SELECTION: &str = "terminal.menu.jump_to_selection";
 const MENU_RESET_FONT_SIZE: &str = "terminal.menu.reset_font_size";
 const MENU_INCREASE_FONT_SIZE: &str = "terminal.menu.increase_font_size";
 const MENU_DECREASE_FONT_SIZE: &str = "terminal.menu.decrease_font_size";
-const MENU_CHANGE_TAB_TITLE: &str = "terminal.menu.change_tab_title";
 const MENU_TOGGLE_READ_ONLY: &str = "terminal.menu.toggle_read_only";
 const MENU_MINIMIZE: &str = "terminal.menu.minimize";
 const MENU_ZOOM: &str = "terminal.menu.zoom";
@@ -144,7 +143,6 @@ struct MenuText {
     reset_font_size: &'static str,
     increase_font_size: &'static str,
     decrease_font_size: &'static str,
-    change_tab_title: &'static str,
     toggle_read_only: &'static str,
     minimize: &'static str,
     zoom: &'static str,
@@ -181,7 +179,7 @@ fn menu_text(language: UiLanguage) -> MenuText {
             view: "View",
             window: "Window",
             new_window: "New Window",
-            new_tab: "New Session",
+            new_tab: "New Terminal",
             profile: "Profile",
             settings: "Settings...",
             profile_new: "New...",
@@ -207,7 +205,6 @@ fn menu_text(language: UiLanguage) -> MenuText {
             reset_font_size: "Reset Font Size",
             increase_font_size: "Increase Font Size",
             decrease_font_size: "Decrease Font Size",
-            change_tab_title: "Change Tab Title...",
             toggle_read_only: "Toggle Terminal Read-only",
             minimize: "Minimize",
             zoom: "Zoom",
@@ -241,7 +238,7 @@ fn menu_text(language: UiLanguage) -> MenuText {
             view: "显示",
             window: "窗口",
             new_window: "新建窗口",
-            new_tab: "新建 Session",
+            new_tab: "新建终端",
             profile: "档案",
             settings: "设置...",
             profile_new: "新建...",
@@ -267,7 +264,6 @@ fn menu_text(language: UiLanguage) -> MenuText {
             reset_font_size: "重置字号",
             increase_font_size: "增大字号",
             decrease_font_size: "减小字号",
-            change_tab_title: "修改标签标题...",
             toggle_read_only: "切换终端只读",
             minimize: "最小化",
             zoom: "缩放",
@@ -492,12 +488,6 @@ pub(crate) fn build_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R
         labels.decrease_font_size,
         Some("CmdOrCtrl+-"),
     )?;
-    let change_tab_title = terminal_menu_item(
-        app,
-        MENU_CHANGE_TAB_TITLE,
-        labels.change_tab_title,
-        None::<&str>,
-    )?;
     let toggle_read_only = terminal_menu_item(
         app,
         MENU_TOGGLE_READ_ONLY,
@@ -514,7 +504,6 @@ pub(crate) fn build_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R
             &increase_font_size,
             &decrease_font_size,
             &view_sep,
-            &change_tab_title,
             &toggle_read_only,
         ],
     )?;
@@ -1552,12 +1541,6 @@ fn build_view_popup_menu<R: Runtime>(
         labels.decrease_font_size,
         Some("CmdOrCtrl+-"),
     )?;
-    let change_tab_title = terminal_menu_item(
-        app,
-        MENU_CHANGE_TAB_TITLE,
-        labels.change_tab_title,
-        None::<&str>,
-    )?;
     let toggle_read_only = terminal_menu_item(
         app,
         MENU_TOGGLE_READ_ONLY,
@@ -1572,7 +1555,6 @@ fn build_view_popup_menu<R: Runtime>(
             &increase_font_size,
             &decrease_font_size,
             &sep,
-            &change_tab_title,
             &toggle_read_only,
         ],
     )
@@ -1745,7 +1727,6 @@ pub(crate) fn update_terminal_menu_state(
     set_menu_item_enabled(&items, MENU_RESET_FONT_SIZE, input.has_active_tab)?;
     set_menu_item_enabled(&items, MENU_INCREASE_FONT_SIZE, input.has_active_tab)?;
     set_menu_item_enabled(&items, MENU_DECREASE_FONT_SIZE, input.has_active_tab)?;
-    set_menu_item_enabled(&items, MENU_CHANGE_TAB_TITLE, input.has_active_tab)?;
     set_menu_item_enabled(&items, MENU_TOGGLE_READ_ONLY, input.has_active_tab)?;
     set_menu_item_enabled(&items, MENU_SHOW_PREVIOUS_TAB, input.has_multiple_tabs)?;
     set_menu_item_enabled(&items, MENU_SHOW_NEXT_TAB, input.has_multiple_tabs)?;
@@ -1873,7 +1854,6 @@ fn terminal_command_from_menu_id(id: &str) -> Option<TerminalMenuCommand> {
         MENU_RESET_FONT_SIZE => Some(TerminalMenuCommand::ResetFontSize),
         MENU_INCREASE_FONT_SIZE => Some(TerminalMenuCommand::IncreaseFontSize),
         MENU_DECREASE_FONT_SIZE => Some(TerminalMenuCommand::DecreaseFontSize),
-        MENU_CHANGE_TAB_TITLE => Some(TerminalMenuCommand::ChangeTabTitle),
         MENU_TOGGLE_READ_ONLY => Some(TerminalMenuCommand::ToggleReadOnly),
         MENU_MINIMIZE => Some(TerminalMenuCommand::Minimize),
         MENU_ZOOM => Some(TerminalMenuCommand::Zoom),

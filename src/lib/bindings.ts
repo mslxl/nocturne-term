@@ -18,6 +18,7 @@ export const commands = {
 	attachDetachedTerminalSession: (input: AttachDetachedTerminalSessionInput) => typedError<TerminalSessionInfo, ConfigError>(__TAURI_INVOKE("attach_detached_terminal_session", { input })),
 	openDetachedTerminalSessionHistory: (input: OpenDetachedTerminalSessionHistoryInput) => typedError<TerminalSessionInfo, ConfigError>(__TAURI_INVOKE("open_detached_terminal_session_history", { input })),
 	deleteDetachedTerminalSession: (input: DeleteDetachedTerminalSessionInput) => typedError<null, ConfigError>(__TAURI_INVOKE("delete_detached_terminal_session", { input })),
+	renameDetachedTerminalSession: (input: RenameDetachedTerminalSessionInput) => typedError<null, ConfigError>(__TAURI_INVOKE("rename_detached_terminal_session", { input })),
 	exportTerminalSessionKey: (sessionId: string) => typedError<string, ConfigError>(__TAURI_INVOKE("export_terminal_session_key", { sessionId })),
 	takeTerminalOutputBacklog: (input: TerminalOutputBacklogInput) => typedError<{
 	session_id: string,
@@ -27,7 +28,6 @@ export const commands = {
 } | null, ConfigError>(__TAURI_INVOKE("take_terminal_output_backlog", { input })),
 	writeTerminal: (input: TerminalInput) => typedError<null, ConfigError>(__TAURI_INVOKE("write_terminal", { input })),
 	resizeTerminal: (input: TerminalSizeInput) => typedError<null, ConfigError>(__TAURI_INVOKE("resize_terminal", { input })),
-	renameTerminalSession: (input: TerminalTitleInput) => typedError<null, ConfigError>(__TAURI_INVOKE("rename_terminal_session", { input })),
 	updateTerminalTitle: (input: TerminalTitleInput) => typedError<null, ConfigError>(__TAURI_INVOKE("update_terminal_title", { input })),
 	closeTerminalSession: (sessionId: string) => typedError<null, ConfigError>(__TAURI_INVOKE("close_terminal_session", { sessionId })),
 	listTerminalColorSchemes: () => typedError<TerminalColorSchemeEntry[], ConfigError>(__TAURI_INVOKE("list_terminal_color_schemes")),
@@ -700,6 +700,13 @@ export type RemoteSearchHelperInput = {
 	update_changed_host_key: boolean,
 	credential: SshCredentialInput | null,
 	save_credential: boolean,
+};
+
+export type RenameDetachedTerminalSessionInput = {
+	workspace_id: string,
+	tool_tab_id: string,
+	detached_session_id: string,
+	title: string,
 };
 
 export type ResourceMonitorCollectInput = {

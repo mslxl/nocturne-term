@@ -3,11 +3,10 @@ import assert from "node:assert/strict";
 import { compactTerminalPathTitle, refreshTerminalTabTitleModel } from "./tab-title";
 
 describe("terminal tab titles", () => {
-  it("uses the session title when no custom title is set", () => {
+  it("uses the session title when no live title is known", () => {
     const tab = {
       id: "tab-1",
       title: "left",
-      customTitle: "",
       session: { title: "right" },
     };
 
@@ -16,24 +15,10 @@ describe("terminal tab titles", () => {
     assert.equal(tab.title, "right");
   });
 
-  it("keeps a custom title when present", () => {
-    const tab = {
-      id: "tab-1",
-      title: "custom",
-      customTitle: " custom ",
-      session: { title: "right" },
-    };
-
-    refreshTerminalTabTitleModel(tab);
-
-    assert.equal(tab.title, "custom");
-  });
-
   it("uses the running program title before the current directory", () => {
     const tab = {
       id: "tab-1",
       title: "left",
-      customTitle: "",
       session: {
         title: "Local Shell",
         command: "pwsh",
@@ -47,11 +32,87 @@ describe("terminal tab titles", () => {
     assert.equal(tab.title, "vim main.go");
   });
 
+  it("appends the registry session name for Terminal Agent tabs", () => {
+    const tab = {
+      id: "tab-1",
+      title: "left",
+      session: {
+        title: "BraveBeacon",
+        baseTitle: "BraveBeacon",
+        command: "pwsh",
+        currentDirectory: "C:\\Sources\\nocturne-term",
+        titleOverride: "vim main.go",
+        agentBacked: true,
+      },
+    };
+
+    refreshTerminalTabTitleModel(tab);
+
+    assert.equal(tab.title, "vim main.go · BraveBeacon");
+  });
+
+  it("uses the command before the registry session name when an attached Agent view has no cwd yet", () => {
+    const tab = {
+      id: "tab-1",
+      title: "left",
+      session: {
+        title: "BraveBeacon",
+        baseTitle: "BraveBeacon",
+        command: "pwsh",
+        currentDirectory: "",
+        titleOverride: "",
+        agentBacked: true,
+      },
+    };
+
+    refreshTerminalTabTitleModel(tab);
+
+    assert.equal(tab.title, "pwsh · BraveBeacon");
+  });
+
+  it("uses the observed Agent session name instead of stale session fields", () => {
+    const tab = {
+      id: "tab-1",
+      title: "left",
+      session: {
+        title: "OldName",
+        baseTitle: "OldName",
+        agentSessionName: "RenamedBuild",
+        command: "pwsh",
+        currentDirectory: "",
+        titleOverride: "",
+        agentBacked: true,
+      },
+    };
+
+    refreshTerminalTabTitleModel(tab);
+
+    assert.equal(tab.title, "pwsh · RenamedBuild");
+  });
+
+  it("does not append the session name outside Terminal Agent mode", () => {
+    const tab = {
+      id: "tab-1",
+      title: "left",
+      session: {
+        title: "BraveBeacon",
+        baseTitle: "BraveBeacon",
+        command: "pwsh",
+        currentDirectory: "C:\\Sources\\nocturne-term",
+        titleOverride: "vim main.go",
+        agentBacked: false,
+      },
+    };
+
+    refreshTerminalTabTitleModel(tab);
+
+    assert.equal(tab.title, "vim main.go");
+  });
+
   it("compacts shell path titles before using them as a running title", () => {
     const tab = {
       id: "tab-1",
       title: "left",
-      customTitle: "",
       session: {
         title: "Local Shell",
         command: "pwsh",
@@ -69,7 +130,6 @@ describe("terminal tab titles", () => {
     const tab = {
       id: "tab-1",
       title: "left",
-      customTitle: "",
       session: {
         title: "Local Shell",
         command: "pwsh",
@@ -87,7 +147,6 @@ describe("terminal tab titles", () => {
     const tab = {
       id: "tab-1",
       title: "left",
-      customTitle: "",
       session: {
         title: "Local Shell",
         command: "pwsh",
@@ -105,7 +164,6 @@ describe("terminal tab titles", () => {
     const tab = {
       id: "tab-1",
       title: "Session 1",
-      customTitle: "",
       session: {
         title: "Session 1",
         command: "pwsh",

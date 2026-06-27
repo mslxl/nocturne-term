@@ -75,6 +75,7 @@ export type TerminalSession = {
   tabId?: string;
   title: string;
   baseTitle: string;
+  agentSessionName: string;
   command: string;
   currentDirectory: string;
   titleOverride: string;
@@ -122,7 +123,6 @@ export type TerminalSession = {
 export type TerminalTab = {
   id: string;
   title: string;
-  customTitle: string;
   sessionId: string;
   session: TerminalSession;
 };
@@ -145,7 +145,6 @@ export function createTerminalTab(info: TerminalSessionInfo): TerminalTab {
   const tab = {
     id: nextTerminalTabId(),
     title: session.title,
-    customTitle: "",
     sessionId: session.id,
     session,
   };
@@ -158,7 +157,6 @@ export function createTerminalTabFromSession(session: TerminalSession): Terminal
   const tab = {
     id: nextTerminalTabId(),
     title: session.title,
-    customTitle: "",
     sessionId: session.id,
     session,
   };
@@ -173,8 +171,9 @@ export function createTerminalSession(info: TerminalSessionInfo): TerminalSessio
   return {
     id: info.id,
     tabId: "",
-    title: info.cwd ?? info.title,
-    baseTitle: info.cwd ?? info.title,
+    title: info.title,
+    baseTitle: info.title,
+    agentSessionName: info.agent ? info.title : "",
     command: info.command,
     currentDirectory: info.cwd ?? "",
     titleOverride: "",
@@ -213,8 +212,9 @@ export function retargetTerminalSession(session: TerminalSession, info: Terminal
   if (session.resizeTimer !== null) window.clearTimeout(session.resizeTimer);
   if (session.outputFrame !== null) window.cancelAnimationFrame(session.outputFrame);
   session.id = info.id;
-  session.title = info.cwd ?? info.title;
-  session.baseTitle = info.cwd ?? info.title;
+  session.title = info.title;
+  session.baseTitle = info.title;
+  session.agentSessionName = info.agent ? info.title : "";
   session.command = info.command;
   session.currentDirectory = info.cwd ?? "";
   session.titleOverride = "";

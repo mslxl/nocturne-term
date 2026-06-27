@@ -75,13 +75,20 @@ Rules:
 - endpoint kind is stored for display only; Nocturne still chooses the platform
   transport from the current OS
 
-Registry writes are intentionally sparse in V1: creation, rename/title change,
-and normal exit. The daemon writes `[exit]` and then exits. Registry and
+Registry writes are intentionally sparse in V1: creation, explicit registry
+rename, and normal exit. The daemon writes `[exit]` and then exits. Registry and
 transcript files remain until the user explicitly removes the session from
 Nocturne; removing the registry also removes its transcript.
-Nocturne forwards interactive terminal title changes as `title_change` and user
-tab renames as `rename`, both through the helper client, so the registry title
-tracks the session history users can later search.
+Nocturne sets the registry title to a generated session codename such as
+`BraveBeacon` when the user has not named the session. The registry title is the
+user-visible Terminal Sessions row name; cwd and command are supporting details
+only. Nocturne sends user row renames as `rename` through the helper client, so
+the registry title tracks the session name users can later search. Interactive
+terminal title changes still flow as `title_change` for the live ToolTab
+display, but they must not overwrite the registry title. Terminal ToolTabs do
+not have a separate editable alias: their label is always derived from the live
+program title or current directory plus the registry title suffix for Agent
+sessions.
 
 Nocturne exposes removal through the Terminal command palette for sessions on
 the current Host and through the Terminal Sessions ToolTab, displayed to users
@@ -90,26 +97,32 @@ registry-backed session for the same Host whether or not a Terminal ToolTab is
 currently attached. It refreshes when opened, when it becomes active, after
 terminal detach/exit/delete/attach/history events, and when the user presses its
 Refresh button. It does not poll on a timer in V1. The UI uses the native system
-confirmation dialog before calling the backend delete command. Multi-select is
-an explicit selection mode so normal rows stay compact: the user enters Select,
-then can select individual sessions, Select All, invert the selection, delete
-the selected registry/transcript pairs with one confirmation, or leave selection
-mode. Row sizes such as `80x24` are not shown because they are restore metadata,
-not useful list identity. Rows use tooltip text for truncated title, cwd,
-command, and status details. Running or detached sessions are closed and then
-removed; exited sessions are removed directly. Exited sessions stay visible for
-history browsing until this explicit delete step and are not attachable or
-continuable in V1.
+confirmation dialog before calling the backend delete command. Single-session
+rename and delete live in each row context menu; primary rows stay focused on
+attach/history. Multi-select is an explicit selection mode so normal rows stay
+compact: the user enters Select, then can select individual sessions, Select
+All, invert the selection, delete the selected registry/transcript pairs with
+one confirmation, or leave selection mode. Row sizes such as `80x24` are not
+shown because they are restore metadata, not useful list identity. Rows use
+tooltip text for truncated title, cwd, command, and status details. Running or
+detached sessions are closed and then removed; exited sessions are removed
+directly. Exited sessions stay visible for history browsing until this explicit
+delete step and are not attachable or continuable in V1. Terminal ToolTab
+tooltips for already opened agent sessions show the same registry title used by
+the Terminal Sessions row, but do not expose the session id.
 
 The Terminal Sessions ToolTab must stay usable in narrow dock groups without
-showing a native scrollbar if the list can be compressed instead. Its session
-list uses OverlayScrollbars as the scroll host only when the rows truly
-overflow, and the surrounding layout should keep the body area tightly
-constrained so the overlay scrollbar is the only scrollbar the user sees in
-normal use. Prefer shrinking row height, action buttons, and vertical rail width
-before introducing a scroll host. Vertical side rails should use compact display
-titles such as `Terms` instead of the full `Terminals` label to avoid creating
-an outer native scrollbar before content scrolling is necessary.
+showing a native scrollbar if the list can be compressed instead. When the list
+contains sessions it uses OverlayScrollbars as the list scroll host, and the
+surrounding layout keeps the body area tightly constrained so the overlay
+scrollbar is the only scrollbar the user sees in normal use. Empty, loading, and
+error states stay unwrapped. In narrow dock groups, the registry title has
+priority over status and actions; status can wrap below the title, and actions
+should occupy only their icon width. Prefer shrinking row height, action
+buttons, and vertical rail width before widening the panel. Vertical side rails
+should use compact display titles such as `Terms` instead of the full
+`Terminals` label to avoid creating an outer native scrollbar before content
+scrolling is necessary.
 
 Opening an exited session creates a normal Terminal ToolTab in read-only history
 mode. Nocturne requests `history`, displays the saved transcript in that
@@ -257,10 +270,11 @@ deleted sessions are still readable by opening the registry and transcript.
 When the registry has `[exit]`, the helper client does not connect to the daemon
 endpoint because that socket or named pipe belongs to a process that has already
 exited. It serves `history` directly from the transcript, serves `info` from the
-registry, deletes registry/transcript files for `delete`, treats `close_view`,
-`close_run`, and `detach` as already satisfied, and returns a normal `ok = false`
-protocol response for live-only commands such as `ping`, `attach`, `subscribe`,
-`write`, `resize`, `rename`, and `title_change`.
+registry, updates the registry title for `rename`, accepts `title_change`
+without changing the saved session name, deletes registry/transcript files for
+`delete`, treats `close_view`, `close_run`, and `detach` as already satisfied,
+and returns a normal `ok = false` protocol response for live-only commands such
+as `ping`, `attach`, `subscribe`, `write`, and `resize`.
 
 ## Platform Storage
 
