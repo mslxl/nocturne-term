@@ -108,7 +108,7 @@ test("terminal workspace close single session", { timeout: 180_000 }, async () =
       return {
         terminalHosts: document.querySelectorAll('[data-testid="terminal-host"]').length,
         xterms: document.querySelectorAll('.xterm').length,
-        panes: [...document.querySelectorAll('[data-testid="terminal-pane"]')].map((pane) => pane.getAttribute('data-pane-id')),
+        sessions: [...document.querySelectorAll('[data-testid="terminal-surface"]')].map((surface) => surface.getAttribute('data-session-id')),
       };
     `);
   }
@@ -221,7 +221,7 @@ test("terminal workspace close single session", { timeout: 180_000 }, async () =
         terminalState: {
           terminalHosts: document.querySelectorAll('[data-testid="terminal-host"]').length,
           xterms: document.querySelectorAll('.xterm').length,
-          panes: [...document.querySelectorAll('[data-testid="terminal-pane"]')].map((pane) => pane.getAttribute('data-pane-id')),
+          sessions: [...document.querySelectorAll('[data-testid="terminal-surface"]')].map((surface) => surface.getAttribute('data-session-id')),
         },
       };
     `).then((summary) => JSON.stringify(summary, null, 2));

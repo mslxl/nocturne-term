@@ -6,7 +6,7 @@ describe("terminal menu history state", () => {
   it("does not enable undo for a terminal without app history or focused input undo history", () => {
     assert.equal(
       terminalMenuCanUndo({
-        activePaneWritable: true,
+        activeSessionWritable: true,
         activeTextInputCanRedo: false,
         activeTextInputCanUndo: false,
         redoDepth: 0,
@@ -19,7 +19,7 @@ describe("terminal menu history state", () => {
   it("does not enable redo for a terminal without app history or focused input redo history", () => {
     assert.equal(
       terminalMenuCanRedo({
-        activePaneWritable: true,
+        activeSessionWritable: true,
         activeTextInputCanRedo: false,
         activeTextInputCanUndo: false,
         redoDepth: 0,
@@ -32,7 +32,7 @@ describe("terminal menu history state", () => {
   it("enables redo from app history", () => {
     assert.equal(
       terminalMenuCanRedo({
-        activePaneWritable: false,
+        activeSessionWritable: false,
         activeTextInputCanRedo: false,
         activeTextInputCanUndo: false,
         redoDepth: 1,
@@ -45,7 +45,7 @@ describe("terminal menu history state", () => {
   it("enables undo from app history", () => {
     assert.equal(
       terminalMenuCanUndo({
-        activePaneWritable: false,
+        activeSessionWritable: false,
         activeTextInputCanRedo: false,
         activeTextInputCanUndo: false,
         redoDepth: 0,

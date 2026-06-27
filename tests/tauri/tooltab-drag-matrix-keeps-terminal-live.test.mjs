@@ -575,11 +575,11 @@ test("ToolTab drag matrix keeps Terminal live", { timeout: 240_000 }, async () =
       const allSurfaces = [...document.querySelectorAll('[data-testid="terminal-surface"]')];
       const visibleSurfaces = allSurfaces.filter((item) => {
         const rect = item.getBoundingClientRect();
-        const pane = item.closest('.tool-pane');
-        return rect.width >= 1 && rect.height >= 1 && !pane?.hidden && pane?.getAttribute('aria-hidden') !== 'true';
+        const slot = item.closest('.tool-slot-surface');
+        return rect.width >= 1 && rect.height >= 1 && !slot?.hidden && slot?.getAttribute('aria-hidden') !== 'true';
       });
       const surface = visibleSurfaces[0];
-      const activePane = surface?.closest('.tool-pane');
+      const activeSlot = surface?.closest('.tool-slot-surface');
       const host = surface?.querySelector('[data-testid="terminal-host"]');
       const rows = surface?.querySelector('.xterm .xterm-rows');
       const rect = (element) => {
@@ -601,7 +601,7 @@ test("ToolTab drag matrix keeps Terminal live", { timeout: 240_000 }, async () =
         rowsRect: rect(rows),
         rowsText: rows?.textContent ?? '',
         activeTerminalError: surface?.querySelector('.terminal-error')?.textContent ?? '',
-        activePlaceholderText: activePane?.querySelector('.placeholder')?.textContent ?? '',
+        activePlaceholderText: activeSlot?.querySelector('.placeholder')?.textContent ?? '',
       };
     `);
   }

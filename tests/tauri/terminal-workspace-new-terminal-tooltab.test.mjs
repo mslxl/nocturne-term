@@ -4,7 +4,7 @@
  *
  * Feature:
  * Verifies that New Terminal creates a new Workspace-owned Terminal ToolTab,
- * not a legacy terminal-internal tab or pane. The new ToolTab must use an
+ * not a legacy terminal-internal tab or nested terminal surface. The new ToolTab must use an
  * independent Workspace ToolTab id while its backend terminal session keeps a
  * separate term-* id.
  *
@@ -19,7 +19,7 @@
  * dock group, each Terminal ToolTab has a distinct tool-terminal-* id, each
  * ToolTab is mapped to a distinct term-* backend session id, the active
  * Terminal ToolTab has a mounted surface, and there are no legacy
- * terminal-internal tab bars or multi-pane title bars.
+ * terminal-internal tab bars or nested title bars.
  */
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
@@ -105,8 +105,8 @@ test("terminal workspace new terminal tooltab", { timeout: 180_000 }, async () =
     if (state.legacyTerminalTabBars !== 0) {
       throw new Error(`expected no legacy terminal tab bars, found ${state.legacyTerminalTabBars}`);
     }
-    if (state.paneTitleBars !== 0) {
-      throw new Error(`expected no terminal pane title bars, found ${state.paneTitleBars}`);
+    if (state.nestedTitleBars !== 0) {
+      throw new Error(`expected no terminal title bars, found ${state.nestedTitleBars}`);
     }
     for (const toolTabId of state.terminalToolTabs) {
       if (!toolTabId.startsWith("tool-terminal-")) {
@@ -164,7 +164,7 @@ test("terminal workspace new terminal tooltab", { timeout: 180_000 }, async () =
         terminalHosts: document.querySelectorAll('[data-testid="terminal-host"]').length,
         xterms: document.querySelectorAll('.xterm').length,
         legacyTerminalTabBars: document.querySelectorAll('[data-testid="terminal-tabbar"]').length,
-        paneTitleBars: document.querySelectorAll('[data-testid="pane-titlebar"]').length,
+        nestedTitleBars: document.querySelectorAll('[data-testid="terminal-titlebar"]').length,
         bodyText: document.body?.innerText?.slice(0, 1000) ?? '',
       };
     `);

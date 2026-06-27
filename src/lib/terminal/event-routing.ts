@@ -1,17 +1,17 @@
-export function shouldHandleTerminalPaneEvent(paneId: string, localPaneIds: Iterable<string>): boolean {
-  if (!paneId.trim()) return false;
-  for (const localPaneId of localPaneIds) {
-    if (localPaneId === paneId) return true;
+export function shouldHandleTerminalSessionEvent(sessionId: string, localSessionIds: Iterable<string>): boolean {
+  if (!sessionId.trim()) return false;
+  for (const localSessionId of localSessionIds) {
+    if (localSessionId === sessionId) return true;
   }
   return false;
 }
 
-export function routeTerminalPaneEvent(
-  paneId: string,
-  localPaneIds: Iterable<string>,
-  handle: (paneId: string) => void,
+export function routeTerminalSessionEvent(
+  sessionId: string,
+  localSessionIds: Iterable<string>,
+  handle: (sessionId: string) => void,
 ): boolean {
-  if (!shouldHandleTerminalPaneEvent(paneId, localPaneIds)) return false;
-  handle(paneId);
+  if (!shouldHandleTerminalSessionEvent(sessionId, localSessionIds)) return false;
+  handle(sessionId);
   return true;
 }

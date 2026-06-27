@@ -16,6 +16,7 @@
     draggingSlotId: string | null;
     slotTool: (slot: WorkspaceToolSlot) => WorkspaceToolTab | null;
     slotTitle: (slot: WorkspaceToolSlot) => string;
+    slotTooltip: (slot: WorkspaceToolSlot) => string;
     ownerWorkspaceTitle: (slot: WorkspaceToolSlot) => string;
     terminalSessionId: (tool: WorkspaceToolTab | null) => string | undefined;
     onActivate: (slotId: string) => void;
@@ -38,6 +39,7 @@
     draggingSlotId,
     slotTool,
     slotTitle,
+    slotTooltip,
     ownerWorkspaceTitle,
     terminalSessionId,
     onActivate,
@@ -149,6 +151,7 @@
     {#each layout.slots as slot (slot.id)}
       {@const tool = slotTool(slot)}
       {@const fullTitle = slotTitle(slot)}
+      {@const tooltip = slotTooltip(slot)}
       {@const displayTitle = groupCollapsed || tabbarPlacement === "left" || tabbarPlacement === "right" ? compactSlotTitle(slot, tool) : fullTitle}
       <div
         class="tool-tab"
@@ -167,7 +170,7 @@
         role="tab"
         tabindex="0"
         aria-selected={isActive(slot)}
-        title={fullTitle}
+        title={tooltip}
         onclick={() => workspace ? selectSlot(slot.id) : undefined}
         onkeydown={(event) => {
           if (event.key !== "Enter" && event.key !== " ") return;
@@ -208,9 +211,9 @@
       {#each layout.slots as slot (slot.id)}
         {#if shouldMountSlot(slot)}
           <div
-            class="tool-pane"
+            class="tool-slot-surface"
             class:active={isActive(slot)}
-            data-tool-pane-slot-id={slot.id}
+            data-tool-slot-surface-id={slot.id}
             hidden={!isActive(slot)}
             aria-hidden={!isActive(slot)}
           >
@@ -530,7 +533,7 @@
     grid-row: 1;
   }
 
-  .tool-pane {
+  .tool-slot-surface {
     min-width: 0;
     min-height: 0;
     height: 100%;
@@ -540,7 +543,7 @@
     overflow: hidden;
   }
 
-  .tool-pane[hidden] {
+  .tool-slot-surface[hidden] {
     display: none;
   }
 </style>

@@ -1,4 +1,4 @@
-# Terminal ToolTabs And Dock Splits
+# Terminal ToolTabs
 
 This document defines Nocturne's terminal model after the Host Workspace and Dock architecture.
 
@@ -11,7 +11,7 @@ The target model is:
 - one Terminal ToolTab owns one terminal session
 - top-level tabs are Host Workspaces
 - inner dock groups contain ToolTabs
-- split commands create Dock splits with additional Terminal ToolTabs
+- each Terminal ToolTab is one terminal session
 - terminal sessions do not own layout trees
 
 See [Workspace Tabs](workspace-tabs.md) and [Dock Layout](dock-layout.md).
@@ -122,6 +122,12 @@ Terminal content menu actions:
 - Reset Terminal
 - Toggle Terminal Read-only
 - Find
+
+Terminal session actions:
+
+- Change Tab Title
+- Close
+- Detach
 
 ToolTab/Dock menu actions:
 

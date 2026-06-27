@@ -59,7 +59,7 @@ func runClient(args []string, stdin io.Reader, stdout io.Writer) error {
 			return err
 		}
 		return agent.DeleteSession(stdout, sessionID)
-	case "info", "history", "attach", "subscribe", "close", "detach", "ping":
+	case "info", "history", "attach", "subscribe", "close", "close_view", "close_run", "detach", "ping":
 		sessionID, err := parseSessionID(args[1:])
 		if err != nil {
 			return err

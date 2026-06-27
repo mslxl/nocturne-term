@@ -68,7 +68,7 @@ Shared business state includes Files current path, selection, sorting, provider 
 
 View-local state includes scroll position, focused control, hover state, Tree view expansion, Columns view column widths, preview panel width, find UI, selection UI, local panel sizing inside a rendered control, and the collapsed display state of the dock group that contains the rendered slot. Collapsing a group in one workspace must not collapse a mirror of the same ToolTab in another workspace, and collapsing a mirror group must not affect the owner workspace.
 
-Terminal mirrors have additional rules because one backend PTY can be displayed by multiple xterm views. The target Terminal mirror design is defined in [Terminal ToolTabs And Dock Splits](terminal-split-panes.md#terminal-mirror-target-design). If the current implementation has not yet shipped every Terminal mirror rule, treat that section as the acceptance criteria for future work.
+Terminal mirrors have additional rules because one backend PTY can be displayed by multiple xterm views. The target Terminal mirror design is defined in [Terminal ToolTabs](terminal-split-panes.md#terminal-mirror-target-design). If the current implementation has not yet shipped every Terminal mirror rule, treat that section as the acceptance criteria for future work. A Terminal ToolTab maps to a single terminal session; terminal views are the only multiplicity layer.
 
 Resource Monitor mirrors share sampling business state and history buffers, but each mirror keeps its own display preferences. The target Resource Monitor design is defined in [Resource Monitor ToolTab](resource-monitor.md).
 
@@ -96,10 +96,11 @@ The floating window is a display location, not a new owner. Nocturne does not su
 
 Closing semantics:
 
-- Closing an owned live tool tab closes its business object and backend sessions. Mirrors become closed-source placeholders.
+- Closing an owned live terminal ToolTab sends `close_view` for Terminal Agent sessions. The daemon removes the current client/view, pings any remaining attached clients, and closes the PTY/run only when no other reachable attached view remains. Direct local, SSH, and non-Agent terminal sessions close their backend session directly. Mirrors become closed-source placeholders. The `Close` and `Detach` actions belong to the dock group tab-button right-click menu, not the terminal content menu.
 - Closing a mirror slot only removes that mirror display.
 - Closing a floating window removes its mirror display slots.
-- Closing a workspace closes all owned tool tabs after confirmation.
+- Closing a workspace closes all owned tool tabs after confirmation. Terminal ToolTabs still follow the same ToolTab close semantics.
+- Closing a Nocturne window or exiting Nocturne detaches owned Terminal Agent views by default so their runs survive; it does not imply ToolTab Close. The optional application-close auto-detach setting only applies to Terminal Agent sessions and has host override support.
 - Closing a workspace also turns mirrors of its owned tool tabs in other workspaces into closed-source placeholders.
 - Workspace itself is never mirrored.
 
@@ -189,7 +190,10 @@ shown in a narrow vertical rail, the compact display title may shrink to
 scroll. It lists every registry-backed terminal session for the Workspace Host.
 Running or detached rows attach into a normal Terminal ToolTab; exited rows open
 a read-only Terminal ToolTab that shows the saved transcript history and does
-not start a new command.
+not start a new command. The list supports an explicit selection mode with
+Select All, invert selection, and selected-session deletion through one native
+confirmation. It does not show restore-only PTY dimensions in each row, and
+truncated row text must expose full details through tooltips.
 
 Resource Monitor tool tab titles should be concise, normally `Resources`.
 

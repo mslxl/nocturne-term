@@ -596,6 +596,69 @@ func TestClientListProbesLiveDaemonStatusAndAttachedCount(t *testing.T) {
 	}
 }
 
+func TestCloseViewOnlyClosesRunAfterLastReachableAttachedClient(t *testing.T) {
+	temp := t.TempDir()
+	setStateEnv(t, temp)
+
+	spec := LaunchSpec{
+		Version:     1,
+		SessionID:   "session-close-view",
+		HostID:      "host-a",
+		Title:       "Close View",
+		Command:     "fake-shell",
+		Cwd:         temp,
+		Cols:        80,
+		Rows:        24,
+		PixelWidth:  800,
+		PixelHeight: 600,
+	}
+	done := make(chan error, 1)
+	go func() {
+		done <- runDaemonWithStarter(spec, func(LaunchSpec) (ptyProcess, error) {
+			return newEchoPty(), nil
+		})
+	}()
+
+	registry := waitForRegistry(t, "session-close-view")
+	firstConn := waitForConn(t, registry.Endpoint.Path)
+	defer firstConn.Close()
+	firstReader := bufio.NewReader(firstConn)
+	writeRequest(t, firstConn, "attach-first", "subscribe", nil)
+	expectResponse(t, firstReader, "attach-first")
+
+	secondConn := waitForConn(t, registry.Endpoint.Path)
+	defer secondConn.Close()
+	secondReader := bufio.NewReader(secondConn)
+	writeRequest(t, secondConn, "attach-second", "subscribe", nil)
+	expectResponse(t, secondReader, "attach-second")
+
+	writeRequest(t, firstConn, "close-first-view", "close_view", nil)
+	expectResponse(t, firstReader, "close-first-view")
+	if err := firstConn.SetReadDeadline(time.Now().Add(200 * time.Millisecond)); err != nil {
+		t.Fatalf("set deadline failed: %v", err)
+	}
+	buf := make([]byte, 1)
+	if _, err := firstConn.Read(buf); err == nil {
+		t.Fatalf("expected close_view to close the current connection")
+	}
+	select {
+	case err := <-done:
+		t.Fatalf("daemon exited while another attached client was reachable: %v", err)
+	case <-time.After(150 * time.Millisecond):
+	}
+
+	writeRequest(t, secondConn, "close-last-view", "close_view", nil)
+	expectResponse(t, secondReader, "close-last-view")
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("daemon exited with error: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatalf("daemon did not exit after final close_view")
+	}
+}
+
 func TestClientHistoryReadsExitedTranscriptWithoutDaemon(t *testing.T) {
 	temp := t.TempDir()
 	setStateEnv(t, temp)
@@ -714,6 +777,96 @@ func TestClientDeleteClosesLiveSessionAndRemovesFiles(t *testing.T) {
 	}
 }
 
+func TestClientDeleteRemovesExitedSessionFiles(t *testing.T) {
+	temp := t.TempDir()
+	setStateEnv(t, temp)
+	spec := LaunchSpec{
+		Version:   1,
+		SessionID: "session-delete-exited",
+		HostID:    "host-a",
+		Title:     "Delete exited",
+		Command:   "bash",
+		Cwd:       "/workspace",
+		Cols:      80,
+		Rows:      24,
+	}
+	registry, err := CreateInitialRegistry(spec)
+	if err != nil {
+		t.Fatalf("CreateInitialRegistry failed: %v", err)
+	}
+	root, err := stateRoot()
+	if err != nil {
+		t.Fatalf("stateRoot failed: %v", err)
+	}
+	transcriptPath := filepath.Join(root, registry.Transcript)
+	if err := os.WriteFile(transcriptPath, []byte("history\n"), transcriptFileMode); err != nil {
+		t.Fatalf("write transcript failed: %v", err)
+	}
+	exit := ExitInfo{
+		Code:     func() *int { code := 0; return &code }(),
+		Reason:   "closed",
+		ExitedAt: time.Now().UTC().Format(time.RFC3339Nano),
+	}
+	if err := MarkRegistryExited(spec.SessionID, exit); err != nil {
+		t.Fatalf("MarkRegistryExited failed: %v", err)
+	}
+
+	var output bytes.Buffer
+	if err := ProxySessionRequest(&output, spec.SessionID, "delete", nil, false); err != nil {
+		t.Fatalf("ProxySessionRequest delete failed: %v", err)
+	}
+	if !strings.Contains(output.String(), `"ok":true`) {
+		t.Fatalf("delete response missing ok:\n%s", output.String())
+	}
+	if _, err := os.Stat(filepath.Join(root, spec.SessionID+".toml")); !os.IsNotExist(err) {
+		t.Fatalf("registry was not removed: %v", err)
+	}
+	if _, err := os.Stat(transcriptPath); !os.IsNotExist(err) {
+		t.Fatalf("transcript was not removed: %v", err)
+	}
+}
+
+func TestClientDeleteRemovesStaleSessionFilesWhenEndpointIsGone(t *testing.T) {
+	temp := t.TempDir()
+	setStateEnv(t, temp)
+	spec := LaunchSpec{
+		Version:   1,
+		SessionID: "session-delete-stale",
+		HostID:    "host-a",
+		Title:     "Delete stale",
+		Command:   "bash",
+		Cwd:       "/workspace",
+		Cols:      80,
+		Rows:      24,
+	}
+	registry, err := CreateInitialRegistry(spec)
+	if err != nil {
+		t.Fatalf("CreateInitialRegistry failed: %v", err)
+	}
+	root, err := stateRoot()
+	if err != nil {
+		t.Fatalf("stateRoot failed: %v", err)
+	}
+	transcriptPath := filepath.Join(root, registry.Transcript)
+	if err := os.WriteFile(transcriptPath, []byte("stale history\n"), transcriptFileMode); err != nil {
+		t.Fatalf("write transcript failed: %v", err)
+	}
+
+	var output bytes.Buffer
+	if err := DeleteSession(&output, spec.SessionID); err != nil {
+		t.Fatalf("DeleteSession should remove stale registry files after explicit delete: %v", err)
+	}
+	if !strings.Contains(output.String(), `"ok":true`) {
+		t.Fatalf("delete response missing ok:\n%s", output.String())
+	}
+	if _, err := os.Stat(filepath.Join(root, spec.SessionID+".toml")); !os.IsNotExist(err) {
+		t.Fatalf("registry was not removed: %v", err)
+	}
+	if _, err := os.Stat(transcriptPath); !os.IsNotExist(err) {
+		t.Fatalf("transcript was not removed: %v", err)
+	}
+}
+
 func expectHistoryLine(t *testing.T, line string) struct {
 	Type      string `json:"type"`
 	Event     string `json:"event"`
@@ -759,15 +912,20 @@ func writeRequest(t *testing.T, writer io.Writer, requestID string, name string,
 
 func expectResponse(t *testing.T, reader *bufio.Reader, requestID string) responseLine {
 	t.Helper()
-	line := readLine(t, reader)
-	var response responseLine
-	if err := json.Unmarshal([]byte(line), &response); err != nil {
-		t.Fatalf("decode response %q: %v", line, err)
+	for {
+		line := readLine(t, reader)
+		var response responseLine
+		if err := json.Unmarshal([]byte(line), &response); err != nil {
+			t.Fatalf("decode response %q: %v", line, err)
+		}
+		if response.Type == "response" && strings.HasPrefix(response.RequestID, "heartbeat-") {
+			continue
+		}
+		if response.Type != "response" || response.RequestID != requestID || !response.Ok {
+			t.Fatalf("unexpected response: %+v", response)
+		}
+		return response
 	}
-	if response.Type != "response" || response.RequestID != requestID || !response.Ok {
-		t.Fatalf("unexpected response: %+v", response)
-	}
-	return response
 }
 
 func expectEvent(t *testing.T, reader *bufio.Reader, eventName string) struct {

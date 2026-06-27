@@ -12,7 +12,7 @@
  * clicks View History, and inspects the opened Terminal ToolTab.
  *
  * Expected:
- * The saved transcript appears in a Terminal ToolTab, the pane is disconnected
+ * The saved transcript appears in a Terminal ToolTab, the view is disconnected
  * and read-only/history-only, and Nocturne does not start or attach a live PTY
  * for the registry session.
  */
@@ -106,19 +106,19 @@ test("terminal sessions history opens read-only terminal tooltab", { timeout: 18
         const state = await terminalHistoryState();
         return state.historySurfaceCount === before.historySurfaceCount + 1 &&
           state.historyText.includes(fixtureTranscriptText) &&
-          state.historyPanes.some((pane) =>
-            pane.agentSessionId === fixtureSessionId &&
-            pane.readOnly === "true" &&
-            pane.status === "disconnected" &&
-            pane.exitText === "History"
+          state.historyViews.some((view) =>
+            view.agentSessionId === fixtureSessionId &&
+            view.readOnly === "true" &&
+            view.status === "disconnected" &&
+            view.exitText === "History"
           );
       },
       async () => `Terminal history ToolTab did not open read-only history mode\n${JSON.stringify(await terminalHistoryState(), null, 2)}\n${await pageSummary()}\n${driverOutput}`,
     );
 
     const after = await terminalHistoryState();
-    if (after.runningAgentPaneCount !== 0) {
-      throw new Error(`History mode started or attached a live Terminal Agent pane\n${JSON.stringify(after, null, 2)}\n${await pageSummary()}\n${driverOutput}`);
+    if (after.runningAgentViewCount !== 0) {
+      throw new Error(`History mode started or attached a live Terminal Agent view\n${JSON.stringify(after, null, 2)}\n${await pageSummary()}\n${driverOutput}`);
     }
     if (after.fixtureRegistryRows !== 1 || !after.sessionsText.includes("Exited History")) {
       throw new Error(`Opening history should not remove the exited registry row\n${JSON.stringify(after, null, 2)}\n${await pageSummary()}\n${driverOutput}`);
@@ -260,7 +260,7 @@ test("terminal sessions history opens read-only terminal tooltab", { timeout: 18
       return (() => {
         const rows = [...document.querySelectorAll('[data-testid="terminal-session-row"]')];
         const surfaces = [...document.querySelectorAll('[data-testid="terminal-surface"]')];
-        const historyPanes = surfaces.map((surface) => {
+        const historyViews = surfaces.map((surface) => {
           const terminalText = surface.querySelector('.xterm-rows')?.textContent ?? surface.textContent ?? '';
           return {
             sessionId: surface.getAttribute('data-session-id') ?? '',
@@ -277,10 +277,10 @@ test("terminal sessions history opens read-only terminal tooltab", { timeout: 18
           fixtureRegistryRows: rows.filter((row) => row.getAttribute('data-session-id') === 'terminal-session-history').length,
           sessionsText: document.querySelector('[data-testid="terminal-sessions-tooltab"]')?.textContent?.trim() ?? '',
           surfaceCount: surfaces.length,
-          historySurfaceCount: historyPanes.filter((pane) => pane.agentSessionId === 'terminal-session-history').length,
-          historyText: historyPanes.map((pane) => pane.terminalText).join('\\n'),
-          historyPanes,
-          runningAgentPaneCount: historyPanes.filter((pane) => pane.agentSessionId === 'terminal-session-history' && pane.status === 'running').length,
+          historySurfaceCount: historyViews.filter((view) => view.agentSessionId === 'terminal-session-history').length,
+          historyText: historyViews.map((view) => view.terminalText).join('\\n'),
+          historyViews,
+          runningAgentViewCount: historyViews.filter((view) => view.agentSessionId === 'terminal-session-history' && view.status === 'running').length,
         };
       })();
     `);
@@ -375,10 +375,10 @@ test("terminal sessions history opens read-only terminal tooltab", { timeout: 18
           id: item.getAttribute('data-dock-group-id'),
           role: item.getAttribute('data-dock-group-role'),
           activeSlotId: item.getAttribute('data-active-tool-slot-id'),
-          panes: [...item.querySelectorAll('[data-tool-pane-slot-id]')].map((pane) => ({
-            slotId: pane.getAttribute('data-tool-pane-slot-id'),
-            hidden: pane.hasAttribute('hidden'),
-            text: pane.textContent?.slice(0, 120) ?? '',
+          surfaces: [...item.querySelectorAll('[data-tool-slot-surface-id]')].map((surface) => ({
+            slotId: surface.getAttribute('data-tool-slot-surface-id'),
+            hidden: surface.hasAttribute('hidden'),
+            text: surface.textContent?.slice(0, 120) ?? '',
           })),
           tabs: [...item.querySelectorAll('[data-tool-slot-id]')].map((tab) => ({
             slotId: tab.getAttribute('data-tool-slot-id'),

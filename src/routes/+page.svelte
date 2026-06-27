@@ -12,9 +12,9 @@
     commands,
     type AppConfigSnapshot,
     type ConnectionHostIcon,
-    type PaneMenuEvent,
     type PortForwardSshVerificationRequiredEvent,
     type TabBarOrientation,
+    type TerminalMenuStateInput,
     type TerminalSessionInfo,
     type TerminalSettings,
     type WorkspaceSshVerificationRequiredEvent,
@@ -49,7 +49,7 @@
   import TerminalSessionsToolTab from "$lib/terminal/TerminalSessionsToolTab.svelte";
   import TransfersToolTab from "$lib/transfers/TransfersToolTab.svelte";
   import { startTransferQueueObserver } from "$lib/transfers/queue.svelte";
-  import { routeTerminalPaneEvent, shouldHandleTerminalPaneEvent } from "$lib/terminal/event-routing";
+  import { routeTerminalSessionEvent, shouldHandleTerminalSessionEvent } from "$lib/terminal/event-routing";
   import { isTerminalSessionInactiveMessage } from "$lib/terminal/errors";
   import { DEFAULT_TERMINAL_FONT_FAMILY } from "$lib/terminal/fonts";
   import {
@@ -61,35 +61,22 @@
     type TerminalLike,
   } from "$lib/terminal/find";
   import { eventMatchesBinding, readKeybindingMap, type KeybindingMap, type TerminalCommandId } from "$lib/terminal/keybindings";
-  import {
-    movePaneIntoSplit,
-    removePane,
-    replacePane,
-    resizeAdjacentPanes,
-    paneItemsForTree,
-    splitPane,
-    swapPanes,
-    clonePaneTree,
-    type PaneDropZone,
-    type SplitDirection,
-    type SplitSide,
-  } from "$lib/terminal/panes";
   import { syncSettingsVariables, xtermOptions } from "$lib/terminal/settings";
   import {
-    createTerminalPane,
     createTerminalTab,
-    createTerminalTabFromPane,
     createTerminalTabController,
-    detachTerminalPane,
-    disposeTerminalPane,
+    createTerminalSession,
+    createTerminalTabFromSession,
+    detachTerminalSession,
     disposeTerminalTab,
+    disposeTerminalSession,
     measureTerminalFit,
-    retargetTerminalPaneSession,
     refreshTerminalTabTitle,
-    terminalPaneById,
+    retargetTerminalSession,
+    terminalSessionById,
     type TerminalExitEvent,
     type TerminalOutputEvent,
-    type TerminalPane,
+    type TerminalSession,
     type TerminalTab,
     type TerminalTransportStateEvent,
   } from "$lib/terminal/tabs";
@@ -98,54 +85,7 @@
   import { TerminalRuntimeCreationGate } from "$lib/terminal/runtime-creation";
   import { language, setLanguage, t } from "$lib/i18n";
 
-  type TerminalMenuCommand =
-    | "new_window"
-    | "open_command_palette"
-    | "new_tab"
-    | "split_right"
-    | "split_left"
-    | "split_down"
-    | "split_up"
-    | "close"
-    | "close_tab"
-    | "close_window"
-    | "undo"
-    | "redo"
-    | "copy"
-    | "paste"
-    | "paste_selection"
-    | "select_all"
-    | "find"
-    | "find_next"
-    | "find_previous"
-    | "hide_find_bar"
-    | "use_selection_for_find"
-    | "jump_to_selection"
-    | "reset_font_size"
-    | "increase_font_size"
-    | "decrease_font_size"
-    | "change_tab_title"
-    | "toggle_read_only"
-    | "show_previous_tab"
-    | "show_next_tab"
-    | "move_tab_to_new_window"
-    | "zoom_split"
-    | "select_previous_split"
-    | "select_next_split"
-    | "select_split_left"
-    | "select_split_right"
-    | "select_split_up"
-    | "select_split_down"
-    | "resize_split_left"
-    | "resize_split_right"
-    | "resize_split_up"
-    | "resize_split_down";
-
-  type TerminalMenuEvent = {
-    command: TerminalMenuCommand;
-  };
-
-  type StoredPane = {
+  type StoredSession = {
     id: string;
     title: string;
     baseTitle: string;
@@ -158,8 +98,8 @@
     reconnectPending: boolean;
     everConnected: boolean;
     connectionHostId: string;
-    reconnectTrust: TerminalPane["reconnectTrust"];
-    status: TerminalPane["status"];
+    reconnectTrust: TerminalSession["reconnectTrust"];
+    status: TerminalSession["status"];
     serialized: string;
     lastCols: number;
     lastRows: number;
@@ -168,15 +108,13 @@
     nextOutputSequence: string;
   };
 
-  type StoredTab = {
+  type StoredTerminalTab = {
     customTitle: string;
-    activePaneId: string;
-    tree: TerminalTab["tree"];
-    panes: StoredPane[];
+    session: StoredSession;
   };
   type StoredHotTabs = {
     activeIndex: number;
-    tabs: StoredTab[];
+    tabs: StoredTerminalTab[];
   };
   type SshCredentialKind = "password" | "key_passphrase";
   type HostSessionRetry = {
@@ -206,8 +144,6 @@
 
   const initialCols = 80;
   const initialRows = 24;
-  const minPaneWidth = 160;
-  const minPaneHeight = 96;
   const hotTabsStorageKey = "nocturne:dev-hot-tabs";
   type TextInputElement = HTMLInputElement | HTMLTextAreaElement;
   type TextEditSnapshot = {
@@ -224,44 +160,14 @@
     kind: "create_tab";
     tabId: string;
   };
-  type CreatePaneAction = {
-    kind: "create_pane";
-    paneId: string;
-    side: SplitSide;
-    tabId: string;
-    targetPaneId: string;
-  };
   type CloseTabAction = {
     kind: "close_tab";
     tab: TerminalTab;
     index: number;
     previousActiveId: string;
   };
-  type ClosePaneAction = {
-    kind: "close_pane";
-    pane: TerminalPane;
-    tabId: string;
-    index: number;
-    tree: TerminalTab["tree"];
-    activePaneId: string;
-  };
-  type TerminalUndoAction =
-    | CreateTabAction
-    | CreatePaneAction
-    | CloseTabAction
-    | ClosePaneAction;
-  type TerminalRedoAction =
-    | {
-        kind: "create_tab";
-      }
-    | {
-        kind: "create_pane";
-        side: SplitSide;
-        tabId: string;
-        targetPaneId: string;
-      }
-    | CloseTabAction
-    | ClosePaneAction;
+  type TerminalUndoAction = CreateTabAction | CloseTabAction;
+  type TerminalRedoAction = { kind: "create_tab" } | CloseTabAction;
   type TerminalToolRuntime = {
     tab: TerminalTab;
     toolTabId: string;
@@ -276,6 +182,9 @@
     groupId: string;
     left: number;
     top: number;
+  };
+  type ToolTabContextMenuDetachTarget = {
+    sessionId: string;
   };
   type NocturneTestHooks = {
     openCommandPalette: () => void;
@@ -321,7 +230,6 @@
   let configUnlisten: undefined | (() => void);
   let workspaceSshVerificationUnlisten: undefined | (() => void);
   let portForwardSshVerificationUnlisten: undefined | (() => void);
-  let paneMenuUnlisten: undefined | (() => void);
   let terminalMenuUnlisten: undefined | (() => void);
   let terminalMeasureContainer: HTMLDivElement;
   let appTheme: "light" | "dark" = "light";
@@ -331,7 +239,6 @@
   let findRegex = $state(false);
   let findSnapshot = $state<TerminalFindSnapshot>({ activeIndex: 0, error: "", matches: [] });
   let appliedFindSearchKey: TerminalFindSearchKey | null = null;
-  let movedPaneIds = new Set<string>();
   let findInput = $state<HTMLInputElement>();
   let sshCredentialInput = $state<HTMLInputElement>();
   let commandPaletteOpen = $state(false);
@@ -353,10 +260,9 @@
   let filesTreeStickyEnabled = $state(true);
   let filesTreeStickyMaxLevels = $state(3);
   let pendingSshCredential = $state<PendingSshCredential | null>(null);
-  let hostSessionRetryByPaneId = $state<Record<string, HostSessionRetry>>({});
+  let hostSessionRetryBySessionId = $state<Record<string, HostSessionRetry>>({});
   let commandPaletteLastFocus: HTMLElement | null = null;
   let recentPaletteIds = $state<string[]>([]);
-  let zoomedPane = $state<{ tabId: string; paneId: string; tree: TerminalTab["tree"]; activePaneId: string } | null>(null);
   let lastFocusedTextInput: TextInputElement | null = null;
   let serializedMenuState = "";
   let undoStack: TerminalUndoAction[] = [];
@@ -367,15 +273,6 @@
   let lastPersistedTerminalTitleByAgentSessionId = new Map<string, string>();
   const terminalRuntimeCreationGate = new TerminalRuntimeCreationGate();
   const textEditHistories = new WeakMap<TextInputElement, TextEditHistory>();
-  let resizeDrag = $state<{
-    tabId: string;
-    baseTree: TerminalTab["tree"];
-    firstPaneId: string;
-    secondPaneId: string;
-    direction: SplitDirection;
-    startClient: number;
-    containerPixels: number;
-  } | null>(null);
   let dockResizeDrag = $state<{
     workspaceId: string | null;
     floatingWindowId: string | null;
@@ -387,7 +284,6 @@
     containerPixels: number;
     pointerId: number;
   } | null>(null);
-  let dragState = $state<{ kind: "pane" | "tab"; id: string } | null>(null);
   let toolTabDragState = $state<{
     workspaceId: string;
     slotId: string;
@@ -400,16 +296,6 @@
   let activeToolSlotOverrideByGroupId = $state<Record<string, string>>({});
   let activeToolSlotOverrideRevision = $state(0);
   let suppressToolTabClickSlotId = "";
-  let dropTarget = $state<{ paneId: string; zone: PaneDropZone } | null>(null);
-  let pointerDrag = $state<{
-    kind: "pane" | "tab";
-    id: string;
-    pointerId: number;
-    startX: number;
-    startY: number;
-    active: boolean;
-    target: HTMLElement;
-  } | null>(null);
   let toolTabPointerDrag = $state<{
     workspaceId: string;
     slotId: string;
@@ -473,14 +359,14 @@
     notifySelectionChange: () => {
       syncTerminalMenuState();
     },
-    notifyTitleChange: (paneId, title) => {
-      void persistTerminalProgramTitle(paneId, title);
+    notifyTitleChange: (sessionId, title) => {
+      void persistTerminalProgramTitle(sessionId, title);
     },
-    notifyPaneTitleRefresh: () => {
+    notifySessionTitleRefresh: () => {
       terminalTitleRevision += 1;
     },
-    requestReconnect: (paneId) => {
-      void reconnectPaneAfterDisconnect(paneId);
+    requestReconnect: (sessionId) => {
+      void reconnectTerminalAfterDisconnect(sessionId);
     },
   });
 
@@ -495,7 +381,7 @@
           activeId,
           activeTerminalToolTabId,
           terminalRuntimeToolTabIds: Array.from(terminalRuntimeByToolTabId.keys()),
-          terminalRuntimePaneIds: Array.from(terminalRuntimeByToolTabId.values()).map((runtime) => runtime.tab.activePaneId),
+          terminalRuntimeSessionIds: Array.from(terminalRuntimeByToolTabId.values()).map((runtime) => runtime.tab.session.id),
         },
       });
     }
@@ -589,10 +475,9 @@
     tabBarOrientation = next.tab_bar_orientation;
     syncSettingsVariables(next);
     for (const tab of tabs) {
-      for (const pane of tab.panes) {
-        if (pane.term) pane.term.options = xtermOptions(next);
-        terminalTabs.scheduleFit(pane.id);
-      }
+      const session = tab.session;
+      if (session.term) session.term.options = xtermOptions(next);
+      terminalTabs.scheduleFit(session.id);
     }
   }
 
@@ -823,6 +708,17 @@
     return layout.children.map(activeTerminalSlot).find((slot): slot is WorkspaceToolSlot => slot !== null) ?? null;
   }
 
+  function activeDisplaySlotForToolTab(layout: WorkspaceDockLayout, toolTabId: string): WorkspaceToolSlot | null {
+    if (layout.kind === "group") {
+      const active = activeGroupSlot(layout);
+      if (active && active.kind !== "closed_source" && active.tool_tab_id === toolTabId) return active;
+      return layout.slots.find((slot) => slot.kind !== "closed_source" && slot.tool_tab_id === toolTabId) ?? null;
+    }
+    return layout.children
+      .map((child) => activeDisplaySlotForToolTab(child, toolTabId))
+      .find((slot): slot is WorkspaceToolSlot => slot !== null) ?? null;
+  }
+
   function terminalRuntimeForToolTab(toolTabId: string): TerminalToolRuntime | null {
     return terminalRuntimeByToolTabId.get(toolTabId) ?? null;
   }
@@ -869,9 +765,34 @@
     return "Missing ToolTab";
   }
 
+  function slotToolTooltip(slot: WorkspaceToolSlot) {
+    if (slot.kind === "closed_source") return `${slot.previous_title}\nSource workspace: ${slot.owner_workspace_title}`;
+    if (slot.kind === "floating_placeholder") {
+      const tool = slotTool(slot);
+      return `${tool?.title ?? "ToolTab"}\nShown in floating window`;
+    }
+    const tool = slotTool(slot);
+    if (!tool) return "Missing ToolTab";
+    if (tool.kind !== "terminal") return toolTabDisplayTitle(tool);
+    const runtime = terminalRuntimeForToolTab(tool.id);
+    if (!runtime) return tool.title;
+    return terminalSessionTooltip(runtime.tab.session, terminalRuntimeTitleForToolTab(tool.id) ?? tool.title);
+  }
+
   function toolTabDisplayTitle(tool: WorkspaceToolTab) {
     if (tool.kind !== "terminal") return tool.title;
     return terminalRuntimeTitleForToolTab(tool.id) ?? tool.title;
+  }
+
+  function terminalSessionTooltip(session: TerminalSession, displayTitle: string) {
+    const lines = [displayTitle.trim() || "Terminal"];
+    const cwd = session.currentDirectory.trim();
+    const command = session.command.trim();
+    const agentSessionId = session.agentSessionId.trim();
+    if (cwd && cwd !== lines[0]) lines.push(cwd);
+    if (command) lines.push(`Command: ${command}`);
+    if (agentSessionId) lines.push(`Session: ${agentSessionId}`);
+    return lines.join("\n");
   }
 
   function terminalRuntimeTitleForToolTab(toolTabId: string) {
@@ -881,8 +802,10 @@
     return title.length > 0 ? title : null;
   }
 
-  function terminalSessionIdForToolTab(tool: WorkspaceToolTab | null): string | undefined {
-    return tool?.kind === "terminal" ? terminalRuntimeForToolTab(tool.id)?.tab.activePaneId : undefined;
+  function terminalSessionIdForToolTab(tool: WorkspaceToolTab | string | null): string | undefined {
+    if (!tool) return undefined;
+    if (typeof tool === "string") return terminalRuntimeForToolTab(tool)?.tab.session.id;
+    return tool.kind === "terminal" ? terminalRuntimeForToolTab(tool.id)?.tab.session.id : undefined;
   }
 
   function ownerWorkspaceTitle(slot: WorkspaceToolSlot) {
@@ -1064,10 +987,9 @@
   async function confirmTerminalToolRuntimeClose(toolTabId: string) {
     const runtime = terminalRuntimeForToolTab(toolTabId);
     if (!runtime) return true;
-    const pane = terminalPaneById(runtime.tab, runtime.tab.activePaneId);
-    if (!pane) return true;
-    if (pane.status === "running" && shouldConfirmTerminalClose()) {
-      const confirmed = await ask(`Close terminal session ${pane.title}?`, {
+    const session = runtime.tab.session;
+    if (session.status === "running" && shouldConfirmTerminalClose()) {
+      const confirmed = await ask(`Close terminal session ${session.title}?`, {
         title: "Close Terminal",
         kind: "warning",
         okLabel: "Close",
@@ -1081,13 +1003,12 @@
   async function disposeTerminalToolRuntime(toolTabId: string) {
     const runtime = terminalRuntimeForToolTab(toolTabId);
     if (!runtime) return;
-    const pane = terminalPaneById(runtime.tab, runtime.tab.activePaneId);
-    if (!pane) return;
-    const shouldCloseSession = pane.status === "running";
-    disposeTerminalTab(runtime.tab);
+    const session = runtime.tab.session;
+    const shouldCloseSession = session.status === "running";
+    disposeTerminalSession(session);
     if (activeTerminalToolTabId === toolTabId) activeTerminalToolTabId = "";
     deleteTerminalRuntime(toolTabId);
-    if (shouldCloseSession) await closePaneSession(pane);
+    if (shouldCloseSession) await closeTerminalSession(session);
   }
 
   async function closeOtherWorkspaceSlots(workspaceId: string, slotId: string) {
@@ -1244,6 +1165,24 @@
 
   function closeToolTabContextMenu() {
     toolTabContextMenu = null;
+  }
+
+  function toolTabContextMenuDetachTarget(menu: ToolTabContextMenu): ToolTabContextMenuDetachTarget | null {
+    const workspace = workspaceById(menu.workspaceId);
+    if (!workspace) return null;
+    const slot = findWorkspaceSlot(workspace.layout, menu.slotId);
+    if (!slot || slot.kind !== "owned") return null;
+    const tool = terminalToolTabForSlot(slot);
+    if (!tool || tool.kind !== "terminal") return null;
+    const session = terminalRuntimeForToolTab(tool.id)?.tab.session;
+    if (!session || !session.agentBacked || session.status !== "running") return null;
+    return { sessionId: session.id };
+  }
+
+  async function detachToolTabContextMenu(menu: ToolTabContextMenu) {
+    const target = toolTabContextMenuDetachTarget(menu);
+    if (!target) return;
+    await detachTerminalSessionView(target.sessionId);
   }
 
   function otherMirrorTargets(menu: ToolTabContextMenu) {
@@ -1410,12 +1349,11 @@
     const tab = createTerminalTab(info);
     if (toolTabId) {
       tab.id = toolTabId;
-      for (const pane of tab.panes) pane.tabId = toolTabId;
     }
-    const pane = terminalPaneById(tab, tab.activePaneId);
-    if (!pane) throw new Error(`active pane ${tab.activePaneId} not found in created tab`);
-    pane.connectionHostId = connectionHostId;
-    pane.reconnectTrust = {
+    const session = tab.session;
+    session.tabId = toolTabId || session.tabId;
+    session.connectionHostId = connectionHostId;
+    session.reconnectTrust = {
       acceptNewHostKey: trust.acceptNewHostKey,
       updateChangedHostKey: trust.updateChangedHostKey,
     };
@@ -1426,9 +1364,9 @@
       tabs = [...tabs, tab];
     }
     activeId = tab.id;
-    hostSessionRetryByPaneId = {
-      ...hostSessionRetryByPaneId,
-      [tab.activePaneId]: {
+    hostSessionRetryBySessionId = {
+      ...hostSessionRetryBySessionId,
+      [session.id]: {
         connectionHostId,
         workspaceId,
         toolTabId,
@@ -1439,21 +1377,21 @@
     settingsError = "";
     try {
       await tick();
-      await mountTerminalWhenReady(tab.activePaneId);
-      await flushTerminalOutputBacklog(tab.activePaneId);
-      terminalPaneById(tab, tab.activePaneId)?.term?.focus();
+      await mountTerminalWhenReady(session.id);
+      await flushTerminalOutputBacklog(session.id);
+      session.term?.focus();
       if (recordHistory && !toolTabId) {
         pushUndoAction({ kind: "create_tab", tabId: tab.id });
       } else {
         syncTerminalMenuState();
       }
     } catch (error) {
-      terminalTabs.markConnectionError(tab.activePaneId, error instanceof Error ? error.message : String(error));
+      terminalTabs.markConnectionError(session.id, error instanceof Error ? error.message : String(error));
     }
   }
 
-  async function reconnectHostSessionInPane(
-    paneId: string,
+  async function reconnectHostSession(
+    sessionId: string,
     connectionHostId: string,
     trust: {
       acceptNewHostKey?: boolean;
@@ -1462,10 +1400,10 @@
       saveCredential?: boolean;
     },
   ) {
-    const tab = findTabByPaneId(paneId);
-    const pane = terminalPaneById(tab, paneId);
-    if (!pane) throw new Error(`pane ${paneId} not found`);
-    const toolTabId = pane.tabId || tab.id;
+    const tab = findTabBySessionId(sessionId);
+    const session = terminalSessionById(tab, sessionId);
+    if (!session) throw new Error(`session ${sessionId} not found`);
+    const toolTabId = session.tabId || tab.id;
     const tool = workspaceToolById(toolTabId);
     if (!tool) throw new Error(`terminal ToolTab ${toolTabId} not found`);
     const workspaceId = tool.owner_workspace_id;
@@ -1473,7 +1411,7 @@
     await tick();
     const info = await unwrapCommand(
       commands.createHostTerminalSession({
-        ...measureNewTerminal(pane.currentDirectory.trim() || null),
+        ...measureNewTerminal(session.currentDirectory.trim() || null),
         workspace_id: workspaceId,
         tool_tab_id: toolTabId,
         accept_new_host_key: trust.acceptNewHostKey === true,
@@ -1482,20 +1420,18 @@
         save_credential: trust.saveCredential === true,
       }),
     );
-    const nextPaneId = info.id;
-    tab.tree = replacePane(tab.tree, paneId, nextPaneId);
-    if (tab.activePaneId === paneId) tab.activePaneId = nextPaneId;
-    retargetTerminalPaneSession(pane, info);
-    pane.connectionHostId = connectionHostId;
-    pane.reconnectTrust = {
+    retargetTerminalSession(session, info);
+    if (session.agentBacked) terminalSessionsRevision += 1;
+    session.connectionHostId = connectionHostId;
+    session.reconnectTrust = {
       acceptNewHostKey: trust.acceptNewHostKey,
       updateChangedHostKey: trust.updateChangedHostKey,
     };
     refreshTerminalTabTitle(tab);
     activeId = tab.id;
-    hostSessionRetryByPaneId = {
-      ...hostSessionRetryByPaneId,
-      [nextPaneId]: {
+    hostSessionRetryBySessionId = {
+      ...hostSessionRetryBySessionId,
+      [session.id]: {
         connectionHostId,
         workspaceId,
         toolTabId,
@@ -1504,25 +1440,25 @@
       },
     };
     await tick();
-    await mountTerminalWhenReady(nextPaneId);
-    await flushTerminalOutputBacklog(nextPaneId);
-    terminalTabs.scheduleFit(nextPaneId);
-    pane.term?.focus();
+    await mountTerminalWhenReady(session.id);
+    await flushTerminalOutputBacklog(session.id);
+    terminalTabs.scheduleFit(session.id);
+    session.term?.focus();
     syncTerminalMenuState();
   }
 
-  async function reconnectPaneAfterDisconnect(paneId: string) {
-    const tab = findTabByPaneId(paneId);
-    const pane = terminalPaneById(tab, paneId);
-    if (!pane) return;
-    if (!pane.connectionHostId) {
-      terminalTabs.markReconnectUnavailable(paneId, "This pane has no host metadata for reconnect.");
+  async function reconnectTerminalAfterDisconnect(sessionId: string) {
+    const tab = findTabBySessionId(sessionId);
+    const session = terminalSessionById(tab, sessionId);
+    if (!session) return;
+    if (!session.connectionHostId) {
+      terminalTabs.markReconnectUnavailable(sessionId, "This terminal session has no host metadata for reconnect.");
       return;
     }
     try {
-      await reconnectHostSessionInPane(paneId, pane.connectionHostId, pane.reconnectTrust);
+      await reconnectHostSession(sessionId, session.connectionHostId, session.reconnectTrust);
     } catch (error) {
-      terminalTabs.markReconnectUnavailable(paneId, error instanceof Error ? error.message : String(error));
+      terminalTabs.markReconnectUnavailable(sessionId, error instanceof Error ? error.message : String(error));
     }
   }
 
@@ -1582,7 +1518,7 @@
   function bindTerminalSessionToToolTab(tool: WorkspaceToolTab, info: TerminalSessionInfo) {
     const tab = createTerminalTab(info);
     tab.id = tool.id;
-    for (const pane of tab.panes) pane.tabId = tool.id;
+    tab.session.tabId = tool.id;
     setTerminalRuntime(tool.id, { toolTabId: tool.id, tab });
     activeTerminalToolTabId = tool.id;
     activeId = tool.id;
@@ -1619,16 +1555,16 @@
       );
       const tool = await createEmptyTerminalToolTabForWorkspace(sourceTool.owner_workspace_id);
       const tab = bindTerminalSessionToToolTab(tool, info);
-      const pane = terminalPaneById(tab, tab.activePaneId);
-      if (pane) pane.connectionHostId = tool.host_id;
+      tab.session.connectionHostId = tool.host_id;
       await tick();
       await mountTerminalToolTab(tool.id);
-      await flushTerminalOutputBacklog(tab.activePaneId);
-      terminalPaneById(tab, tab.activePaneId)?.term?.focus();
+      await flushTerminalOutputBacklog(tab.session.id);
+      tab.session.term?.focus();
       detachedTerminalPaletteItems = detachedTerminalPaletteItems.filter(
         (item) => item.id !== `terminal.attachDetached:${detachedSessionId}`,
       );
       terminalSessionsRevision += 1;
+      await refreshDetachedTerminalPaletteItems();
       syncTerminalMenuState();
     } finally {
       pendingTerminalRuntimeWorkspaceIds.delete(sourceTool.owner_workspace_id);
@@ -1650,19 +1586,17 @@
       );
       const tool = await createEmptyTerminalToolTabForWorkspace(sourceTool.owner_workspace_id);
       const tab = bindTerminalSessionToToolTab(tool, info);
-      const pane = terminalPaneById(tab, tab.activePaneId);
-      if (pane) {
-        pane.connectionHostId = tool.host_id;
-        pane.readOnly = true;
-        pane.status = "disconnected";
-        pane.reconnectPending = false;
-        pane.exitText = "History";
-      }
+      tab.session.connectionHostId = tool.host_id;
+      tab.session.readOnly = true;
+      tab.session.status = "disconnected";
+      tab.session.reconnectPending = false;
+      tab.session.exitText = "History";
       await tick();
       await mountTerminalToolTab(tool.id);
-      await flushTerminalOutputBacklog(tab.activePaneId);
-      terminalPaneById(tab, tab.activePaneId)?.term?.focus();
+      await flushTerminalOutputBacklog(tab.session.id);
+      tab.session.term?.focus();
       terminalSessionsRevision += 1;
+      await refreshDetachedTerminalPaletteItems();
       syncTerminalMenuState();
     } finally {
       pendingTerminalRuntimeWorkspaceIds.delete(sourceTool.owner_workspace_id);
@@ -1695,6 +1629,7 @@
     );
     terminalSessionsRevision += 1;
     await refreshDetachedTerminalPaletteItems();
+    syncTerminalMenuState();
   }
 
   async function openWorkspaceResourceMonitor() {
@@ -1977,16 +1912,16 @@
     syncTerminalMenuState();
   }
 
-  async function flushTerminalOutputBacklog(paneId: string) {
+  async function flushTerminalOutputBacklog(sessionId: string) {
     if (!hasTauriRuntime()) return;
-    if (!hasLocalTerminalPane(paneId)) return;
+    if (!hasLocalTerminalSession(sessionId)) return;
     let event: TerminalOutputEvent | null;
     try {
-      event = await unwrapCommand(commands.takeTerminalOutputBacklog({ session_id: paneId }));
+      event = await unwrapCommand(commands.takeTerminalOutputBacklog({ session_id: sessionId }));
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       if (isTerminalSessionInactiveMessage(message)) {
-        terminalTabs.markConnectionError(paneId, message);
+        terminalTabs.markConnectionError(sessionId, message);
         return;
       }
       throw error;
@@ -1996,24 +1931,24 @@
 
   function enqueueTerminalOutput(event: TerminalOutputEvent) {
     if (
-      !routeTerminalPaneEvent(event.session_id, localTerminalPaneIds(), () => {
+      !routeTerminalSessionEvent(event.session_id, localTerminalSessionIds(), () => {
         terminalTabs.enqueueOutput(event);
       })
     ) {
       return;
     }
-    if (event.session_id !== activePane()?.id || !findVisible) return;
+    if (event.session_id !== activeSession()?.id || !findVisible) return;
     window.requestAnimationFrame(() => {
       updateFindSnapshot();
       syncTerminalMenuState();
     });
   }
 
-  function activePane(): TerminalPane | null {
+  function activeSession(): TerminalSession | null {
     const runtime = activeTerminalRuntime();
     const tab = runtime?.tab ?? activeTab;
     if (!tab) return null;
-    return terminalPaneById(tab, tab.activePaneId) ?? null;
+    return tab.session;
   }
 
   function shouldConfirmTerminalClose() {
@@ -2026,42 +1961,32 @@
     const tab = tabs.find((item) => item.id === id);
     if (!tab) return;
     await tick();
-    await mountAndFitTabPanes(tab);
-    terminalPaneById(tab, tab.activePaneId)?.term?.focus();
-    refreshFindForActivePane();
+    await mountAndFitTab(tab);
+    tab.session.term?.focus();
+    refreshFindForActiveSession();
     syncTerminalMenuState();
   }
 
-  async function activatePane(paneId: string) {
-    const tab = tabs.find((item) => item.panes.some((pane) => pane.id === paneId));
-    if (!tab) return;
-    tab.activePaneId = paneId;
-    refreshTerminalTabTitle(tab);
+  async function mountAndFitTab(tab: TerminalTab) {
     await tick();
-    await mountTerminalWhenReady(paneId);
-    terminalTabs.scheduleFit(paneId);
-    terminalPaneById(tab, paneId)?.term?.focus();
-    refreshFindForActivePane();
-    syncTerminalMenuState();
+    await mountTerminalWhenReady(tab.session.id);
+    await flushTerminalOutputBacklog(tab.session.id);
+    terminalTabs.scheduleFit(tab.session.id);
   }
 
   async function closeTab(id: string, { recordHistory = false }: { recordHistory?: boolean } = {}) {
     const tab = tabs.find((item) => item.id === id);
     if (!tab) return;
-    const shouldClose = await confirmRunningPanes(tab.panes);
+    const shouldClose = await confirmRunningSession(tab.session);
     if (!shouldClose) return;
     const index = tabs.findIndex((item) => item.id === id);
     const previousActiveId = activeId;
     if (recordHistory) {
-      for (const pane of tab.panes) detachTerminalPane(pane);
+      detachTerminalSession(tab.session);
       pushUndoAction({ kind: "close_tab", tab, index, previousActiveId });
     } else {
-      disposeTerminalTab(tab);
-      for (const pane of tab.panes) {
-        if (pane.status === "running") {
-          await closePaneSession(pane);
-        }
-      }
+      disposeTerminalSession(tab.session);
+      if (tab.session.status === "running") await closeTerminalSession(tab.session);
     }
     tabs = tabs.filter((item) => item.id !== id);
     if (activeId === id) {
@@ -2077,10 +2002,6 @@
       await closeCurrentWindow();
       return;
     }
-    if (tab.panes.length > 1) {
-      await closePane(tab.activePaneId, { recordHistory: true });
-      return;
-    }
     await closeTab(tab.id, { recordHistory: true });
   }
 
@@ -2090,132 +2011,81 @@
     }
   }
 
-  function findLocalTabByPaneId(paneId: string): TerminalTab | null {
+  function findLocalTabBySessionId(sessionId: string): TerminalTab | null {
     return (
-      terminalRuntimeTabs().find((item) => item.panes.some((pane) => pane.id === paneId)) ??
-      tabs.find((item) => item.panes.some((pane) => pane.id === paneId)) ??
+      terminalRuntimeTabs().find((item) => item.session.id === sessionId || item.id === sessionId) ??
+      tabs.find((item) => item.session.id === sessionId || item.id === sessionId) ??
       null
     );
   }
 
-  function findTabByPaneId(paneId: string): TerminalTab {
-    const tab = findLocalTabByPaneId(paneId);
-    if (!tab) throw new Error(`tab for pane ${paneId} not found`);
+  function findTabBySessionId(sessionId: string): TerminalTab {
+    const tab = findLocalTabBySessionId(sessionId);
+    if (!tab) throw new Error(`tab for terminal ${sessionId} not found`);
     return tab;
   }
 
-  function findLocalPaneById(paneId: string): TerminalPane | null {
-    const tab = findLocalTabByPaneId(paneId);
-    return tab ? (terminalPaneById(tab, paneId) ?? null) : null;
+  function findLocalSessionById(sessionId: string): TerminalSession | null {
+    const tab = findLocalTabBySessionId(sessionId);
+    return tab ? (terminalSessionById(tab, sessionId) ?? null) : null;
   }
 
-  function localTerminalPaneIds() {
-    return terminalRuntimeTabs().flatMap((tab) => tab.panes.map((pane) => pane.id));
+  function localTerminalSessionIds() {
+    return terminalRuntimeTabs().map((tab) => tab.session.id);
   }
 
-  function hasLocalTerminalPane(paneId: string) {
-    return shouldHandleTerminalPaneEvent(paneId, localTerminalPaneIds());
+  function hasLocalTerminalSession(sessionId: string) {
+    return shouldHandleTerminalSessionEvent(sessionId, localTerminalSessionIds());
   }
 
-  async function splitActivePane(side: SplitSide, { recordHistory = true }: { recordHistory?: boolean } = {}) {
-    await openWorkspaceTerminalSession({ recordHistory });
-  }
-
-  async function splitPaneById(paneId: string, side: SplitSide, { recordHistory = true }: { recordHistory?: boolean } = {}) {
-    await openWorkspaceTerminalSession({ recordHistory });
-  }
-
-  async function closePane(paneId: string, { recordHistory = false }: { recordHistory?: boolean } = {}) {
-    const tab = findTabByPaneId(paneId);
-    const pane = terminalPaneById(tab, paneId);
-    if (!pane) return;
-    const shouldClose = await confirmRunningPanes([pane]);
+  async function closeTerminalSessionAtView(sessionId: string, { recordHistory = false }: { recordHistory?: boolean } = {}) {
+    const tab = findTabBySessionId(sessionId);
+    const session = terminalSessionById(tab, sessionId);
+    if (!session) return;
+    const shouldClose = await confirmRunningSession(session);
     if (!shouldClose) return;
-
-    if (tab.panes.length === 1) {
-      await closeTab(tab.id, { recordHistory });
-      return;
-    }
-
-    const index = tab.panes.findIndex((item) => item.id === pane.id);
-    const previousTree = clonePaneTree(tab.tree);
-    const previousActivePaneId = tab.activePaneId;
     if (recordHistory) {
-      detachTerminalPane(pane);
+      detachTerminalSession(session);
     } else {
-      disposeTerminalPane(pane);
-      if (pane.status === "running") await closePaneSession(pane);
-    }
-    const nextTree = removePane(tab.tree, pane.id);
-    if (!nextTree) {
-      await closeTab(tab.id, { recordHistory });
-      return;
-    }
-    tab.tree = nextTree;
-    tab.panes = tab.panes.filter((item) => item.id !== pane.id);
-    if (tab.activePaneId === pane.id) {
-      tab.activePaneId = tab.panes[0]?.id ?? "";
+      disposeTerminalSession(session);
+      if (session.status === "running") await closeTerminalSession(session);
     }
     refreshTerminalTabTitle(tab);
-    await activatePane(tab.activePaneId);
-    await mountAndFitTabPanes(tab);
     if (recordHistory) {
-      pushUndoAction({ kind: "close_pane", pane, tabId: tab.id, index, tree: previousTree, activePaneId: previousActivePaneId });
+      pushUndoAction({ kind: "close_tab", tab, index: tabs.indexOf(tab), previousActiveId: activeId });
     } else {
       syncTerminalMenuState();
     }
   }
 
-  async function detachPaneSession(paneId: string) {
-    const tab = findTabByPaneId(paneId);
-    const pane = terminalPaneById(tab, paneId);
-    if (!pane) return;
-    if (!pane.agentBacked || pane.status !== "running") {
-      terminalTabs.markConnectionError(paneId, "Only running Terminal Agent sessions can be detached.");
+  async function detachTerminalSessionView(sessionId: string) {
+    const tab = findTabBySessionId(sessionId);
+    const session = terminalSessionById(tab, sessionId);
+    if (!session) return;
+    if (!session.agentBacked || session.status !== "running") {
+      terminalTabs.markConnectionError(sessionId, "Only running Terminal Agent sessions can be detached.");
       return;
     }
     try {
-      await unwrapCommand(commands.detachTerminalSession({ session_id: paneId }));
+      await unwrapCommand(commands.detachTerminalSession({ session_id: sessionId }));
     } catch (error) {
-      terminalTabs.markConnectionError(paneId, error instanceof Error ? error.message : String(error));
+      terminalTabs.markConnectionError(sessionId, error instanceof Error ? error.message : String(error));
       return;
     }
     terminalSessionsRevision += 1;
-    disposeTerminalPane(pane);
-    hostSessionRetryByPaneId = Object.fromEntries(
-      Object.entries(hostSessionRetryByPaneId).filter(([id]) => id !== paneId),
+    disposeTerminalSession(session);
+    hostSessionRetryBySessionId = Object.fromEntries(
+      Object.entries(hostSessionRetryBySessionId).filter(([id]) => id !== sessionId),
     );
-    if (tab.panes.length === 1) {
-      tabs = tabs.filter((item) => item.id !== tab.id);
-      if (activeId === tab.id) {
-        activeId = tabs.at(-1)?.id ?? tabs[0]?.id ?? "";
-        if (activeId) await activateTab(activeId);
-      }
-      syncTerminalMenuState();
-      return;
-    }
-    const nextTree = removePane(tab.tree, paneId);
-    if (!nextTree) {
-      tabs = tabs.filter((item) => item.id !== tab.id);
-      if (activeId === tab.id) activeId = tabs.at(-1)?.id ?? tabs[0]?.id ?? "";
-      syncTerminalMenuState();
-      return;
-    }
-    tab.tree = nextTree;
-    tab.panes = tab.panes.filter((item) => item.id !== paneId);
-    if (tab.activePaneId === paneId) tab.activePaneId = tab.panes[0]?.id ?? "";
     refreshTerminalTabTitle(tab);
-    await activatePane(tab.activePaneId);
-    await mountAndFitTabPanes(tab);
     syncTerminalMenuState();
   }
 
-  async function confirmRunningPanes(panes: TerminalPane[]) {
-    const runningCount = panes.filter((pane) => pane.status === "running").length;
-    if (!runningCount) return true;
+  async function confirmRunningSession(session: TerminalSession) {
+    if (session.status !== "running") return true;
     if (!shouldConfirmTerminalClose()) return true;
     if (!hasTauriRuntime()) return window.confirm("Close running terminal session?");
-    return ask(runningCount === 1 ? "Close running terminal session?" : `Close ${runningCount} running terminal sessions?`, {
+    return ask("Close running terminal session?", {
       title: "Close Terminal",
       kind: "warning",
       okLabel: "Close",
@@ -2223,15 +2093,15 @@
     });
   }
 
-  async function closePaneSession(pane: TerminalPane) {
+  async function closeTerminalSession(session: TerminalSession) {
     try {
-      await unwrapCommand(commands.closeTerminalSession(pane.id));
+      await unwrapCommand(commands.closeTerminalSession(session.id));
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       if (isTerminalSessionInactiveMessage(message) || message.includes("The operation completed successfully") || message.includes("os error 0")) {
         return;
       }
-      terminalTabs.markConnectionError(pane.id, message);
+      terminalTabs.markConnectionError(session.id, message);
     }
   }
 
@@ -2280,13 +2150,7 @@
 
   async function finalizeDiscardedAction(action: TerminalUndoAction | TerminalRedoAction) {
     if (action.kind === "close_tab") {
-      for (const pane of action.tab.panes) {
-        if (pane.status === "running") await closePaneSession(pane);
-      }
-      return;
-    }
-    if (action.kind === "close_pane" && action.pane.status === "running") {
-      await closePaneSession(action.pane);
+      if (action.tab.session.status === "running") await closeTerminalSession(action.tab.session);
     }
   }
 
@@ -2295,16 +2159,9 @@
       await closeCreatedTabForUndo(action.tabId);
       return { kind: "create_tab" };
     }
-    if (action.kind === "create_pane") {
-      await closeCreatedPaneForUndo(action.tabId, action.paneId);
-      return { kind: "create_pane", side: action.side, tabId: action.tabId, targetPaneId: action.targetPaneId };
-    }
     if (action.kind === "close_tab") {
       await restoreClosedTab(action);
       return action;
-    }
-    if (action.kind === "close_pane") {
-      await restoreClosedPane(action);
     }
     return action;
   }
@@ -2313,15 +2170,9 @@
     if (action.kind === "create_tab") {
       return restoreCreatedTabForRedo();
     }
-    if (action.kind === "create_pane") {
-      return restoreCreatedPaneForRedo(action);
-    }
     if (action.kind === "close_tab") {
       await closeRestoredTabForRedo(action.tab.id);
       return action;
-    }
-    if (action.kind === "close_pane") {
-      await closeRestoredPaneForRedo(action.tabId, action.pane.id);
     }
     return action;
   }
@@ -2329,36 +2180,13 @@
   async function closeCreatedTabForUndo(tabId: string) {
     const tab = tabs.find((item) => item.id === tabId);
     if (!tab) return;
-    for (const pane of tab.panes) {
-      disposeTerminalPane(pane);
-      if (pane.status === "running") await closePaneSession(pane);
-    }
+    disposeTerminalSession(tab.session);
+    if (tab.session.status === "running") await closeTerminalSession(tab.session);
     tabs = tabs.filter((item) => item.id !== tab.id);
     if (activeId === tab.id) {
       activeId = tabs.at(-1)?.id ?? "";
       if (activeId) await activateTab(activeId);
     }
-  }
-
-  async function closeCreatedPaneForUndo(tabId: string, paneId: string) {
-    const tab = tabs.find((item) => item.id === tabId);
-    const pane = tab ? terminalPaneById(tab, paneId) : undefined;
-    if (!tab || !pane) return;
-    disposeTerminalPane(pane);
-    if (pane.status === "running") await closePaneSession(pane);
-    const nextTree = removePane(tab.tree, paneId);
-    if (!nextTree) {
-      tabs = tabs.filter((item) => item.id !== tab.id);
-      activeId = tabs.at(-1)?.id ?? "";
-      if (activeId) await activateTab(activeId);
-      return;
-    }
-    tab.tree = nextTree;
-    tab.panes = tab.panes.filter((item) => item.id !== paneId);
-    tab.activePaneId = tab.panes[0]?.id ?? "";
-    refreshTerminalTabTitle(tab);
-    await activatePane(tab.activePaneId);
-    await mountAndFitTabPanes(tab);
   }
 
   async function restoreCreatedTabForRedo(): Promise<TerminalUndoAction> {
@@ -2368,90 +2196,23 @@
     return { kind: "create_tab", tabId: tab.id };
   }
 
-  async function restoreCreatedPaneForRedo(action: Extract<TerminalRedoAction, { kind: "create_pane" }>): Promise<TerminalUndoAction> {
-    const tab = tabs.find((item) => item.id === action.tabId);
-    if (!tab) throw new Error(`redo target tab ${action.tabId} not found`);
-    activeId = tab.id;
-    const targetPaneId = terminalPaneById(tab, action.targetPaneId) ? action.targetPaneId : tab.activePaneId;
-    await splitPaneById(targetPaneId, action.side, { recordHistory: false });
-    const pane = activePane();
-    if (!pane) throw new Error("redo did not create a terminal pane");
-    return { ...action, paneId: pane.id, targetPaneId };
-  }
-
   async function restoreClosedTab(action: Extract<TerminalUndoAction, { kind: "close_tab" }>) {
     tabs = [...tabs.slice(0, action.index), action.tab, ...tabs.slice(action.index)];
     activeId = action.tab.id;
     await tick();
-    await mountAndFitTabPanes(action.tab);
-    terminalPaneById(action.tab, action.tab.activePaneId)?.term?.focus();
-  }
-
-  async function restoreClosedPane(action: Extract<TerminalUndoAction, { kind: "close_pane" }>) {
-    const tab = tabs.find((item) => item.id === action.tabId);
-    if (!tab) return;
-    action.pane.tabId = tab.id;
-    tab.panes = [...tab.panes.slice(0, action.index), action.pane, ...tab.panes.slice(action.index)];
-    tab.tree = clonePaneTree(action.tree);
-    tab.activePaneId = action.activePaneId;
-    refreshTerminalTabTitle(tab);
-    activeId = tab.id;
-    await tick();
-    await mountAndFitTabPanes(tab);
-    terminalPaneById(tab, tab.activePaneId)?.term?.focus();
+    await mountAndFitTab(action.tab);
+    action.tab.session.term?.focus();
   }
 
   async function closeRestoredTabForRedo(tabId: string) {
     const tab = tabs.find((item) => item.id === tabId);
     if (!tab) return;
-    for (const pane of tab.panes) detachTerminalPane(pane);
+    detachTerminalSession(tab.session);
     tabs = tabs.filter((item) => item.id !== tabId);
     if (activeId === tabId) {
       activeId = tabs.at(-1)?.id ?? "";
       if (activeId) await activateTab(activeId);
     }
-  }
-
-  async function closeRestoredPaneForRedo(tabId: string, paneId: string) {
-    const tab = tabs.find((item) => item.id === tabId);
-    const pane = tab ? terminalPaneById(tab, paneId) : undefined;
-    if (!tab || !pane) return;
-    detachTerminalPane(pane);
-    const nextTree = removePane(tab.tree, paneId);
-    if (!nextTree) {
-      tabs = tabs.filter((item) => item.id !== tab.id);
-      activeId = tabs.at(-1)?.id ?? "";
-      if (activeId) await activateTab(activeId);
-      return;
-    }
-    tab.tree = nextTree;
-    tab.panes = tab.panes.filter((item) => item.id !== paneId);
-    tab.activePaneId = tab.panes[0]?.id ?? "";
-    refreshTerminalTabTitle(tab);
-    await activatePane(tab.activePaneId);
-    await mountAndFitTabPanes(tab);
-  }
-
-  function startResize(event: PointerEvent, firstPaneId: string, secondPaneId: string, direction: SplitDirection) {
-    const tab = activeTab;
-    if (!tab) return;
-    const target = event.currentTarget;
-    if (!(target instanceof HTMLElement)) return;
-    const split = target.parentElement;
-    if (!split) return;
-    const rect = split.getBoundingClientRect();
-    resizeDrag = {
-      tabId: tab.id,
-      baseTree: clonePaneTree(tab.tree),
-      firstPaneId,
-      secondPaneId,
-      direction,
-      startClient: direction === "row" ? event.clientX : event.clientY,
-      containerPixels: direction === "row" ? rect.width : rect.height,
-    };
-    target.setPointerCapture(event.pointerId);
-    event.preventDefault();
-    event.stopPropagation();
   }
 
   function startDockResize(
@@ -2535,26 +2296,11 @@
       updateToolTabPointerDrag(event);
       return;
     }
-    const drag = resizeDrag;
-    if (drag) {
-      const tab = tabs.find((item) => item.id === drag.tabId);
-      if (!tab) return;
-      const currentClient = drag.direction === "row" ? event.clientX : event.clientY;
-      tab.tree = resizeAdjacentPanes({
-        tree: drag.baseTree,
-        firstPaneId: drag.firstPaneId,
-        secondPaneId: drag.secondPaneId,
-        deltaPixels: currentClient - drag.startClient,
-        containerPixels: drag.containerPixels,
-        minFirstPixels: drag.direction === "row" ? minPaneWidth : minPaneHeight,
-        minSecondPixels: drag.direction === "row" ? minPaneWidth : minPaneHeight,
-      });
-      void tick().then(() => {
-        for (const pane of tab.panes) terminalTabs.scheduleFit(pane.id);
-      });
-      return;
-    }
     updatePointerDrag(event);
+  }
+
+  function updatePointerDrag(_event: PointerEvent) {
+    return;
   }
 
   function handlePointerUp(event: PointerEvent) {
@@ -2566,25 +2312,19 @@
       void finishToolTabPointerDrag(event);
       return;
     }
-    const wasResizing = resizeDrag !== null;
-    resizeDrag = null;
-    if (wasResizing) return;
-    void finishPointerDrag(event);
   }
 
   function handlePointerCancel(event: PointerEvent) {
     if (dockResizeDrag?.pointerId === event.pointerId) dockResizeDrag = null;
     if (toolTabPointerDrag?.pointerId === event.pointerId) cancelToolTabDragInteraction();
-    if (resizeDrag) resizeDrag = null;
-    if (pointerDrag?.pointerId === event.pointerId) cancelDragInteraction();
-  }
-
-  function startPanePointerDrag(event: PointerEvent, paneId: string) {
-    startPointerDrag(event, "pane", paneId);
   }
 
   function startTabPointerDrag(event: PointerEvent, tabId: string) {
     startPointerDrag(event, "tab", tabId);
+  }
+
+  function startPointerDrag(_event: PointerEvent, _kind: "tab", _tabId: string) {
+    return;
   }
 
   function startToolTabPointerDrag(event: PointerEvent, workspace: WorkspaceTabState, slot: WorkspaceToolSlot) {
@@ -2610,51 +2350,10 @@
     target.setPointerCapture(event.pointerId);
   }
 
-  function startPointerDrag(event: PointerEvent, kind: "pane" | "tab", id: string) {
-    if (event.button !== 0) return;
-    const target = event.currentTarget;
-    if (!(target instanceof HTMLElement)) return;
-    pointerDrag = {
-      kind,
-      id,
-      pointerId: event.pointerId,
-      startX: event.clientX,
-      startY: event.clientY,
-      active: false,
-      target,
-    };
-    target.setPointerCapture(event.pointerId);
-    event.preventDefault();
-    event.stopPropagation();
-  }
-
-  function cancelDragInteraction() {
-    pointerDrag = null;
-    dragState = null;
-    dropTarget = null;
-  }
-
   function cancelToolTabDragInteraction() {
     toolTabPointerDrag = null;
     toolTabDragState = null;
     toolTabDropTarget = null;
-  }
-
-  function updatePointerDrag(event: PointerEvent) {
-    const drag = pointerDrag;
-    if (!drag || drag.pointerId !== event.pointerId) return;
-    if (!drag.active) {
-      const distance = Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY);
-      if (distance < 6) return;
-      drag.active = true;
-      dragState = { kind: drag.kind, id: drag.id };
-      if (!drag.target.hasPointerCapture(drag.pointerId)) {
-        drag.target.setPointerCapture(drag.pointerId);
-      }
-    }
-    dropTarget = paneDropTargetFromPoint(event.clientX, event.clientY);
-    event.preventDefault();
-    event.stopPropagation();
   }
 
   function updateToolTabPointerDrag(event: PointerEvent) {
@@ -2679,26 +2378,6 @@
     toolTabDropTarget = toolTabDropTargetFromPoint(event.clientX, event.clientY, drag);
     event.preventDefault();
     event.stopPropagation();
-  }
-
-  async function finishPointerDrag(event: PointerEvent) {
-    const drag = pointerDrag;
-    pointerDrag = null;
-    if (!drag || drag.pointerId !== event.pointerId) return;
-    const target = paneDropTargetFromPoint(event.clientX, event.clientY);
-    const wasActive = drag.active;
-    dragState = null;
-    dropTarget = null;
-    if (!wasActive) return;
-    if (target) {
-      const sourcePaneId = drag.kind === "pane" ? drag.id : tabs.find((tab) => tab.id === drag.id)?.activePaneId ?? null;
-      if (!sourcePaneId) return;
-      try {
-        await movePaneToPane(sourcePaneId, target.paneId, target.zone);
-      } catch (error) {
-        settingsError = error instanceof Error ? error.message : String(error);
-      }
-    }
   }
 
   async function finishToolTabPointerDrag(event: PointerEvent) {
@@ -2773,17 +2452,6 @@
       return;
     }
     await moveWorkspaceSlotToSplit(drag.workspaceId, drag.slotId, target.slotId, target.side);
-  }
-
-  function paneDropTargetFromPoint(x: number, y: number): { paneId: string; zone: PaneDropZone } | null {
-    const panes = [...document.querySelectorAll<HTMLElement>(".terminal-pane.active [data-pane-id]")];
-    const containing = panes
-      .map((pane) => ({ pane, rect: pane.getBoundingClientRect() }))
-      .filter(({ rect }) => x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom)
-      .sort((a, b) => a.rect.width * a.rect.height - b.rect.width * b.rect.height);
-    const match = containing[0];
-    const paneId = match?.pane.dataset.paneId;
-    return match && paneId ? { paneId, zone: dropZoneForRect(match.rect, x, y) } : null;
   }
 
   function toolTabDropTargetFromPoint(
@@ -3036,23 +2704,8 @@
     ].join("; ");
   }
 
-  function dropZoneForRect(rect: DOMRect, x: number, y: number): PaneDropZone {
-    const relativeX = (x - rect.left) / rect.width;
-    const relativeY = (y - rect.top) / rect.height;
-    const distances = [
-      { zone: "left" as const, distance: relativeX },
-      { zone: "right" as const, distance: 1 - relativeX },
-      { zone: "up" as const, distance: relativeY },
-      { zone: "down" as const, distance: 1 - relativeY },
-    ];
-    const nearest = distances.reduce((best, item) => (item.distance < best.distance ? item : best));
-    return nearest.distance > 0.24 ? "center" : nearest.zone;
-  }
-
   function handleWindowBlur() {
-    if (dragState || pointerDrag) cancelDragInteraction();
     if (toolTabDragState || toolTabPointerDrag) cancelToolTabDragInteraction();
-    resizeDrag = null;
     dockResizeDrag = null;
     closeHostPicker();
   }
@@ -3061,84 +2714,11 @@
     if (document.visibilityState === "hidden") handleWindowBlur();
   }
 
-  async function movePaneToPane(sourcePaneId: string, targetPaneId: string, zone: PaneDropZone) {
-    const sourceTab = findTabByPaneId(sourcePaneId);
-    const targetTab = findTabByPaneId(targetPaneId);
-    if (sourceTab.id === targetTab.id) {
-      targetTab.tree =
-        zone === "center"
-          ? swapPanes(targetTab.tree, sourcePaneId, targetPaneId)
-          : movePaneIntoSplit(targetTab.tree, sourcePaneId, targetPaneId, zone);
-      targetTab.activePaneId = sourcePaneId;
-      refreshTerminalTabTitle(targetTab);
-      await activatePane(sourcePaneId);
-      await mountAndFitTabPanes(targetTab);
-      return;
-    }
-
-    if (zone === "center") {
-      await swapPanesAcrossTabs(sourceTab, sourcePaneId, targetTab, targetPaneId);
-      return;
-    }
-
-    const sourcePane = terminalPaneById(sourceTab, sourcePaneId);
-    if (!sourcePane) throw new Error(`source pane ${sourcePaneId} not found`);
-    removePaneFromTab(sourceTab, sourcePaneId);
-    sourcePane.tabId = targetTab.id;
-    targetTab.panes = [...targetTab.panes, sourcePane];
-    targetTab.tree = splitPane(targetTab.tree, targetPaneId, sourcePaneId, zone);
-    targetTab.activePaneId = sourcePaneId;
-    activeId = targetTab.id;
-    refreshTerminalTabTitle(targetTab);
-    await tick();
-    await mountAndFitTabPanes(targetTab);
-    terminalTabs.scheduleFit(sourcePaneId);
-    sourcePane.term?.focus();
-  }
-
-  async function swapPanesAcrossTabs(sourceTab: TerminalTab, sourcePaneId: string, targetTab: TerminalTab, targetPaneId: string) {
-    const sourcePane = terminalPaneById(sourceTab, sourcePaneId);
-    const targetPane = terminalPaneById(targetTab, targetPaneId);
-    if (!sourcePane) throw new Error(`source pane ${sourcePaneId} not found`);
-    if (!targetPane) throw new Error(`target pane ${targetPaneId} not found`);
-
-    sourceTab.tree = replacePane(sourceTab.tree, sourcePaneId, targetPaneId);
-    targetTab.tree = replacePane(targetTab.tree, targetPaneId, sourcePaneId);
-    sourcePane.tabId = targetTab.id;
-    targetPane.tabId = sourceTab.id;
-    sourceTab.panes = sourceTab.panes.map((pane) => (pane.id === sourcePaneId ? targetPane : pane));
-    targetTab.panes = targetTab.panes.map((pane) => (pane.id === targetPaneId ? sourcePane : pane));
-    if (sourceTab.activePaneId === sourcePaneId) sourceTab.activePaneId = targetPaneId;
-    if (targetTab.activePaneId === targetPaneId) targetTab.activePaneId = sourcePaneId;
-    activeId = targetTab.id;
-    refreshTerminalTabTitle(sourceTab);
-    refreshTerminalTabTitle(targetTab);
-    await activatePane(sourcePaneId);
-    await mountAndFitTabPanes(sourceTab);
-    await mountAndFitTabPanes(targetTab);
-  }
-
-  async function detachPaneToTab(paneId: string) {
-    const sourceTab = findTabByPaneId(paneId);
-    if (sourceTab.panes.length === 1) return;
-    const pane = terminalPaneById(sourceTab, paneId);
-    if (!pane) throw new Error(`pane ${paneId} not found`);
-    removePaneFromTab(sourceTab, paneId);
-    const newTab = createTerminalTabFromPane(pane);
-    tabs = [...tabs, newTab];
-    activeId = newTab.id;
-    refreshTerminalTabTitle(newTab);
-    await activateTab(newTab.id);
-    await mountAndFitTabPanes(sourceTab);
-    await mountAndFitTabPanes(newTab);
-  }
-
   async function moveActiveTabToNewWindow() {
     const tab = activeTab;
     if (!tab) return;
     const handoffKey = storeTabHandoff(tab);
     await unwrapCommand(commands.openMainWindow(`/?tab_handoff=${encodeURIComponent(handoffKey)}`));
-    movedPaneIds = new Set([...movedPaneIds, ...tab.panes.map((pane) => pane.id)]);
     disposeTerminalTab(tab);
     tabs = tabs.filter((item) => item.id !== tab.id);
     activeId = tabs[0]?.id ?? "";
@@ -3151,33 +2731,31 @@
     return key;
   }
 
-  function storeTabSnapshot(tab: TerminalTab): StoredTab {
+  function storeTabSnapshot(tab: TerminalTab): StoredTerminalTab {
     return {
       customTitle: tab.customTitle,
-      activePaneId: tab.activePaneId,
-      tree: clonePaneTree(tab.tree),
-      panes: tab.panes.map((pane) => ({
-        id: pane.id,
-        title: pane.title,
-        baseTitle: pane.baseTitle,
-        command: pane.command,
-        currentDirectory: pane.currentDirectory,
-        titleOverride: pane.titleOverride,
-        readOnly: pane.readOnly,
-        agentBacked: pane.agentBacked,
-        agentSessionId: pane.agentSessionId,
-        reconnectPending: pane.reconnectPending,
-        everConnected: pane.everConnected,
-        connectionHostId: pane.connectionHostId,
-        reconnectTrust: pane.reconnectTrust,
-        status: pane.status,
-        serialized: pane.serialize?.serialize({ scrollback: 1000 }) ?? "",
-        lastCols: pane.lastCols,
-        lastRows: pane.lastRows,
-        lastPixelWidth: pane.lastPixelWidth,
-        lastPixelHeight: pane.lastPixelHeight,
-        nextOutputSequence: pane.nextOutputSequence.toString(),
-      })),
+      session: {
+        id: tab.session.id,
+        title: tab.session.title,
+        baseTitle: tab.session.baseTitle,
+        command: tab.session.command,
+        currentDirectory: tab.session.currentDirectory,
+        titleOverride: tab.session.titleOverride,
+        readOnly: tab.session.readOnly,
+        agentBacked: tab.session.agentBacked,
+        agentSessionId: tab.session.agentSessionId,
+        reconnectPending: tab.session.reconnectPending,
+        everConnected: tab.session.everConnected,
+        connectionHostId: tab.session.connectionHostId,
+        reconnectTrust: tab.session.reconnectTrust,
+        status: tab.session.status,
+        serialized: tab.session.serialize?.serialize({ scrollback: 1000 }) ?? "",
+        lastCols: tab.session.lastCols,
+        lastRows: tab.session.lastRows,
+        lastPixelWidth: tab.session.lastPixelWidth,
+        lastPixelHeight: tab.session.lastPixelHeight,
+        nextOutputSequence: tab.session.nextOutputSequence.toString(),
+      },
     };
   }
 
@@ -3196,20 +2774,20 @@
     const raw = localStorage.getItem(key);
     if (!raw) throw new Error(`tab handoff ${key} not found`);
     localStorage.removeItem(key);
-    const stored = JSON.parse(raw) as StoredTab;
-    const restoredPanes = await restoreStoredPanes(stored);
+    const stored = JSON.parse(raw) as StoredTerminalTab;
+    const restoredSession = await restoreStoredSession(stored);
     await unwrapCommand(
       commands.transferTerminalSessionsToWindow({
-        session_ids: restoredPanes.map((pane) => pane.id),
+        session_ids: [restoredSession.id],
         window_label: currentWindowLabel(),
       }),
     );
-    const tab = restoreStoredTab(stored, restoredPanes);
+    const tab = restoreStoredTab(stored, restoredSession);
     tabs = [tab];
     activeId = tab.id;
     await tick();
-    await mountAndFitTabPanes(tab);
-    terminalPaneById(tab, tab.activePaneId)?.term?.focus();
+    await mountAndFitTab(tab);
+    tab.session.term?.focus();
     syncTerminalMenuState();
     return true;
   }
@@ -3223,194 +2801,144 @@
     if (stored.tabs.length === 0) return false;
     const restoredTabs: TerminalTab[] = [];
     for (const storedTab of stored.tabs) {
-      const restoredPanes = await restoreStoredPanes(storedTab);
-      restoredTabs.push(restoreStoredTab(storedTab, restoredPanes));
+      const restoredSession = await restoreStoredSession(storedTab);
+      restoredTabs.push(restoreStoredTab(storedTab, restoredSession));
     }
     tabs = restoredTabs;
     activeId = restoredTabs[Math.min(stored.activeIndex, restoredTabs.length - 1)]?.id ?? restoredTabs[0]?.id ?? "";
     await tick();
-    for (const tab of restoredTabs) await mountAndFitTabPanes(tab);
+    for (const tab of restoredTabs) await mountAndFitTab(tab);
     const focusedTab = tabs.find((tab) => tab.id === activeId);
     if (focusedTab) {
-      terminalPaneById(focusedTab, focusedTab.activePaneId)?.term?.focus();
+      focusedTab.session.term?.focus();
     }
     syncTerminalMenuState();
     return restoredTabs.length > 0;
   }
 
-  async function restoreStoredPanes(stored: StoredTab) {
-    const restoredPanes: TerminalPane[] = [];
-    for (const pane of stored.panes) {
-      const restored = pane.reconnectPending
-        ? createTerminalPane({
-            id: pane.id,
-            title: pane.title,
-            command: pane.command,
-            cwd: pane.currentDirectory || null,
-            cols: pane.lastCols,
-            rows: pane.lastRows,
-            pixel_width: pane.lastPixelWidth,
-            pixel_height: pane.lastPixelHeight,
-            process_id: null,
-            transport: "ssh",
-            transport_state: "disconnected",
-            agent: null,
-          }, "")
-        : createTerminalPane(await unwrapCommand(commands.existingTerminalSessionInfo({ session_id: pane.id })), "");
-      restored.title = pane.title;
-      restored.baseTitle = pane.baseTitle;
-      restored.command = pane.command;
-      restored.currentDirectory = pane.currentDirectory;
-      restored.titleOverride = pane.titleOverride;
-      restored.readOnly = pane.readOnly;
-      restored.agentSessionId = pane.agentSessionId;
-      restored.reconnectPending = pane.reconnectPending;
-      restored.everConnected = pane.everConnected || pane.status === "running" || pane.status === "disconnected";
-      restored.connectionHostId = pane.connectionHostId;
-      restored.reconnectTrust = pane.reconnectTrust;
-      restored.status = pane.status;
-      restored.lastCols = pane.lastCols;
-      restored.lastRows = pane.lastRows;
-      restored.lastPixelWidth = pane.lastPixelWidth;
-      restored.lastPixelHeight = pane.lastPixelHeight;
-      restored.nextOutputSequence = BigInt(pane.nextOutputSequence ?? "0");
-      restored.outputQueue = pane.serialized ? [pane.serialized] : [];
-      restoredPanes.push(restored);
-    }
-    return restoredPanes;
+  async function restoreStoredSession(stored: StoredTerminalTab) {
+    const session = stored.session;
+    const restored = session.reconnectPending
+      ? createTerminalSession({
+          id: session.id,
+          title: session.title,
+          command: session.command,
+          cwd: session.currentDirectory || null,
+          cols: session.lastCols,
+          rows: session.lastRows,
+          pixel_width: session.lastPixelWidth,
+          pixel_height: session.lastPixelHeight,
+          process_id: null,
+          transport: "ssh",
+          transport_state: "disconnected",
+          agent: null,
+        })
+      : createTerminalSession(await unwrapCommand(commands.existingTerminalSessionInfo({ session_id: session.id })));
+    restored.title = session.title;
+    restored.baseTitle = session.baseTitle;
+    restored.command = session.command;
+    restored.currentDirectory = session.currentDirectory;
+    restored.titleOverride = session.titleOverride;
+    restored.readOnly = session.readOnly;
+    restored.agentSessionId = session.agentSessionId;
+    restored.reconnectPending = session.reconnectPending;
+    restored.everConnected = session.everConnected || session.status === "running" || session.status === "disconnected";
+    restored.connectionHostId = session.connectionHostId;
+    restored.reconnectTrust = session.reconnectTrust;
+    restored.status = session.status;
+    restored.lastCols = session.lastCols;
+    restored.lastRows = session.lastRows;
+    restored.lastPixelWidth = session.lastPixelWidth;
+    restored.lastPixelHeight = session.lastPixelHeight;
+    restored.nextOutputSequence = BigInt(session.nextOutputSequence ?? "0");
+    restored.outputQueue = session.serialized ? [session.serialized] : [];
+    return restored;
   }
 
-  function restoreStoredTab(stored: StoredTab, restoredPanes: TerminalPane[]) {
-    const firstPane = restoredPanes[0];
-    if (!firstPane) throw new Error("tab handoff has no panes");
-    const tab = createTerminalTabFromPane(firstPane);
+  function restoreStoredTab(stored: StoredTerminalTab, restoredSession: TerminalSession) {
+    const tab = createTerminalTabFromSession(restoredSession);
     tab.customTitle = stored.customTitle;
-    tab.activePaneId = stored.activePaneId;
-    tab.tree = clonePaneTree(stored.tree);
-    for (const pane of restoredPanes) pane.tabId = tab.id;
-    tab.panes = restoredPanes;
+    restoredSession.tabId = tab.id;
+    tab.session = restoredSession;
     refreshTerminalTabTitle(tab);
     return tab;
   }
 
-  async function mountAndFitTabPanes(tab: TerminalTab) {
-    await tick();
-    for (const pane of paneItemsForTree(tab.tree, tab.panes)) {
-      await mountTerminalWhenReady(pane.id);
-      await flushTerminalOutputBacklog(pane.id);
-      terminalTabs.scheduleFit(pane.id);
-    }
-  }
-
-  async function mountTerminalWhenReady(paneId: string, viewId?: string) {
-    const terminalViewId = await waitForPaneContainer(paneId, viewId);
+  async function mountTerminalWhenReady(sessionId: string, viewId?: string) {
+    const terminalViewId = await waitForTerminalContainer(sessionId, viewId);
     if (terminalViewId === null) return;
-    await terminalTabs.mountTerminal(paneId, terminalViewId);
+    await terminalTabs.mountTerminal(sessionId, terminalViewId);
   }
 
-  async function waitForPaneContainer(paneId: string, viewId?: string) {
+  async function waitForTerminalContainer(sessionId: string, viewId?: string) {
     for (let attempt = 0; attempt < 30; attempt += 1) {
-      const tab = findLocalTabByPaneId(paneId);
+      const tab = findLocalTabBySessionId(sessionId);
       if (!tab) return null;
-      const pane = terminalPaneById(tab, paneId);
-      if (viewId && pane?.viewContainers.has(viewId)) return viewId;
-      const visibleViewId = pane ? Array.from(pane.viewContainers.keys()).find((id) => pane.viewContainers.get(id)?.isConnected) : undefined;
+      const session = terminalSessionById(tab, sessionId);
+      if (viewId && session?.viewContainers.has(viewId)) return viewId;
+      const visibleViewId = session ? Array.from(session.viewContainers.keys()).find((id) => session.viewContainers.get(id)?.isConnected) : undefined;
       if (!viewId && visibleViewId) return visibleViewId;
-      if (!viewId && pane?.container) return paneId;
+      if (!viewId && session?.container) return sessionId;
       await tick();
       await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
     }
-    throw new Error(viewId ? `terminal pane ${paneId} did not mount container view ${viewId}` : `terminal pane ${paneId} did not mount a visible container`);
+    throw new Error(viewId ? `terminal session ${sessionId} did not mount container view ${viewId}` : `terminal session ${sessionId} did not mount a visible container`);
   }
 
-  function terminalMount(node: HTMLDivElement, params: { pane: TerminalPane; toolTabId: string; viewId: string }) {
+  function terminalMount(node: HTMLDivElement, params: { session: TerminalSession; toolTabId: string; viewId: string }) {
     let current = params;
     attachTerminalMount(node, current);
     return {
-      update(next: { pane: TerminalPane; toolTabId: string; viewId: string }) {
-        if (next.pane === current.pane && next.toolTabId === current.toolTabId && next.viewId === current.viewId) return;
-        detachTerminalMount(node, current.pane, current.viewId);
+      update(next: { session: TerminalSession; toolTabId: string; viewId: string }) {
+        if (next.session === current.session && next.toolTabId === current.toolTabId && next.viewId === current.viewId) return;
+        detachTerminalMount(node, current.session, current.viewId);
         current = next;
         attachTerminalMount(node, current);
       },
       destroy() {
-        detachTerminalMount(node, current.pane, current.viewId);
+        detachTerminalMount(node, current.session, current.viewId);
       },
     };
   }
 
-  function attachTerminalMount(node: HTMLDivElement, params: { pane: TerminalPane; toolTabId: string; viewId: string }) {
-    params.pane.viewContainers.set(params.viewId, node);
-    if (params.viewId === params.pane.id) params.pane.container = node;
+  function attachTerminalMount(node: HTMLDivElement, params: { session: TerminalSession; toolTabId: string; viewId: string }) {
+    params.session.viewContainers.set(params.viewId, node);
+    if (params.viewId === params.session.id) params.session.container = node;
     void mountTerminalToolTab(params.toolTabId, params.viewId);
   }
 
-  function detachTerminalMount(node: HTMLDivElement, pane: TerminalPane, viewId: string) {
-    if (pane.viewContainers.get(viewId) === node) {
-      pane.viewContainers.delete(viewId);
+  function detachTerminalMount(node: HTMLDivElement, session: TerminalSession, viewId: string) {
+    if (session.viewContainers.get(viewId) === node) {
+      session.viewContainers.delete(viewId);
     }
-    if (pane.container === node) {
-      pane.container = undefined;
+    if (session.container === node) {
+      session.container = undefined;
     }
-    terminalTabs.scheduleFit(pane.id);
+    terminalTabs.scheduleFit(session.id);
   }
 
   async function mountTerminalToolTab(toolTabId: string, viewId?: string) {
     const runtime = terminalRuntimeForToolTab(toolTabId);
-    const pane = runtime ? terminalPaneById(runtime.tab, runtime.tab.activePaneId) : null;
-    if (!pane) return;
-    const terminalViewId = viewId ?? visibleTerminalViewIdForToolTab(toolTabId, pane);
+    const session = runtime?.tab.session ?? null;
+    if (!session) return;
+    const terminalViewId = viewId ?? visibleTerminalViewIdForToolTab(toolTabId, session);
     activeTerminalToolTabId = toolTabId;
     activeId = toolTabId;
     await tick();
-    await mountTerminalWhenReady(pane.id, terminalViewId);
-    await flushTerminalOutputBacklog(pane.id);
-    terminalTabs.scheduleFit(pane.id, terminalViewId);
-    pane.term?.focus();
+    await mountTerminalWhenReady(session.id, terminalViewId);
+    await flushTerminalOutputBacklog(session.id);
+    terminalTabs.scheduleFit(session.id, terminalViewId);
+    session.term?.focus();
     syncTerminalMenuState();
   }
 
-  function visibleTerminalViewIdForToolTab(toolTabId: string, pane: TerminalPane) {
-    const existing = Array.from(pane.viewContainers.keys()).find((id) => pane.viewContainers.get(id)?.isConnected);
+  function visibleTerminalViewIdForToolTab(_toolTabId: string, session: TerminalSession) {
+    const existing = Array.from(session.viewContainers.keys()).find((id) => session.viewContainers.get(id)?.isConnected);
     if (existing) return existing;
-    const floatingSlot = activeFloatingWindow ? activeDisplaySlotForToolTab(activeFloatingWindow.layout, toolTabId) : null;
+    const floatingSlot = activeFloatingWindow ? activeDisplaySlotForToolTab(activeFloatingWindow.layout, session.id) : null;
     if (floatingSlot) return floatingSlot.id;
-    const workspaceSlot = activeWorkspace ? activeDisplaySlotForToolTab(activeWorkspace.layout, toolTabId) : null;
-    return workspaceSlot?.id ?? pane.id;
-  }
-
-  function activeDisplaySlotForToolTab(layout: WorkspaceDockLayout, toolTabId: string): WorkspaceToolSlot | null {
-    if (layout.kind === "group") {
-      const active = activeGroupSlot(layout);
-      if (displaySlotHasToolTab(active, toolTabId)) return active;
-      return layout.slots.find((slot) => displaySlotHasToolTab(slot, toolTabId)) ?? null;
-    }
-    return layout.children
-      .map((child) => activeDisplaySlotForToolTab(child, toolTabId))
-      .find((slot): slot is WorkspaceToolSlot => slot !== null) ?? null;
-  }
-
-  function displaySlotHasToolTab(slot: WorkspaceToolSlot | null, toolTabId: string) {
-    return slot?.kind === "owned" || slot?.kind === "mirror" ? slot.tool_tab_id === toolTabId : false;
-  }
-
-  function removePaneFromTab(tab: TerminalTab, paneId: string) {
-    const pane = terminalPaneById(tab, paneId);
-    if (!pane) throw new Error(`pane ${paneId} not found in tab ${tab.id}`);
-    const nextTree = removePane(tab.tree, paneId);
-    tab.panes = tab.panes.filter((item) => item.id !== paneId);
-    if (!nextTree || tab.panes.length === 0) {
-      tabs = tabs.filter((item) => item.id !== tab.id);
-      if (activeId === tab.id) activeId = tabs[0]?.id ?? "";
-      return;
-    }
-    tab.tree = nextTree;
-    if (tab.activePaneId === paneId) {
-      const nextPane = tab.panes[0];
-      if (!nextPane) throw new Error(`tab ${tab.id} has no pane after removal`);
-      tab.activePaneId = nextPane.id;
-    }
-    refreshTerminalTabTitle(tab);
+    const workspaceSlot = activeWorkspace ? activeDisplaySlotForToolTab(activeWorkspace.layout, session.id) : null;
+    return workspaceSlot?.id ?? session.id;
   }
 
   async function tabContextMenu(event: MouseEvent) {
@@ -3445,121 +2973,63 @@
     });
   }
 
-  async function openPaneContextMenu(event: MouseEvent, paneId: string) {
-    event.preventDefault();
-    await activatePane(paneId);
-    if (!hasTauriRuntime()) return;
-    const tab = findTabByPaneId(paneId);
-    const pane = terminalPaneById(tab, paneId);
-    if (!pane) throw new Error(`pane ${paneId} not found`);
-    await unwrapCommand(
-      commands.showPaneContextMenu({
-        x: event.clientX,
-        y: event.clientY,
-        pane_id: paneId,
-        window_label: currentWindowLabel(),
-        has_selection: pane.term?.hasSelection() === true,
-        read_only: pane.readOnly,
-        has_multiple_panes: tab.panes.length > 1,
-        can_detach: pane.agentBacked && pane.status === "running",
-      }),
-    ).catch((error) => {
-      settingsError = error instanceof Error ? error.message : String(error);
-    });
-  }
-
-  function handlePaneMenu(event: PaneMenuEvent) {
-    if (!hasLocalTerminalPane(event.pane_id)) return;
-    if (event.action === "copy") {
-      void copyPaneSelection(event.pane_id);
-      return;
-    }
-    if (event.action === "paste") {
-      void pasteIntoPane(event.pane_id);
-      return;
-    }
-    if (event.action === "reset_terminal") {
-      resetPaneTerminal(event.pane_id);
-      return;
-    }
-    if (event.action === "toggle_read_only") {
-      togglePaneReadOnly(event.pane_id);
-      return;
-    }
-    if (event.action === "change_tab_title") {
-      changeTabTitleForPane(event.pane_id);
-      return;
-    }
-    if (event.action === "detach_session") {
-      void detachPaneSession(event.pane_id);
-      return;
-    }
-    if (event.action === "close_pane") {
-      void closePane(event.pane_id, { recordHistory: true });
-      return;
-    }
-    settingsError = `Unsupported pane menu action: ${event.action}`;
-  }
-
-  async function copyPaneSelection(paneId: string) {
-    const pane = terminalPaneById(findTabByPaneId(paneId), paneId);
-    if (!pane?.term || !pane.term.hasSelection()) return;
-    const selection = pane.term.getSelection();
+  async function copyTerminalSelection(sessionId: string) {
+    const session = findLocalSessionById(sessionId);
+    if (!session?.term || !session.term.hasSelection()) return;
+    const selection = session.term.getSelection();
     if (!selection) return;
     if (hasTauriRuntime()) await writeText(selection);
     else await navigator.clipboard.writeText(selection);
   }
 
-  async function pasteIntoPane(paneId: string) {
-    const pane = terminalPaneById(findTabByPaneId(paneId), paneId);
-    if (!pane?.term || pane.readOnly) return;
+  async function pasteIntoTerminal(sessionId: string) {
+    const session = findLocalSessionById(sessionId);
+    if (!session?.term || session.readOnly) return;
     const text = hasTauriRuntime() ? await readText() : await navigator.clipboard.readText();
     if (!text) return;
-    pane.term.paste(text);
+    session.term.paste(text);
   }
 
-  async function pasteSelectionIntoActivePane() {
-    const pane = activePane();
-    if (!pane?.term || pane.readOnly || !pane.term.hasSelection()) return;
-    const selection = pane.term.getSelection();
+  async function pasteSelectionIntoActiveSession() {
+    const session = activeSession();
+    if (!session?.term || session.readOnly || !session.term.hasSelection()) return;
+    const selection = session.term.getSelection();
     if (!selection) return;
-    pane.term.paste(selection);
+    session.term.paste(selection);
   }
 
   function syncTerminalMenuState() {
-    const pane = activePane();
+    const session = activeSession();
     const hasActiveTab = activeTab !== undefined;
-    const hasActivePane = pane !== null;
-    const hasSelection = pane?.term?.hasSelection() === true;
+    const hasActiveSession = session !== null;
+    const hasSelection = session?.term?.hasSelection() === true;
     const textInput = activeTextInput();
     const textInputHasSelection = textInput ? textInput.selectionStart !== textInput.selectionEnd : false;
     const textHistory = textInput ? textEditHistories.get(textInput) : undefined;
     const canUndo = terminalMenuCanUndo({
-      activePaneWritable: pane !== null && !pane.readOnly,
+      activeSessionWritable: session !== null && !session.readOnly,
       activeTextInputCanRedo: (textHistory?.redo.length ?? 0) > 0,
       activeTextInputCanUndo: textInput !== null && ((textHistory?.undo.length ?? 0) > 0 || textInput.value.length > 0),
       redoDepth: redoStack.length,
       undoDepth: undoStack.length,
     });
     const canRedo = terminalMenuCanRedo({
-      activePaneWritable: pane !== null && !pane.readOnly,
+      activeSessionWritable: session !== null && !session.readOnly,
       activeTextInputCanRedo: (textHistory?.redo.length ?? 0) > 0,
       activeTextInputCanUndo: textInput !== null && ((textHistory?.undo.length ?? 0) > 0 || textInput.value.length > 0),
       redoDepth: redoStack.length,
       undoDepth: undoStack.length,
     });
-    const state = {
+    const state: TerminalMenuStateInput = {
       can_edit_text: textInput !== null,
       can_undo_text: canUndo,
       can_redo_text: canRedo,
       has_active_tab: hasActiveTab,
-      has_active_pane: hasActivePane,
       has_multiple_tabs: tabs.length > 1,
-      has_multiple_panes: (activeTab?.panes.length ?? 0) > 1,
       has_selection: hasSelection || textInputHasSelection,
-      can_paste: textInput !== null || (pane !== null && !pane.readOnly),
-      can_paste_selection: hasSelection && pane !== null && !pane.readOnly,
-      can_select_all: textInput !== null || hasActivePane,
+      can_paste: textInput !== null || (session !== null && !session.readOnly),
+      can_paste_selection: hasSelection && session !== null && !session.readOnly,
+      can_select_all: textInput !== null || hasActiveSession,
       can_jump_to_selection: hasSelection,
       find_visible: findVisible,
       has_find_query: hasFindQuery() && !findSnapshot.error,
@@ -3573,23 +3043,41 @@
     });
   }
 
-  function resetPaneTerminal(paneId: string) {
-    const pane = terminalPaneById(findTabByPaneId(paneId), paneId);
-    if (!pane?.term) return;
-    pane.term.reset();
-    pane.term.clear();
-    terminalTabs.scheduleFit(pane.id);
+  function handleTerminalMenuEvent(event: { command: string }) {
+    const command = event.command;
+    if (command === "copy") {
+      const session = activeSession();
+      if (session) void copyTerminalSelection(session.id);
+      return;
+    }
+    if (command === "paste") {
+      const session = activeSession();
+      if (session) void pasteIntoTerminal(session.id);
+      return;
+    }
+    if (command === "select_all") {
+      activeSession()?.term?.selectAll?.();
+      return;
+    }
   }
 
-  function togglePaneReadOnly(paneId: string) {
-    const pane = terminalPaneById(findTabByPaneId(paneId), paneId);
-    if (!pane) return;
-    pane.readOnly = !pane.readOnly;
+  function resetTerminal(sessionId: string) {
+    const session = findLocalSessionById(sessionId);
+    if (!session?.term) return;
+    session.term.reset();
+    session.term.clear();
+    terminalTabs.scheduleFit(session.id);
+  }
+
+  function toggleTerminalReadOnly(sessionId: string) {
+    const session = findLocalSessionById(sessionId);
+    if (!session) return;
+    session.readOnly = !session.readOnly;
     syncTerminalMenuState();
   }
 
-  function changeTabTitleForPane(paneId: string) {
-    const tab = findTabByPaneId(paneId);
+  function changeTabTitleForTerminal(sessionId: string) {
+    const tab = findTabBySessionId(sessionId);
     changeTabTitle(tab);
   }
 
@@ -3598,21 +3086,21 @@
     if (nextTitle === null) return;
     tab.customTitle = nextTitle.trim();
     refreshTerminalTabTitle(tab);
-    const pane = terminalPaneById(tab, tab.activePaneId);
-    if (pane?.agentBacked && !pane.readOnly && tab.customTitle) {
-      void persistTerminalSessionRename(pane.id, tab.customTitle);
+    const session = tab.session;
+    if (session?.agentBacked && !session.readOnly && tab.customTitle) {
+      void persistTerminalSessionRename(session.id, tab.customTitle);
     }
   }
 
-  async function persistTerminalProgramTitle(paneId: string, title: string) {
+  async function persistTerminalProgramTitle(sessionId: string, title: string) {
     const trimmed = title.trim();
-    const pane = findLocalPaneById(paneId);
-    const titleKey = pane?.agentSessionId || paneId;
+    const session = findLocalSessionById(sessionId);
+    const titleKey = session?.agentSessionId || sessionId;
     if (!trimmed || lastPersistedTerminalTitleByAgentSessionId.get(titleKey) === trimmed) return;
     lastPersistedTerminalTitleByAgentSessionId.set(titleKey, trimmed);
     if (!hasTauriRuntime()) return;
     try {
-      await unwrapCommand(commands.updateTerminalTitle({ session_id: paneId, title: trimmed }));
+      await unwrapCommand(commands.updateTerminalTitle({ session_id: sessionId, title: trimmed }));
       terminalSessionsRevision += 1;
     } catch (error) {
       lastPersistedTerminalTitleByAgentSessionId.delete(titleKey);
@@ -3620,15 +3108,15 @@
     }
   }
 
-  async function persistTerminalSessionRename(paneId: string, title: string) {
+  async function persistTerminalSessionRename(sessionId: string, title: string) {
     const trimmed = title.trim();
     if (!trimmed) return;
-    const pane = findLocalPaneById(paneId);
-    const titleKey = pane?.agentSessionId || paneId;
+    const session = findLocalSessionById(sessionId);
+    const titleKey = session?.agentSessionId || sessionId;
     lastPersistedTerminalTitleByAgentSessionId.set(titleKey, trimmed);
     if (!hasTauriRuntime()) return;
     try {
-      await unwrapCommand(commands.renameTerminalSession({ session_id: paneId, title: trimmed }));
+      await unwrapCommand(commands.renameTerminalSession({ session_id: sessionId, title: trimmed }));
       terminalSessionsRevision += 1;
     } catch (error) {
       lastPersistedTerminalTitleByAgentSessionId.delete(titleKey);
@@ -3637,29 +3125,26 @@
   }
 
   function adjustFontSize(delta: number) {
-    const tab = activeTab;
+    const session = activeSession();
     const baseSize = settings?.font_size ?? 13;
-    for (const pane of tab?.panes ?? []) {
-      if (!pane.term) continue;
-      const currentSize = typeof pane.term.options.fontSize === "number" ? pane.term.options.fontSize : baseSize;
-      pane.term.options.fontSize = Math.max(6, Math.min(48, currentSize + delta));
-      terminalTabs.scheduleFit(pane.id);
-    }
+    if (!session?.term) return;
+    const currentSize = typeof session.term.options.fontSize === "number" ? session.term.options.fontSize : baseSize;
+    session.term.options.fontSize = Math.max(6, Math.min(48, currentSize + delta));
+    terminalTabs.scheduleFit(session.id);
   }
 
   function resetFontSize() {
-    if (!settings || !activeTab) return;
+    const session = activeSession();
+    if (!settings || !session) return;
     if (settings.font_size === null) throw new Error("terminal font size is missing");
-    for (const pane of activeTab.panes) {
-      if (!pane.term) continue;
-      pane.term.options.fontSize = settings.font_size;
-      terminalTabs.scheduleFit(pane.id);
-    }
+    if (!session.term) return;
+    session.term.options.fontSize = settings.font_size;
+    terminalTabs.scheduleFit(session.id);
   }
 
   function showFind() {
     findVisible = true;
-    const selection = activePane()?.term?.getSelection() ?? "";
+    const selection = activeSession()?.term?.getSelection() ?? "";
     if (selection) findQuery = selection;
     runFindNavigation("next", { focusTerminal: false, incremental: true });
     syncTerminalMenuState();
@@ -3667,14 +3152,14 @@
   }
 
   function hideFind() {
-    const pane = activePane();
-    const paneId = pane?.id;
+    const session = activeSession();
+    const sessionId = session?.id;
     findVisible = false;
-    clearTerminalFindEffects(pane);
+    clearTerminalFindEffects(session);
     findSnapshot = { activeIndex: 0, error: "", matches: [] };
     appliedFindSearchKey = null;
     syncTerminalMenuState();
-    void restoreTerminalAfterFindClose(paneId);
+    void restoreTerminalAfterFindClose(sessionId);
   }
 
   function findNext({ focusTerminal = true }: { focusTerminal?: boolean } = {}) {
@@ -3689,21 +3174,21 @@
     direction: "next" | "previous",
     { focusTerminal = true, incremental = false }: { focusTerminal?: boolean; incremental?: boolean } = {},
   ) {
-    const pane = activePane();
+    const session = activeSession();
     updateFindSnapshot();
-    if (!pane?.search || !hasFindQuery() || findSnapshot.error) {
-      pane?.search?.clearDecorations?.();
+    if (!session?.search || !hasFindQuery() || findSnapshot.error) {
+      session?.search?.clearDecorations?.();
       appliedFindSearchKey = null;
       return;
     }
     const searchKey = {
       caseSensitive: findCaseSensitive,
-      paneId: pane.id,
+      sessionId: session.id,
       query: findQuery,
       regex: findRegex,
     };
     if (terminalFindSearchKeyChanged(appliedFindSearchKey, searchKey)) {
-      pane.search.clearDecorations?.();
+      session.search.clearDecorations?.();
       appliedFindSearchKey = searchKey;
     }
     const options = {
@@ -3713,15 +3198,15 @@
       regex: findRegex,
     };
     const found =
-      direction === "next" ? pane.search.findNext(findQuery, options) : pane.search.findPrevious(findQuery, options);
-    if (!found) pane.search.clearActiveDecoration?.();
+      direction === "next" ? session.search.findNext(findQuery, options) : session.search.findPrevious(findQuery, options);
+    if (!found) session.search.clearActiveDecoration?.();
     updateFindSnapshot();
-    if (focusTerminal) pane.term?.focus();
+    if (focusTerminal) session.term?.focus();
     syncTerminalMenuState();
   }
 
   function useSelectionForFind() {
-    const selection = focusedTextSelection() || activePane()?.term?.getSelection() || "";
+    const selection = focusedTextSelection() || activeSession()?.term?.getSelection() || "";
     if (!selection) return;
     findQuery = selection;
     findVisible = true;
@@ -3757,7 +3242,7 @@
   }
 
   function updateFindSnapshot() {
-    const term = activePane()?.term;
+    const term = activeSession()?.term;
     findSnapshot = term
       ? terminalFindSnapshot(term as unknown as TerminalLike, findQuery, {
           caseSensitive: findCaseSensitive,
@@ -3766,7 +3251,7 @@
       : { activeIndex: 0, error: "", matches: [] };
   }
 
-  function refreshFindForActivePane() {
+  function refreshFindForActiveSession() {
     updateFindSnapshot();
     if (findVisible && hasFindQuery() && !findSnapshot.error) {
       runFindNavigation("next", { focusTerminal: false });
@@ -3789,7 +3274,7 @@
   }
 
   function jumpToSelection() {
-    const term = activePane()?.term;
+    const term = activeSession()?.term;
     const position = term?.getSelectionPosition();
     if (!term || !position) return;
     const line = Math.min(position.start.y, position.end.y);
@@ -3908,14 +3393,14 @@
     }
   }
 
-  async function restoreTerminalAfterFindClose(paneId: string | undefined) {
-    if (!paneId) return;
+  async function restoreTerminalAfterFindClose(sessionId: string | undefined) {
+    if (!sessionId) return;
     await tick();
     await animationFrame();
-    const pane = tabs.flatMap((tab) => tab.panes).find((item) => item.id === paneId);
-    pane?.term?.focus();
+    const session = tabs.find((tab) => tab.session.id === sessionId)?.session;
+    session?.term?.focus();
     for (let frame = 0; frame < 3; frame += 1) {
-      terminalTabs.refreshPanePresentation(paneId);
+      terminalTabs.refreshSessionPresentation(sessionId);
       await animationFrame();
     }
   }
@@ -4005,51 +3490,9 @@
     if (next) void activateTab(next.id);
   }
 
-  function siblingPane(side: SplitSide): string | null {
-    const tab = activeTab;
-    if (!tab) return null;
-    const panes = tab.panes.map((pane) => pane.id);
-    const index = panes.indexOf(tab.activePaneId);
-    if (index === -1) return null;
-    if (side === "left" || side === "up") return panes[Math.max(0, index - 1)] ?? null;
-    return panes[Math.min(panes.length - 1, index + 1)] ?? null;
-  }
-
-  function selectSplit(side: SplitSide) {
-    const paneId = siblingPane(side);
-    if (paneId) void activatePane(paneId);
-  }
-
-  function selectPreviousSplit() {
-    selectSplit("left");
-  }
-
-  function selectNextSplit() {
-    selectSplit("right");
-  }
-
-  function resizeActiveSplit(side: SplitSide) {
-    const tab = activeTab;
-    const targetPaneId = siblingPane(side);
-    if (!tab || !targetPaneId) return;
-    const direction = side === "left" || side === "right" ? "row" : "column";
-    const delta = side === "left" || side === "up" ? -32 : 32;
-    tab.tree = resizeAdjacentPanes({
-      tree: tab.tree,
-      firstPaneId: tab.activePaneId,
-      secondPaneId: targetPaneId,
-      deltaPixels: delta,
-      containerPixels: direction === "row" ? window.innerWidth : window.innerHeight,
-      minFirstPixels: direction === "row" ? minPaneWidth : minPaneHeight,
-      minSecondPixels: direction === "row" ? minPaneWidth : minPaneHeight,
-    });
-    void mountAndFitTabPanes(tab);
-  }
-
   function buildPaletteItems(): PaletteItem[] {
     const currentLanguage = language();
-    const hasActivePane = activePane() !== null;
-    const hasMultiplePanes = (activeTab?.panes.length ?? 0) > 1;
+    const hasActiveSession = activeSession() !== null;
     const terminalAgentEnabled = terminalAgentEnabledForHost(activeWorkspaceHost());
     const staticItems = staticPaletteCommands.map((command) => {
       const item = localizeCommand(command, currentLanguage);
@@ -4057,9 +3500,9 @@
       return {
         ...item,
         shortcut,
-        contextScore: paletteContextScore(item.id, hasActivePane, hasMultiplePanes),
+        contextScore: paletteContextScore(item.id, hasActiveSession),
         recentScore: paletteRecentScore(item.id),
-        disabledReason: paletteDisabledReason(item.id, hasActivePane, hasMultiplePanes),
+        disabledReason: paletteDisabledReason(item.id, hasActiveSession),
       };
     }).filter((item) => item.id !== "tool.openTerminalSessions" || terminalAgentEnabled);
     return [
@@ -4129,7 +3572,6 @@
     return tabs.map((tab, index) => {
       const number = index + 1;
       const active = tab.id === activeId;
-      const pane = terminalPaneById(tab, tab.activePaneId);
       return {
         id: `tab.switchTo:${tab.id}`,
         kind: "tab",
@@ -4145,8 +3587,8 @@
           `tab ${number}`,
           `标签 ${number}`,
           String(number),
-          pane?.currentDirectory ?? "",
-          pane?.command ?? "",
+          tab.session.currentDirectory ?? "",
+          tab.session.command ?? "",
           "biaoqian",
           "bq",
         ],
@@ -4193,10 +3635,8 @@
     return lastConfigSnapshot?.root.active_profile ?? "";
   }
 
-  function paletteContextScore(id: string, hasActivePane: boolean, hasMultiplePanes: boolean) {
-    if (id.startsWith("terminal.split") && hasActivePane) return 34;
-    if (id.startsWith("terminal.movePane") && hasMultiplePanes) return 30;
-    if (id === "terminal.togglePaneZoom" && hasMultiplePanes) return 30;
+  function paletteContextScore(id: string, hasActiveSession: boolean) {
+    if (id.startsWith("terminal.split") && hasActiveSession) return 34;
     if (id.startsWith("ui.theme.")) return 12;
     return 0;
   }
@@ -4206,9 +3646,8 @@
     return index === -1 ? 0 : Math.max(2, 12 - index * 2);
   }
 
-  function paletteDisabledReason(id: string, hasActivePane: boolean, hasMultiplePanes: boolean) {
-    if (id.startsWith("terminal.split") && !hasActivePane) return t("requiresActivePane");
-    if ((id.startsWith("terminal.movePane") || id === "terminal.togglePaneZoom") && !hasMultiplePanes) return t("requiresMultiplePanes");
+  function paletteDisabledReason(id: string, hasActiveSession: boolean) {
+    if (id.startsWith("terminal.split") && !hasActiveSession) return t("requiresActiveSession");
     return undefined;
   }
 
@@ -4308,9 +3747,9 @@
     commandPaletteSelected = 0;
     await tick();
     if (!restoreFocus) return;
-    const pane = activePane();
-    if (pane?.term) {
-      pane.term.focus();
+    const session = activeSession();
+    if (session?.term) {
+      session.term.focus();
       return;
     }
     commandPaletteLastFocus?.focus?.();
@@ -4454,11 +3893,6 @@
       await openWorkspaceTerminalSessions();
       return;
     }
-    if (id === "terminal.movePaneLeft") return moveActivePane("left");
-    if (id === "terminal.movePaneRight") return moveActivePane("right");
-    if (id === "terminal.movePaneUp") return moveActivePane("up");
-    if (id === "terminal.movePaneDown") return moveActivePane("down");
-    if (id === "terminal.togglePaneZoom") return togglePaneZoom();
     runTerminalCommand(id as TerminalCommandId);
   }
 
@@ -4478,23 +3912,24 @@
     settingsError = message;
   }
 
-  function clearHostSessionRetry(paneId: string) {
-    if (!hostSessionRetryByPaneId[paneId]) return;
-    const { [paneId]: _removed, ...rest } = hostSessionRetryByPaneId;
-    hostSessionRetryByPaneId = rest;
+  function clearHostSessionRetry(sessionId: string) {
+    if (!hostSessionRetryBySessionId[sessionId]) return;
+    const { [sessionId]: _removed, ...rest } = hostSessionRetryBySessionId;
+    hostSessionRetryBySessionId = rest;
   }
 
-  function markConnectionCancelled(paneId: string, message: string) {
-    clearHostSessionRetry(paneId);
-    void unwrapCommand(commands.closeTerminalSession(paneId)).catch(() => {});
-    terminalTabs.markConnectionCancelled(paneId, message);
+  function markConnectionCancelled(sessionId: string, message: string) {
+    clearHostSessionRetry(sessionId);
+    void unwrapCommand(commands.closeTerminalSession(sessionId)).catch(() => {});
+    terminalTabs.markConnectionCancelled(sessionId, message);
   }
 
   async function handleTerminalExit(event: TerminalExitEvent) {
-    if (!hasLocalTerminalPane(event.session_id)) return;
+    if (!hasLocalTerminalSession(event.session_id)) return;
     clearHostSessionRetry(event.session_id);
     terminalTabs.markExited(event);
     terminalSessionsRevision += 1;
+    await refreshDetachedTerminalPaletteItems();
   }
 
   async function handleWorkspaceSshVerificationRequired(event: WorkspaceSshVerificationRequiredEvent) {
@@ -4510,8 +3945,8 @@
         value: "",
         save: false,
       };
-      const paneId = terminalPaneIdForToolTab(challenge.challenge.source_tool_tab_id);
-      if (paneId) terminalTabs.markConnectionPrompt(paneId, "Waiting for SSH credential");
+      const sessionId = terminalSessionIdForToolTab(challenge.challenge.source_tool_tab_id);
+      if (sessionId) terminalTabs.markConnectionPrompt(sessionId, "Waiting for SSH credential");
       return;
     }
 
@@ -4584,12 +4019,6 @@
     }));
   }
 
-  function terminalPaneIdForToolTab(toolTabId: string | null) {
-    if (!toolTabId) return null;
-    const runtime = terminalRuntimeForToolTab(toolTabId);
-    return runtime?.tab.activePaneId ?? null;
-  }
-
   async function submitSshCredential() {
     if (!pendingSshCredential) return;
     const pending = pendingSshCredential;
@@ -4653,7 +4082,7 @@
   async function switchActiveProfile(name: string) {
     await unwrapCommand(commands.setActiveProfile(name));
     await loadSettings();
-    if (activePane()?.term) activePane()?.term?.focus();
+    if (activeSession()?.term) activeSession()?.term?.focus();
   }
 
   async function switchAppTheme(theme: "system" | "light" | "dark") {
@@ -4663,119 +4092,7 @@
     await unwrapCommand(commands.updateMainConfig(next));
     await loadSettings();
     await unwrapCommand(commands.refreshAppMenu());
-    if (activePane()?.term) activePane()?.term?.focus();
-  }
-
-  async function moveActivePane(side: SplitSide) {
-    const tab = activeTab;
-    if (!tab || tab.panes.length < 2) return;
-    const targetPaneId = siblingPane(side);
-    if (!targetPaneId || targetPaneId === tab.activePaneId) return;
-    await movePaneToPane(tab.activePaneId, targetPaneId, side);
-  }
-
-  async function togglePaneZoom() {
-    const tab = activeTab;
-    if (!tab || tab.panes.length < 2) return;
-    if (zoomedPane && zoomedPane.tabId === tab.id) {
-      tab.tree = clonePaneTree(zoomedPane.tree);
-      tab.activePaneId = terminalPaneById(tab, zoomedPane.activePaneId) ? zoomedPane.activePaneId : tab.activePaneId;
-      zoomedPane = null;
-      refreshTerminalTabTitle(tab);
-      await mountAndFitTabPanes(tab);
-      terminalPaneById(tab, tab.activePaneId)?.term?.focus();
-      return;
-    }
-    zoomedPane = {
-      tabId: tab.id,
-      paneId: tab.activePaneId,
-      tree: clonePaneTree(tab.tree),
-      activePaneId: tab.activePaneId,
-    };
-    tab.tree = { kind: "leaf", paneId: tab.activePaneId };
-    refreshTerminalTabTitle(tab);
-    await mountAndFitTabPanes(tab);
-    terminalPaneById(tab, tab.activePaneId)?.term?.focus();
-  }
-
-  async function zoomPane(paneId: string) {
-    await activatePane(paneId);
-    await togglePaneZoom();
-  }
-
-  async function runTerminalMenuCommand(command: TerminalMenuEvent["command"]) {
-    if (command === "open_command_palette") {
-      openCommandPalette();
-      return;
-    }
-    if (command === "new_window") {
-      if (hasTauriRuntime()) await unwrapCommand(commands.openMainWindow(null));
-      return;
-    }
-    if (command === "new_tab") {
-      await openWorkspaceTerminalSession();
-      return;
-    }
-    if (command === "split_right") return splitActivePane("right");
-    if (command === "split_left") return splitActivePane("left");
-    if (command === "split_down") return splitActivePane("down");
-    if (command === "split_up") return splitActivePane("up");
-    if (command === "close") return closeActiveTarget();
-    if (command === "close_tab" && activeId) return closeTab(activeId, { recordHistory: true });
-    if (command === "close_window") return closeCurrentWindow();
-    if (command === "undo" || command === "redo") {
-      const element = activeTextInput();
-      if (element) runTextInputEditCommand(element, command);
-      else if (command === "undo") await runTerminalUndo();
-      else await runTerminalRedo();
-      return;
-    }
-    if (command === "copy" && activeTextInput()) {
-      const element = activeTextInput();
-      if (!element) return;
-      runTextInputEditCommand(element, "copy");
-      return;
-    }
-    if (command === "paste" && activeTextInput()) {
-      const element = activeTextInput();
-      if (!element) return;
-      const text = hasTauriRuntime() ? await readText() : await navigator.clipboard.readText();
-      pasteIntoTextInput(element, text);
-      return;
-    }
-    if (command === "select_all" && activeTextInput()) {
-      activeTextInput()?.select();
-      return;
-    }
-    if (command === "copy") return activePane() ? copyPaneSelection(activePane()!.id) : undefined;
-    if (command === "paste") return activePane() ? pasteIntoPane(activePane()!.id) : undefined;
-    if (command === "paste_selection") return pasteSelectionIntoActivePane();
-    if (command === "select_all") return activePane()?.term?.selectAll();
-    if (command === "find") return showFind();
-    if (command === "find_next") return findNext();
-    if (command === "find_previous") return findPrevious();
-    if (command === "hide_find_bar") return hideFind();
-    if (command === "use_selection_for_find") return useSelectionForFind();
-    if (command === "jump_to_selection") return jumpToSelection();
-    if (command === "reset_font_size") return resetFontSize();
-    if (command === "increase_font_size") return adjustFontSize(1);
-    if (command === "decrease_font_size") return adjustFontSize(-1);
-    if (command === "change_tab_title" && activeTab) return changeTabTitle(activeTab);
-    if (command === "toggle_read_only" && activePane()) return togglePaneReadOnly(activePane()!.id);
-    if (command === "show_previous_tab") return showPreviousTab();
-    if (command === "show_next_tab") return showNextTab();
-    if (command === "move_tab_to_new_window") return moveActiveTabToNewWindow();
-    if (command === "zoom_split") return togglePaneZoom();
-    if (command === "select_previous_split") return selectPreviousSplit();
-    if (command === "select_next_split") return selectNextSplit();
-    if (command === "select_split_left") return selectSplit("left");
-    if (command === "select_split_right") return selectSplit("right");
-    if (command === "select_split_up") return selectSplit("up");
-    if (command === "select_split_down") return selectSplit("down");
-    if (command === "resize_split_left") return resizeActiveSplit("left");
-    if (command === "resize_split_right") return resizeActiveSplit("right");
-    if (command === "resize_split_up") return resizeActiveSplit("up");
-    if (command === "resize_split_down") return resizeActiveSplit("down");
+    if (activeSession()?.term) activeSession()?.term?.focus();
   }
 
   function handleKeyboard(event: KeyboardEvent) {
@@ -4807,26 +4124,6 @@
       void closeTab(activeId, { recordHistory: true });
       return;
     }
-    if (command === "terminal.splitRight" && activeId) {
-      void splitActivePane("right");
-      return;
-    }
-    if (command === "terminal.splitLeft" && activeId) {
-      void splitActivePane("left");
-      return;
-    }
-    if (command === "terminal.splitUp" && activeId) {
-      void splitActivePane("up");
-      return;
-    }
-    if (command === "terminal.splitDown" && activeId) {
-      void splitActivePane("down");
-      return;
-    }
-    if (command === "terminal.closePane" && activeTab) {
-      void closePane(activeTab.activePaneId, { recordHistory: true });
-      return;
-    }
     if (command === "terminal.find") {
       showFind();
       return;
@@ -4847,7 +4144,7 @@
     const stopTransferQueueObserver = startTransferQueueObserver();
     void (async () => {
       if (hasTauriRuntime()) {
-        const [outputDispose, exitDispose, transportStateDispose, configDispose, verificationDispose, portForwardVerificationDispose, paneMenuDispose, terminalMenuDispose] = await Promise.all([
+      const [outputDispose, exitDispose, transportStateDispose, configDispose, verificationDispose, portForwardVerificationDispose, terminalMenuDispose] = await Promise.all([
           listen<TerminalOutputEvent>("terminal://output", (event) => enqueueTerminalOutput(event.payload)),
           listen<TerminalExitEvent>("terminal://exit", (event) => {
             void handleTerminalExit(event.payload).catch((error) => {
@@ -4855,7 +4152,10 @@
             });
           }),
           listen<TerminalTransportStateEvent>("terminal://transport-state", (event) => {
-            routeTerminalPaneEvent(event.payload.session_id, localTerminalPaneIds(), () => terminalTabs.markTransportState(event.payload));
+            routeTerminalSessionEvent(event.payload.session_id, localTerminalSessionIds(), () => terminalTabs.markTransportState(event.payload));
+          }),
+          listen<{ command: string }>("terminal://menu-command", (event) => {
+            handleTerminalMenuEvent(event.payload);
           }),
           listen("config://changed", () => {
             void loadSettings().catch((error) => {
@@ -4872,32 +4172,24 @@
               settingsError = error instanceof Error ? error.message : String(error);
             });
           }),
-          listen<PaneMenuEvent>("terminal://pane-menu", (event) => handlePaneMenu(event.payload)),
-          listen<TerminalMenuEvent>("terminal://menu-command", (event) => {
-            void runTerminalMenuCommand(event.payload.command).catch((error) => {
-              settingsError = error instanceof Error ? error.message : String(error);
-            });
-          }),
         ]);
         if (!mounted) {
           outputDispose();
           exitDispose();
           transportStateDispose();
+          terminalMenuDispose();
           configDispose();
           verificationDispose();
           portForwardVerificationDispose();
-          paneMenuDispose();
-          terminalMenuDispose();
           return;
         }
         outputUnlisten = outputDispose;
         exitUnlisten = exitDispose;
         transportStateUnlisten = transportStateDispose;
+        terminalMenuUnlisten = terminalMenuDispose;
         configUnlisten = configDispose;
         workspaceSshVerificationUnlisten = verificationDispose;
         portForwardSshVerificationUnlisten = portForwardVerificationDispose;
-        paneMenuUnlisten = paneMenuDispose;
-        terminalMenuUnlisten = terminalMenuDispose;
       }
       await workspaceStore.subscribe(syncWorkspaceSnapshot);
       await loadSettings();
@@ -4955,7 +4247,6 @@
       configUnlisten?.();
       workspaceSshVerificationUnlisten?.();
       portForwardSshVerificationUnlisten?.();
-      paneMenuUnlisten?.();
       terminalMenuUnlisten?.();
       stopTransferQueueObserver();
       workspaceStore.dispose();
@@ -4970,10 +4261,6 @@
       }
       for (const tab of terminalRuntimeTabs()) {
         disposeTerminalTab(tab);
-        for (const pane of tab.panes) {
-          if (movedPaneIds.has(pane.id)) continue;
-          if (pane.status === "running") void unwrapCommand(commands.closeTerminalSession(pane.id));
-        }
       }
     };
   });
@@ -5001,7 +4288,7 @@
       void tick().then(() => {
         const tab = tabs.find((item) => item.id === activeId);
         if (!tab) return;
-        void mountAndFitTabPanes(tab);
+        void mountAndFitTab(tab);
         syncTerminalMenuState();
       });
     }
@@ -5336,6 +4623,7 @@
   />
 
   {#if toolTabContextMenu}
+    {@const detachTarget = toolTabContextMenuDetachTarget(toolTabContextMenu)}
     <section
       class="tooltab-context-menu"
       style={`left: ${toolTabContextMenu.left}px; top: ${toolTabContextMenu.top}px;`}
@@ -5345,6 +4633,11 @@
       <button type="button" role="menuitem" onclick={() => void closeWorkspaceSlot(toolTabContextMenu!.workspaceId, toolTabContextMenu!.slotId).finally(closeToolTabContextMenu)}>
         Close
       </button>
+      {#if detachTarget}
+        <button type="button" role="menuitem" onclick={() => void detachToolTabContextMenu(toolTabContextMenu!).finally(closeToolTabContextMenu)}>
+          Detach
+        </button>
+      {/if}
       <button type="button" role="menuitem" onclick={() => void closeOtherWorkspaceSlots(toolTabContextMenu!.workspaceId, toolTabContextMenu!.slotId).finally(closeToolTabContextMenu)}>
         Close Others
       </button>
@@ -5438,6 +4731,7 @@
       draggingSlotId={toolTabDragState?.slotId ?? null}
       {slotTool}
       slotTitle={slotToolTitle}
+      slotTooltip={slotToolTooltip}
       {ownerWorkspaceTitle}
       terminalSessionId={terminalSessionIdForToolTab}
       onActivate={(slotId) => workspace ? void activateWorkspaceSlot(workspace, slotId) : undefined}
@@ -5512,7 +4806,7 @@
   {:else}
     {@const terminalMode = terminalRenderMode(workspace, effectiveWorkspace)}
     {@const runtime = terminalRuntimeForToolTab(tool.id)}
-    {@const pane = runtime ? terminalPaneById(runtime.tab, runtime.tab.activePaneId) : null}
+    {@const session = runtime?.tab.session ?? null}
     {#if !terminalMode}
       <div class="dock-empty">
         <strong>{tool.title}</strong>
@@ -5521,7 +4815,7 @@
     {:else}
       <section class="terminal-tool-area" aria-label="Terminal ToolTab">
         <section class="content" aria-label="Terminal content">
-          {#if (settingsError || workspaceStore.error) && (!runtime || !pane)}
+          {#if (settingsError || workspaceStore.error) && (!runtime || !session)}
             <div class="placeholder error-state">
               <img src="/favicon.png" alt="" />
               <h1>Nocturne</h1>
@@ -5532,7 +4826,7 @@
               <img src="/favicon.png" alt="" />
               <h1>Nocturne</h1>
             </div>
-          {:else if !runtime || !pane}
+          {:else if !runtime || !session}
             <div class="placeholder">
               <img src="/favicon.png" alt="" />
               <h1>Nocturne</h1>
@@ -5542,18 +4836,17 @@
               class="terminal-surface"
               class:mirror={slot.kind === "mirror"}
               data-testid="terminal-surface"
-              data-session-id={pane.id}
+              data-session-id={session.id}
               data-tool-tab-id={tool.id}
               data-terminal-view-id={slot.id}
-              data-terminal-read-only={pane.readOnly ? "true" : "false"}
-              data-terminal-status={pane.status}
-              data-terminal-exit-text={pane.exitText}
-              data-agent-session-id={pane.agentSessionId}
+              data-terminal-read-only={session.readOnly ? "true" : "false"}
+              data-terminal-status={session.status}
+              data-terminal-exit-text={session.exitText}
+              data-agent-session-id={session.agentSessionId}
               data-terminal-mirror={slot.kind === "mirror" ? "true" : undefined}
               data-terminal-runtime-title={terminalRuntimeTitleForToolTab(tool.id) ?? ""}
-              aria-label={pane.title}
+              aria-label={session.title}
               role="group"
-              oncontextmenu={(event) => void openPaneContextMenu(event, pane.id)}
             >
               {#if slot.kind === "mirror"}
                 <div class="terminal-mirror-source" data-testid="terminal-mirror-source">
@@ -5561,11 +4854,11 @@
                 </div>
               {/if}
               <div class="terminal-host" data-testid="terminal-host" role="presentation" onmousedown={() => void mountTerminalToolTab(tool.id, slot.id)}>
-                <div class="terminal-mount" data-testid="terminal-mount" use:terminalMount={{ pane, toolTabId: tool.id, viewId: slot.id }}></div>
+                <div class="terminal-mount" data-testid="terminal-mount" use:terminalMount={{ session, toolTabId: tool.id, viewId: slot.id }}></div>
                 <div class="terminal-too-small" aria-hidden="true">Terminal too small</div>
               </div>
-              {#if pane.error}
-                <p class="terminal-error">{pane.error}</p>
+              {#if session.error}
+                <p class="terminal-error">{session.error}</p>
               {/if}
             </section>
           {/if}

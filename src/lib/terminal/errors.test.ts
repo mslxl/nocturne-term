@@ -13,6 +13,6 @@ describe("terminal session error classification", () => {
 
   it("does not treat unrelated not-found messages as terminal lifecycle errors", () => {
     assert.equal(isTerminalSessionInactiveMessage("profile default not found"), false);
-    assert.equal(isTerminalSessionInactiveMessage("terminal pane term-4 not found"), false);
+    assert.equal(isTerminalSessionInactiveMessage("terminal view term-4 not found"), false);
   });
 });

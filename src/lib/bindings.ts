@@ -83,7 +83,6 @@ export const commands = {
 	setDefaultHostCommand: (hostId: string) => typedError<ConfigRootInfo, ConfigError>(__TAURI_INVOKE("set_default_host_command", { hostId })),
 	removeConfigKey: (input: ConfigKeyPathInput) => typedError<null, ConfigError>(__TAURI_INVOKE("remove_config_key", { input })),
 	showTabBarContextMenu: (input: TabBarContextMenuInput) => typedError<null, ConfigError>(__TAURI_INVOKE("show_tab_bar_context_menu", { input })),
-	showPaneContextMenu: (input: PaneContextMenuInput) => typedError<null, ConfigError>(__TAURI_INVOKE("show_pane_context_menu", { input })),
 	showAppMenu: (input: AppMenuPopupInput) => typedError<null, ConfigError>(__TAURI_INVOKE("show_app_menu", { input })),
 	openSettingsWindow: (mode: string) => typedError<null, ConfigError>(__TAURI_INVOKE("open_settings_window", { mode })),
 	openHostManagerWindow: () => typedError<null, ConfigError>(__TAURI_INVOKE("open_host_manager_window")),
@@ -510,24 +509,6 @@ export type OpenDetachedTerminalSessionHistoryInput = {
 	window_label: string,
 };
 
-export type PaneContextMenuInput = {
-	x: number | null,
-	y: number | null,
-	pane_id: string,
-	window_label: string,
-	has_selection: boolean,
-	read_only: boolean,
-	has_multiple_panes: boolean,
-	can_detach: boolean,
-};
-
-export type PaneMenuAction = "copy" | "paste" | "reset_terminal" | "toggle_read_only" | "change_tab_title" | "detach_session" | "zoom_split" | "close_pane" | "split_left" | "split_right" | "split_up" | "split_down";
-
-export type PaneMenuEvent = {
-	action: PaneMenuAction,
-	pane_id: string,
-};
-
 export type PortForwardDirection = "local_to_remote" | "remote_to_local";
 
 export type PortForwardDraft = {
@@ -903,6 +884,7 @@ export type TerminalDetachedSessionInfo = {
 	session_id: string,
 	title: string,
 	command: string,
+	cwd: string | null,
 	cols: number,
 	rows: number,
 	detached: boolean,
@@ -914,20 +896,12 @@ export type TerminalInput = {
 	data: string,
 };
 
-export type TerminalMenuCommand = "open_command_palette" | "new_window" | "new_tab" | "split_right" | "split_left" | "split_down" | "split_up" | "close" | "close_tab" | "close_window" | "undo" | "redo" | "copy" | "paste" | "paste_selection" | "select_all" | "find" | "find_next" | "find_previous" | "hide_find_bar" | "use_selection_for_find" | "jump_to_selection" | "reset_font_size" | "increase_font_size" | "decrease_font_size" | "change_tab_title" | "toggle_read_only" | "minimize" | "zoom" | "fill" | "center" | "move_resize_left" | "move_resize_right" | "move_resize_top" | "move_resize_bottom" | "move_resize_top_left" | "move_resize_top_right" | "move_resize_bottom_left" | "move_resize_bottom_right" | "toggle_full_screen" | "show_previous_tab" | "show_next_tab" | "move_tab_to_new_window" | "zoom_split" | "select_previous_split" | "select_next_split" | "select_split_left" | "select_split_right" | "select_split_up" | "select_split_down" | "resize_split_left" | "resize_split_right" | "resize_split_up" | "resize_split_down" | "bring_all_to_front";
-
-export type TerminalMenuEvent = {
-	command: TerminalMenuCommand,
-};
-
 export type TerminalMenuStateInput = {
 	can_edit_text: boolean,
 	can_undo_text: boolean,
 	can_redo_text: boolean,
 	has_active_tab: boolean,
-	has_active_pane: boolean,
 	has_multiple_tabs: boolean,
-	has_multiple_panes: boolean,
 	has_selection: boolean,
 	can_paste: boolean,
 	can_paste_selection: boolean,

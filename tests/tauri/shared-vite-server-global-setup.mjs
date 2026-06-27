@@ -16,6 +16,7 @@
  * servers, preventing intermittent localhost connection-refused pages.
  */
 import { createRequire } from "node:module";
+import { spawn } from "node:child_process";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -32,6 +33,8 @@ export default async function setupSharedViteServer() {
 
   process.env.TAURI_TEST_DEV_URL = devUrl;
   process.env.NOCTURNE_DEV_PORT = String(devPort);
+
+  await buildCurrentPlatformTerminalAgent(repoRoot);
 
   if (await devServerResponds(devUrl)) {
     return async () => undefined;
@@ -77,4 +80,53 @@ async function devServerResponds(devUrl) {
 
 function delay(ms) {
   return new Promise((resolveDelay) => setTimeout(resolveDelay, ms));
+}
+
+async function buildCurrentPlatformTerminalAgent(repoRoot) {
+  await run(repoRoot, "pnpm", ["build:terminal-agents"], {
+    ...process.env,
+    NOCTURNE_TERMINAL_AGENT_TARGETS: currentTerminalAgentTarget(),
+  });
+}
+
+function currentTerminalAgentTarget() {
+  const os = process.platform === "win32"
+    ? "windows"
+    : process.platform === "darwin"
+      ? "macos"
+      : process.platform === "linux"
+        ? "linux"
+        : "";
+  const arch = process.arch === "x64"
+    ? "x86_64"
+    : process.arch === "arm64"
+      ? "aarch64"
+      : process.arch === "ia32"
+        ? "i686"
+        : process.arch === "arm"
+          ? "armv7"
+          : "";
+  if (!os || !arch) {
+    throw new Error(`Unsupported Terminal Agent test platform: ${process.platform}/${process.arch}`);
+  }
+  return `${os}/${arch}`;
+}
+
+function run(cwd, command, args, env = process.env) {
+  return new Promise((resolveRun, rejectRun) => {
+    const child = spawn(command, args, {
+      cwd,
+      env,
+      shell: process.platform === "win32",
+      stdio: "inherit",
+    });
+    child.on("error", rejectRun);
+    child.on("exit", (code) => {
+      if (code === 0) {
+        resolveRun();
+      } else {
+        rejectRun(new Error(`${command} ${args.join(" ")} failed with exit code ${code}`));
+      }
+    });
+  });
 }

@@ -146,6 +146,7 @@ enum RemoteAgentCommand {
     Rename(String, Sender<Result<TerminalAgentResponse>>),
     TitleChange(String, Sender<Result<TerminalAgentResponse>>),
     Close(Sender<Result<TerminalAgentResponse>>),
+    CloseView(Sender<Result<TerminalAgentResponse>>),
     Detach(Sender<Result<TerminalAgentResponse>>),
     Delete(Sender<Result<TerminalAgentResponse>>),
 }
@@ -1064,8 +1065,8 @@ fn kill_terminal_session(session: Arc<TerminalSession>) -> Result<()> {
                 local_control.as_ref(),
                 remote.as_ref(),
                 RemoteAgentCommand::Close,
-                || agent_protocol_request("close", None),
-                "close",
+                || agent_protocol_request("close_run", None),
+                "close_run",
                 &[],
             );
             if let Some(child) = agent_process.as_mut() {
@@ -1103,8 +1104,34 @@ fn detach_agent_terminal_view(session: &Arc<TerminalSession>) -> Result<bool> {
     Ok(true)
 }
 
+fn close_agent_terminal_view(session: &Arc<TerminalSession>) -> Result<bool> {
+    let mut backend = session.backend.lock().unwrap();
+    let TerminalBackend::Agent {
+        session_id,
+        helper_path,
+        local_control,
+        remote,
+        ..
+    } = &mut *backend
+    else {
+        return Ok(false);
+    };
+    let response = send_agent_backend_request(
+        session_id,
+        helper_path,
+        local_control.as_ref(),
+        remote.as_ref(),
+        RemoteAgentCommand::CloseView,
+        || agent_protocol_request("close_view", None),
+        "close_view",
+        &[],
+    )?;
+    terminal_agent_response_result(response)?;
+    Ok(true)
+}
+
 fn close_terminal_view_session(session: Arc<TerminalSession>) -> Result<()> {
-    if detach_agent_terminal_view(&session)? {
+    if close_agent_terminal_view(&session)? {
         return Ok(());
     }
     kill_terminal_session(session)
@@ -1128,7 +1155,7 @@ pub(crate) fn close_terminal_sessions_for_window(window_label: &str) {
     };
 
     for (id, session) in sessions {
-        if let Err(error) = close_terminal_view_session(session) {
+        if let Err(error) = detach_agent_terminal_view(&session) {
             eprintln!("failed to close terminal session {id} for window {window_label}: {error}");
         }
         remove_terminal_session(&id);
@@ -2033,7 +2060,8 @@ fn send_remote_agent_command(
             extra.push(("--title".to_string(), title.clone()));
             "title_change"
         }
-        RemoteAgentCommand::Close(_) => "close",
+        RemoteAgentCommand::Close(_) => "close_run",
+        RemoteAgentCommand::CloseView(_) => "close_view",
         RemoteAgentCommand::Detach(_) => "detach",
         RemoteAgentCommand::Delete(_) => "delete",
     };
@@ -2062,6 +2090,7 @@ fn remote_agent_command_response_sender(
         | RemoteAgentCommand::Rename(_, sender)
         | RemoteAgentCommand::TitleChange(_, sender)
         | RemoteAgentCommand::Close(sender)
+        | RemoteAgentCommand::CloseView(sender)
         | RemoteAgentCommand::Detach(sender)
         | RemoteAgentCommand::Delete(sender) => sender.clone(),
     }
@@ -2397,6 +2426,7 @@ fn terminal_detached_info_from_go_session(
         session_id: session.session_id.clone(),
         title: session.title.clone(),
         command: session.command.clone(),
+        cwd: session.cwd.clone(),
         cols: session.cols.unwrap_or(80),
         rows: session.rows.unwrap_or(24),
         detached: session.status != "exited",
@@ -4867,6 +4897,7 @@ pub(crate) fn detach_terminal_session(
         session_id: session_id.clone(),
         title: info.title.clone(),
         command: info.command.clone(),
+        cwd: info.cwd.clone(),
         cols: info.cols,
         rows: info.rows,
         detached: true,
@@ -5898,7 +5929,7 @@ mod tests {
     }
 
     #[test]
-    fn closing_agent_terminal_view_detaches_without_closing_daemon() {
+    fn closing_agent_terminal_view_sends_close_view() {
         let state = terminal_state();
         let view_session_id = "test-close-view-detaches-view";
         let registry_session_id = "test-close-view-detaches-registry";
@@ -5947,13 +5978,16 @@ mod tests {
             .recv_timeout(Duration::from_secs(1))
             .expect("close_terminal_session sends a daemon command");
         match command {
-            RemoteAgentCommand::Detach(response_tx) => {
+            RemoteAgentCommand::CloseView(response_tx) => {
                 response_tx
                     .send(Ok(TerminalAgentResponse::Ok))
-                    .expect("send detach response");
+                    .expect("send close_view response");
+            }
+            RemoteAgentCommand::Detach(_) => {
+                panic!("closing an attached Terminal view must not detach explicitly")
             }
             RemoteAgentCommand::Close(_) => {
-                panic!("closing an attached Terminal view must detach, not close the daemon")
+                panic!("closing an attached Terminal view must let close_view decide whether to close the run")
             }
             RemoteAgentCommand::Delete(_) => {
                 panic!("closing an attached Terminal view must not delete the daemon")

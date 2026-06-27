@@ -1,5 +1,5 @@
 export type TerminalMenuHistoryState = {
-  activePaneWritable: boolean;
+  activeSessionWritable: boolean;
   activeTextInputCanRedo: boolean;
   activeTextInputCanUndo: boolean;
   redoDepth: number;

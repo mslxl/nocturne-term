@@ -18,7 +18,7 @@ func TestStreamsUntilEOFOnlyForLiveSessionCommands(t *testing.T) {
 		}
 	}
 
-	finiteCommands := []string{"history", "info", "ping", "write", "resize", "close", "detach", "delete", "rename", "title_change"}
+	finiteCommands := []string{"history", "info", "ping", "write", "resize", "close", "close_view", "close_run", "detach", "delete", "rename", "title_change"}
 	for _, command := range finiteCommands {
 		if streamsUntilEOF(command) {
 			t.Fatalf("%s should stop after its response", command)

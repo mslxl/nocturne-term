@@ -244,14 +244,31 @@ func (state *daemonState) handleRequest(client *daemonClient, request rawRequest
 			return err
 		}
 		client.writeResponse(okResponse(request.RequestID))
-	case "close":
-		err := state.process.Close()
+	case "close_view":
+		err := state.closeView(client)
+		client.writeResponse(okResponse(request.RequestID))
+		client.close()
+		return err
+	case "close", "close_run":
+		err := state.closeRun()
 		client.writeResponse(okResponse(request.RequestID))
 		return err
 	default:
 		return fmt.Errorf("unsupported request %q", request.Name)
 	}
 	return nil
+}
+
+func (state *daemonState) closeRun() error {
+	return state.process.Close()
+}
+
+func (state *daemonState) closeView(client *daemonClient) error {
+	state.detachClient(client)
+	if state.pingAttachedClientsAndCountReachable() > 0 {
+		return nil
+	}
+	return state.closeRun()
 }
 
 func (state *daemonState) liveListedSession() ListedSession {
@@ -269,6 +286,26 @@ func (state *daemonState) attachedClientCount() int {
 		if client.isAttached() {
 			count++
 		}
+	}
+	return count
+}
+
+func (state *daemonState) pingAttachedClientsAndCountReachable() int {
+	state.clientsMu.Lock()
+	defer state.clientsMu.Unlock()
+	count := 0
+	for client := range state.clients {
+		if !client.isAttached() {
+			delete(state.clients, client)
+			continue
+		}
+		if err := client.writeJSON(okResponse(newHeartbeatRequestID())); err != nil {
+			delete(state.clients, client)
+			client.close()
+			client.closeSend()
+			continue
+		}
+		count++
 	}
 	return count
 }

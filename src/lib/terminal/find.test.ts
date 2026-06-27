@@ -72,18 +72,18 @@ describe("terminal find", () => {
   });
 
   it("requires a fresh xterm search when query options change", () => {
-    const previous = { paneId: "pane-1", query: "Unload", caseSensitive: false, regex: false };
+    const previous = { sessionId: "session-1", query: "Unload", caseSensitive: false, regex: false };
 
     assert.equal(
-      terminalFindSearchKeyChanged(previous, { paneId: "pane-1", query: "Unload", caseSensitive: true, regex: false }),
+      terminalFindSearchKeyChanged(previous, { sessionId: "session-1", query: "Unload", caseSensitive: true, regex: false }),
       true,
     );
     assert.equal(
-      terminalFindSearchKeyChanged(previous, { paneId: "pane-1", query: "ulo.d", caseSensitive: false, regex: true }),
+      terminalFindSearchKeyChanged(previous, { sessionId: "session-1", query: "ulo.d", caseSensitive: false, regex: true }),
       true,
     );
     assert.equal(
-      terminalFindSearchKeyChanged(previous, { paneId: "pane-1", query: "Unload", caseSensitive: false, regex: false }),
+      terminalFindSearchKeyChanged(previous, { sessionId: "session-1", query: "Unload", caseSensitive: false, regex: false }),
       false,
     );
   });

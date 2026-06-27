@@ -90,10 +90,16 @@ registry-backed session for the same Host whether or not a Terminal ToolTab is
 currently attached. It refreshes when opened, when it becomes active, after
 terminal detach/exit/delete/attach/history events, and when the user presses its
 Refresh button. It does not poll on a timer in V1. The UI uses the native system
-confirmation dialog before calling the backend delete command. Running or
-detached sessions are closed and then removed; exited sessions are removed
-directly. Exited sessions stay visible for history browsing until this explicit
-delete step and are not attachable or continuable in V1.
+confirmation dialog before calling the backend delete command. Multi-select is
+an explicit selection mode so normal rows stay compact: the user enters Select,
+then can select individual sessions, Select All, invert the selection, delete
+the selected registry/transcript pairs with one confirmation, or leave selection
+mode. Row sizes such as `80x24` are not shown because they are restore metadata,
+not useful list identity. Rows use tooltip text for truncated title, cwd,
+command, and status details. Running or detached sessions are closed and then
+removed; exited sessions are removed directly. Exited sessions stay visible for
+history browsing until this explicit delete step and are not attachable or
+continuable in V1.
 
 The Terminal Sessions ToolTab must stay usable in narrow dock groups without
 showing a native scrollbar if the list can be compressed instead. Its session
@@ -107,34 +113,44 @@ an outer native scrollbar before content scrolling is necessary.
 
 Opening an exited session creates a normal Terminal ToolTab in read-only history
 mode. Nocturne requests `history`, displays the saved transcript in that
-Terminal ToolTab, and keeps the pane disconnected instead of subscribing to live
-output or starting a replacement command. The Terminal surface exposes stable
-diagnostic attributes for Tauri tests, including the view-local session id,
-registry `agent.session_id`, read-only flag, terminal status, and `History` exit
-text, so regressions can prove whether a history view accidentally became live
-or writable.
+Terminal ToolTab, and keeps the session disconnected instead of subscribing to live
+output or starting a replacement command. If the user later chooses to restart
+from that history view, the keystroke or paste that triggered the restart prompt
+is discarded and is not replayed into the new run. The Terminal surface exposes
+stable diagnostic attributes for Tauri tests, including the view-local session
+id, registry `agent.session_id`, read-only flag, terminal status, and `History`
+exit text, so regressions can prove whether a history view accidentally became
+live or writable.
 
 Terminal ToolTabs opened from the registry use a view-local Terminal session id
 so the same registry session can be attached or viewed from multiple ToolTabs at
-once without overwriting another pane. The stable daemon/registry identity stays
+once without overwriting another view. The stable daemon/registry identity stays
 in `agent.session_id` and is the value used for helper-client operations.
-Closing a Terminal ToolTab, closing a Nocturne window, or exiting Nocturne only
-detaches that view from the daemon; it does not send `close` to the daemon and
-does not remove registry or transcript files. Explicit delete is the destructive
-operation. When a view detaches, Nocturne also stops its helper-client
-subscription so the daemon can remove that attached client immediately instead
-of waiting for heartbeat timeout.
+New code and docs should stick to sessions, ToolTabs, views, and clients.
+Closing a Terminal ToolTab sends `close_view`, which removes only the current
+attached client first. The daemon then pings the remaining attached clients; if
+none are still reachable, it closes the PTY/run, writes `[exit]`, and exits.
+Explicit `detach` only removes the current attached client and keeps the run
+alive. Explicit `close_run` always ends the PTY/run. Explicit `delete` removes
+registry and transcript files after the run is exited. Closing a Nocturne
+window, exiting Nocturne, or using the explicit Detach command only detaches
+owned Terminal Agent views unless the user chose Close for that ToolTab. When a
+view detaches, Nocturne also stops its helper-client subscription so the daemon
+can remove that attached client immediately instead of waiting for heartbeat
+timeout.
 When multiple live Terminal ToolTabs are attached to one daemon, Nocturne tracks
 each view-local size in memory and sends the daemon the smallest attached
 `cols`/`rows` and pixel dimensions so every attached view can render the PTY
 without clipping.
 
 The helper client owns explicit removal. `client delete --session-id` loads the
-registry, sends `close` first when the session has not written `[exit]`, waits
-for the daemon to persist exit, then removes both the transcript and registry
-files. Already exited sessions delete without contacting a daemon. If a session
-has no `[exit]` and the helper cannot close/probe the daemon, deletion fails
-instead of silently removing files for a possibly live PTY.
+registry, sends `close_run` first when the session has not written `[exit]`,
+waits for the daemon to persist exit, then removes both the transcript and
+registry files. Already exited sessions delete without contacting a daemon. If a
+session has no `[exit]` but its registry endpoint is already gone, explicit
+delete treats the registry as stale and still removes both files. Other
+connection failures, such as permission or protocol errors, still fail instead
+of silently removing files for a possibly live PTY.
 
 Transcript lines are NDJSON chunks:
 
@@ -162,18 +178,19 @@ with the UI default of 80x24 until they are recreated.
 The daemon accepts NDJSON over Unix sockets on Linux/macOS and Windows named
 pipes on Windows. Connections can be short-lived or long-lived. A client can
 attach or subscribe and then send `ping`, `info`, `history`, `write`, `resize`,
-`close`, and `detach` over the same connection.
+`close_view`, `close_run`, `delete`, and `detach` over the same connection.
 
 Long-lived `attach` and `subscribe` helper clients emit daemon NDJSON to stdout,
 accept follow-up NDJSON requests on stdin, and forward them to the same daemon
 socket/pipe connection. Nocturne uses that stdin stream as the live Terminal
 ToolTab control channel for Agent-backed `write`, `resize`, `rename`,
-`title_change`, `close`, and `detach` requests instead of starting a new helper
-client per keystroke or resize. Local live ToolTabs write those requests to the
-bundled helper process stdin. SSH live ToolTabs write the same NDJSON requests
-to the stdin side of the existing remote helper `client subscribe` SSH exec
-channel, so live remote input and resize do not open a separate SSH exec or
-helper-client process. Remote live control must tolerate temporary SSH
+`title_change`, `close_view`, `close_run`, `delete`, and `detach` requests
+instead of starting a new helper client per keystroke or resize. Local live
+ToolTabs write those requests to the bundled helper process stdin. SSH live
+ToolTabs write the same NDJSON requests to the stdin side of the existing remote
+helper `client subscribe` SSH exec channel, so live remote input and resize do
+not open a separate SSH exec or helper-client process. Remote live control must
+tolerate temporary SSH
 backpressure by keeping unsent NDJSON bytes queued and retrying them on the same
 subscription channel instead of treating `WouldBlock` as a fatal disconnect.
 The helper keeps the same connection alive by sending
@@ -186,6 +203,11 @@ client and are not forwarded to Nocturne's terminal event reader. A `detach`
 request removes that attached client, returns the correlated response, and then
 closes the helper connection so the Terminal ToolTab's client process exits
 without waiting for heartbeat timeout.
+A `close_view` request also removes the current attached client and returns only
+after the daemon has pinged any remaining attached clients. If the current view
+was the last reachable attached client, `close_view` closes the PTY/run before
+responding. Unreachable attached clients are removed during that check, the same
+as heartbeat timeout cleanup.
 
 The helper CLI also follows the registry-first rule. Operational client
 commands take `--session-id`; they load `<session_id>.toml`, read the endpoint
@@ -235,9 +257,10 @@ deleted sessions are still readable by opening the registry and transcript.
 When the registry has `[exit]`, the helper client does not connect to the daemon
 endpoint because that socket or named pipe belongs to a process that has already
 exited. It serves `history` directly from the transcript, serves `info` from the
-registry, treats `close` and `detach` as already satisfied, and returns a normal
-`ok = false` protocol response for live-only commands such as `ping`, `attach`,
-`subscribe`, `write`, `resize`, `rename`, and `title_change`.
+registry, deletes registry/transcript files for `delete`, treats `close_view`,
+`close_run`, and `detach` as already satisfied, and returns a normal `ok = false`
+protocol response for live-only commands such as `ping`, `attach`, `subscribe`,
+`write`, `resize`, `rename`, and `title_change`.
 
 ## Platform Storage
 

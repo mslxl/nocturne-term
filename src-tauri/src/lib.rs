@@ -137,7 +137,6 @@ fn create_app_specta_builder() -> Builder<tauri::Wry> {
             config::set_default_host_command,
             config::remove_config_key,
             app_shell::show_tab_bar_context_menu,
-            app_shell::show_pane_context_menu,
             app_shell::show_app_menu,
             app_shell::open_settings_window,
             app_shell::open_host_manager_window,
@@ -148,8 +147,6 @@ fn create_app_specta_builder() -> Builder<tauri::Wry> {
             app_shell::update_terminal_menu_state,
             config::watch_config_command
         ])
-        .typ::<types::TerminalMenuEvent>()
-        .typ::<types::PaneMenuEvent>()
         .typ::<types::WorkspaceChangedEvent>()
         .typ::<types::WorkspaceSshVerificationRequiredEvent>()
         .typ::<types::TransferQueueChangedEvent>()

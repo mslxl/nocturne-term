@@ -3,7 +3,7 @@
  * Test content:
  *
  * Feature:
- * Verifies that the main Tauri window Terminal ToolTab ignores terminal pane
+ * Verifies that the main Tauri window Terminal ToolTab ignores terminal session
  * events that belong to another WebView runtime or to a stale backend session.
  *
  * Operation:
@@ -18,7 +18,7 @@
  * Expected:
  * The main window remains responsive, the Terminal ToolTab still has one
  * visible xterm surface, and neither the page body nor the terminal error
- * region displays "tab for pane ... not found" after cross-window terminal
+ * region displays "tab for terminal session ... not found" after cross-window terminal
  * events have been delivered.
  */
 import { spawn } from "node:child_process";
@@ -29,10 +29,10 @@ import { createServer } from "vite";
 import { createIsolatedAppConfigEnv } from "./isolated-app-config.mjs";
 import { test } from "vitest";
 
-test("terminal main window ignores foreign pane events", { timeout: 180_000 }, async () => {
+test("terminal main window ignores foreign session events", { timeout: 180_000 }, async () => {
   const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
   const appPath = requiredEnvPath("TAURI_TEST_APPLICATION");
-  const isolatedAppConfig = await createIsolatedAppConfigEnv("terminal-main-window-ignores-foreign-pane-events");
+  const isolatedAppConfig = await createIsolatedAppConfigEnv("terminal-main-window-ignores-foreign-session-events");
   const nativeDriverPath = optionalEnvPath("TAURI_TEST_NATIVE_DRIVER");
   const nativeDriverPort = process.env.TAURI_TEST_NATIVE_DRIVER_PORT ?? "";
   const driverPort = Number(process.env.TAURI_TEST_DRIVER_PORT ?? "4444");
@@ -83,7 +83,7 @@ test("terminal main window ignores foreign pane events", { timeout: 180_000 }, a
 
     await waitUntil(async () => {
       const state = await mainWindowState();
-      return state.terminalSurfaceVisible && state.xterms === 1 && !state.hasPaneLookupError;
+      return state.terminalSurfaceVisible && state.xterms === 1 && !state.hasSessionLookupError;
     }, async () => `Main Terminal did not start cleanly\n${await pageSummary()}`);
 
     await floatFilesToolTab();
@@ -96,10 +96,10 @@ test("terminal main window ignores foreign pane events", { timeout: 180_000 }, a
       return state.bodyResponsiveMarker === "ok" &&
         state.terminalSurfaceVisible &&
         state.xterms === 1 &&
-        !state.hasPaneLookupError;
-    }, async () => `Main Terminal displayed a foreign pane lookup error\n${await pageSummary()}`);
+        !state.hasSessionLookupError;
+    }, async () => `Main Terminal displayed a foreign session lookup error\n${await pageSummary()}`);
 
-    console.log("tauri terminal main-window foreign pane event unit test passed");
+    console.log("tauri terminal main-window foreign session event unit test passed");
   } finally {
     if (sessionId) {
       await webdriver("DELETE", `/session/${sessionId}`).catch(() => undefined);
@@ -151,17 +151,17 @@ test("terminal main window ignores foreign pane events", { timeout: 180_000 }, a
 
   async function mainWindowState(timeoutMs = 8_000) {
     return await execute(`
-      window.__NOCTURNE_MAIN_FOREIGN_PANE_EVENT_MARKER__ = 'ok';
+      window.__NOCTURNE_MAIN_FOREIGN_SESSION_EVENT_MARKER__ = 'ok';
       const bodyText = document.body?.innerText ?? '';
       const terminalError = document.querySelector('.terminal-error')?.textContent ?? '';
-      const paneLookupPattern = /tab for pane term-\\d+ not found/;
+      const sessionLookupPattern = /tab for terminal session term-\\d+ not found/;
       return {
-        bodyResponsiveMarker: window.__NOCTURNE_MAIN_FOREIGN_PANE_EVENT_MARKER__,
+        bodyResponsiveMarker: window.__NOCTURNE_MAIN_FOREIGN_SESSION_EVENT_MARKER__,
         terminalSurfaceVisible: document.querySelector('.terminal-surface')?.getBoundingClientRect().height > 0,
         xterms: document.querySelectorAll('.xterm').length,
         terminalError,
         bodyText: bodyText.slice(0, 1200),
-        hasPaneLookupError: paneLookupPattern.test(bodyText) || paneLookupPattern.test(terminalError),
+        hasSessionLookupError: sessionLookupPattern.test(bodyText) || sessionLookupPattern.test(terminalError),
       };
     `, [], timeoutMs);
   }

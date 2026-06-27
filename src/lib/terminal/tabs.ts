@@ -6,7 +6,6 @@ import { commands, type ConfigError, type TerminalSessionInfo, type TerminalSett
 import { unwrapCommand } from "./commands";
 import { isTerminalSessionInactiveMessage } from "./errors";
 import { orderedTerminalOutputChunks } from "./output";
-import { createPaneLeaf, type PaneTree } from "./panes";
 import { terminalScrollbarLineFromPointer, terminalScrollbarState, terminalWheelScrollResult } from "./scrollbar";
 import { xtermOptions } from "./settings";
 import { normalizeTerminalFitSize, normalizeTerminalSessionSize, type TerminalFitSize } from "./sizes";
@@ -26,6 +25,7 @@ export type TerminalExitEvent = {
   signal: string | null;
   error?: ConfigError | null;
 };
+
 export type TerminalTransportStateEvent = {
   session_id: string;
   state: TerminalTransportState;
@@ -49,6 +49,7 @@ type TerminalScrollbarDom = {
   track: HTMLDivElement;
   handle: HTMLDivElement;
 };
+
 export type TerminalView = {
   id: string;
   container: HTMLDivElement;
@@ -68,18 +69,10 @@ export type TerminalView = {
   tooSmall: boolean;
   constraining: boolean;
 };
-export type TerminalTab = {
-  id: string;
-  title: string;
-  customTitle: string;
-  activePaneId: string;
-  panes: TerminalPane[];
-  tree: PaneTree;
-};
 
-export type TerminalPane = {
+export type TerminalSession = {
   id: string;
-  tabId: string;
+  tabId?: string;
   title: string;
   baseTitle: string;
   command: string;
@@ -126,6 +119,14 @@ export type TerminalPane = {
   wheelRemainder: number;
 };
 
+export type TerminalTab = {
+  id: string;
+  title: string;
+  customTitle: string;
+  sessionId: string;
+  session: TerminalSession;
+};
+
 const resizeDelayMs = 24;
 let nextTerminalTabSequence = 0;
 
@@ -134,44 +135,44 @@ type TerminalTabContext = {
   tabs: () => TerminalTab[];
   setGlobalError: (message: string) => void;
   notifySelectionChange?: () => void;
-  notifyTitleChange?: (paneId: string, title: string) => void;
-  notifyPaneTitleRefresh?: () => void;
-  requestReconnect?: (paneId: string) => void;
+  notifyTitleChange?: (sessionId: string, title: string) => void;
+  notifySessionTitleRefresh?: () => void;
+  requestReconnect?: (sessionId: string) => void;
 };
 
 export function createTerminalTab(info: TerminalSessionInfo): TerminalTab {
-  const tabId = nextTerminalTabId();
-  const pane = createTerminalPane(info, tabId);
-  return {
-    id: tabId,
-    title: pane.title,
+  const session = createTerminalSession(info);
+  const tab = {
+    id: nextTerminalTabId(),
+    title: session.title,
     customTitle: "",
-    activePaneId: pane.id,
-    panes: [pane],
-    tree: createPaneLeaf(pane.id),
+    sessionId: session.id,
+    session,
   };
+  refreshTerminalTabTitle(tab);
+  return tab;
 }
 
-export function createTerminalTabFromPane(pane: TerminalPane): TerminalTab {
-  const tabId = nextTerminalTabId();
-  pane.tabId = tabId;
-  return {
-    id: tabId,
-    title: pane.title,
+export function createTerminalTabFromSession(session: TerminalSession): TerminalTab {
+  session.tabId = session.tabId ?? "";
+  const tab = {
+    id: nextTerminalTabId(),
+    title: session.title,
     customTitle: "",
-    activePaneId: pane.id,
-    panes: [pane],
-    tree: createPaneLeaf(pane.id),
+    sessionId: session.id,
+    session,
   };
+  refreshTerminalTabTitle(tab);
+  return tab;
 }
 
-export function createTerminalPane(info: TerminalSessionInfo, tabId: string): TerminalPane {
+export function createTerminalSession(info: TerminalSessionInfo): TerminalSession {
   const size = normalizeTerminalSessionSize(info);
   const initialOutput = initialTransportOutput(info);
   const status = terminalStatusFromTransportState(info.transport_state);
   return {
     id: info.id,
-    tabId,
+    tabId: "",
     title: info.cwd ?? info.title,
     baseTitle: info.cwd ?? info.title,
     command: info.command,
@@ -206,48 +207,44 @@ export function createTerminalPane(info: TerminalSessionInfo, tabId: string): Te
   };
 }
 
-export function retargetTerminalPaneSession(pane: TerminalPane, info: TerminalSessionInfo) {
+export function retargetTerminalSession(session: TerminalSession, info: TerminalSessionInfo) {
   const size = normalizeTerminalSessionSize(info);
   const initialOutput = initialTransportOutput(info);
-  if (pane.resizeTimer !== null) {
-    window.clearTimeout(pane.resizeTimer);
-  }
-  if (pane.outputFrame !== null) {
-    window.cancelAnimationFrame(pane.outputFrame);
-  }
-  pane.id = info.id;
-  pane.title = info.cwd ?? info.title;
-  pane.baseTitle = info.cwd ?? info.title;
-  pane.command = info.command;
-  pane.currentDirectory = info.cwd ?? "";
-  pane.titleOverride = "";
-  pane.status = terminalStatusFromTransportState(info.transport_state);
-  pane.readOnly = pane.status === "disconnected";
-  pane.agentBacked = info.agent !== null;
-  pane.agentSessionId = info.agent?.session_id ?? "";
-  pane.reconnectPending = false;
-  pane.everConnected = info.transport_state === "connected" || pane.status === "disconnected";
-  pane.reconnectTrust = {};
-  pane.exitText = pane.status === "disconnected" ? "History" : "";
-  pane.error = "";
-  pane.decoder = new TextDecoder();
-  pane.outputQueue = [];
-  pane.replayBuffer = [];
-  pane.outputFrame = null;
-  pane.nextOutputSequence = 0n;
-  pane.pendingOutput = new Map();
-  pane.resizeTimer = null;
-  pane.mountPromise = null;
-  pane.lastCols = size.cols;
-  pane.lastRows = size.rows;
-  pane.lastPixelWidth = size.pixelWidth;
-  pane.lastPixelHeight = size.pixelHeight;
-  pane.wheelRemainder = 0;
+  if (session.resizeTimer !== null) window.clearTimeout(session.resizeTimer);
+  if (session.outputFrame !== null) window.cancelAnimationFrame(session.outputFrame);
+  session.id = info.id;
+  session.title = info.cwd ?? info.title;
+  session.baseTitle = info.cwd ?? info.title;
+  session.command = info.command;
+  session.currentDirectory = info.cwd ?? "";
+  session.titleOverride = "";
+  session.status = terminalStatusFromTransportState(info.transport_state);
+  session.readOnly = session.status === "disconnected";
+  session.agentBacked = info.agent !== null;
+  session.agentSessionId = info.agent?.session_id ?? "";
+  session.reconnectPending = false;
+  session.everConnected = info.transport_state === "connected" || session.status === "disconnected";
+  session.reconnectTrust = {};
+  session.exitText = session.status === "disconnected" ? "History" : "";
+  session.error = "";
+  session.decoder = new TextDecoder();
+  session.outputQueue = [];
+  session.replayBuffer = [];
+  session.outputFrame = null;
+  session.nextOutputSequence = 0n;
+  session.pendingOutput = new Map();
+  session.resizeTimer = null;
+  session.mountPromise = null;
+  session.lastCols = size.cols;
+  session.lastRows = size.rows;
+  session.lastPixelWidth = size.pixelWidth;
+  session.lastPixelHeight = size.pixelHeight;
+  session.wheelRemainder = 0;
   if (initialOutput) {
-    if (pane.term) {
-      writeTerminalPaneViews(pane, `\r\n${initialOutput}`);
+    if (session.term) {
+      writeTerminalSessionViews(session, `\r\n${initialOutput}`);
     } else {
-      pane.outputQueue.push(initialOutput);
+      session.outputQueue.push(initialOutput);
     }
   }
 }
@@ -286,8 +283,8 @@ export function refreshTerminalTabTitle(tab: TerminalTab) {
   refreshTerminalTabTitleModel(tab);
 }
 
-export function terminalPaneById(tab: TerminalTab, paneId: string): TerminalPane | undefined {
-  return tab.panes.find((pane) => pane.id === paneId);
+export function terminalSessionById(tab: TerminalTab, sessionId: string): TerminalSession | undefined {
+  return tab.session.id === sessionId || tab.id === sessionId || tab.sessionId === sessionId ? tab.session : undefined;
 }
 
 function nextTerminalTabId(): string {
@@ -312,36 +309,42 @@ export function measureTerminalFit(
 }
 
 export function createTerminalTabController(context: TerminalTabContext) {
-  const tabById = (id: string) => context.tabs().find((item) => item.id === id);
-  const paneById = (id: string) => context.tabs().flatMap((tab) => tab.panes).find((item) => item.id === id);
+  const tabById = (id: string) => context.tabs().find((item) => item.id === id || item.session.id === id);
+  const sessionById = (id: string) => tabById(id)?.session;
+
+  function refreshTitleForSession(session: TerminalSession) {
+    const tab = tabById(session.id);
+    if (tab) refreshTerminalTabTitle(tab);
+    context.notifySessionTitleRefresh?.();
+  }
 
   async function mountTerminal(id: string, viewId = id) {
     const config = context.settings();
     if (!config) throw new Error("Terminal settings are not loaded");
-    const pane = paneById(id);
-    const container = pane?.viewContainers.get(viewId) ?? (viewId === id ? pane?.container : undefined);
-    if (!pane || !container) return;
-    if (pane.mountPromise) await pane.mountPromise;
-    const existingView = pane.views.get(viewId);
+    const session = sessionById(id);
+    const container = session?.viewContainers.get(viewId) ?? (viewId === id ? session?.container : undefined);
+    if (!session || !container) return;
+    if (session.mountPromise) await session.mountPromise;
+    const existingView = session.views.get(viewId);
     if (existingView) {
       existingView.container = container;
-      attachMountedTerminal(pane, existingView, () => scheduleFit(pane.id, viewId));
+      attachMountedTerminal(session, existingView, () => scheduleFit(session.id, viewId));
       return;
     }
 
-    pane.mountPromise = mountTerminalOnce(pane, config, container, viewId);
+    session.mountPromise = mountTerminalOnce(session, config, container, viewId);
     try {
-      await pane.mountPromise;
+      await session.mountPromise;
     } finally {
-      pane.mountPromise = null;
+      session.mountPromise = null;
     }
   }
 
-  async function mountTerminalOnce(pane: TerminalPane, config: TerminalSettings, container: HTMLDivElement, viewId: string) {
+  async function mountTerminalOnce(session: TerminalSession, config: TerminalSettings, container: HTMLDivElement, viewId: string) {
     const term = new Terminal({
       ...xtermOptions(config),
-      cols: pane.lastCols,
-      rows: pane.lastRows,
+      cols: session.lastCols,
+      rows: session.lastRows,
     });
     const fit = new FitAddon();
     const search = new SearchAddon({ highlightLimit: 1000 }) as TerminalSearchAddon;
@@ -368,104 +371,104 @@ export function createTerminalTabController(context: TerminalTabContext) {
         dataDisposables: [],
         wheelRemainder: 0,
         lastFitSize: {
-          cols: pane.lastCols,
-          rows: pane.lastRows,
-          pixelWidth: pane.lastPixelWidth,
-          pixelHeight: pane.lastPixelHeight,
+          cols: session.lastCols,
+          rows: session.lastRows,
+          pixelWidth: session.lastPixelWidth,
+          pixelHeight: session.lastPixelHeight,
         },
         fitted: false,
         tooSmall: false,
         constraining: false,
       };
-      pane.views.set(viewId, view);
-      setActivePaneView(pane, view);
-      attachTerminalScrollbar(pane, view);
-      fitTerminal(pane, view);
+      session.views.set(viewId, view);
+      setActiveSessionView(session, view);
+      attachTerminalScrollbar(session, view);
+      fitTerminal(session, view);
 
       if (config.renderer === "webgl") {
         const { WebglAddon } = await import("@xterm/addon-webgl");
         const webgl = new WebglAddon(true);
         term.loadAddon(webgl);
         view.webgl = webgl;
-        pane.webgl = webgl;
+        session.webgl = webgl;
         stabilizeWebglTerminal(term, webgl);
       }
 
-      if (pane.replayBuffer.length) {
-        term.write(pane.replayBuffer.join(""));
+      if (session.replayBuffer.length) {
+        term.write(session.replayBuffer.join(""));
       }
-      if (pane.outputQueue.length) {
-        scheduleOutputFlush(pane);
+      if (session.outputQueue.length) {
+        scheduleOutputFlush(session);
       }
 
       view.dataDisposables = [
-        attachTerminalScrollSync(pane, view),
+        attachTerminalScrollSync(session, view),
         term.onTitleChange((title) => {
-          pane.titleOverride = title;
-          refreshPaneTitle(pane);
+          session.titleOverride = title;
+          refreshTitleForSession(session);
           const trimmed = title.trim();
-          if (trimmed && pane.agentBacked && !pane.readOnly) {
-            context.notifyTitleChange?.(pane.id, trimmed);
+          if (trimmed && session.agentBacked && !session.readOnly) {
+            context.notifyTitleChange?.(session.id, trimmed);
           }
         }),
         term.parser.registerOscHandler(7, (data) => {
-          pane.currentDirectory = parseOsc7Directory(data);
-          refreshPaneTitle(pane);
+          session.currentDirectory = parseOsc7Directory(data);
+          refreshTitleForSession(session);
           return true;
         }),
         term.onData((data) => {
-          setActivePaneView(pane, view);
-          if (pane.readOnly) return;
-          if (pane.reconnectPending) {
-            markReconnectRequested(pane.id);
-            context.requestReconnect?.(pane.id);
-            return;
-          }
-          void unwrapCommand(commands.writeTerminal({ session_id: pane.id, data })).catch((error) => {
-            markWriteFailure(pane.id, error instanceof Error ? error.message : String(error));
+          setActiveSessionView(session, view);
+          handleTerminalSessionInput(session, data, {
+            markReconnectRequested,
+            requestReconnect: context.requestReconnect,
+            writeTerminal: (input) => {
+              void unwrapCommand(commands.writeTerminal({ session_id: session.id, data: input })).catch((error) => {
+                markWriteFailure(session.id, error instanceof Error ? error.message : String(error));
+              });
+            },
           });
         }),
         term.onResize(() => {
-          fitTerminal(pane, view);
-          scheduleResize(pane.id);
+          fitTerminal(session, view);
+          scheduleResize(session.id);
         }),
         term.onSelectionChange(() => {
-          setActivePaneView(pane, view);
+          setActiveSessionView(session, view);
           context.notifySelectionChange?.();
         }),
       ];
-      view.resizeObserver = new ResizeObserver(() => scheduleFit(pane.id, view.id));
+      view.resizeObserver = new ResizeObserver(() => scheduleFit(session.id, view.id));
       view.resizeObserver.observe(container);
-      scheduleFit(pane.id, view.id);
+      scheduleFit(session.id, view.id);
       requestAnimationFrame(() => {
-        fitTerminal(pane, view);
+        fitTerminal(session, view);
         if (view.webgl) stabilizeWebglTerminal(term, view.webgl);
       });
       term.focus();
     } catch (error) {
       term.dispose();
-      pane.views.delete(viewId);
-      if (pane.term === term) {
-        pane.term = undefined;
-        pane.fit = undefined;
-        pane.search = undefined;
-        pane.serialize = undefined;
-        pane.image = undefined;
-        pane.webgl = undefined;
+      session.views.delete(viewId);
+      if (session.term === term) {
+        session.term = undefined;
+        session.fit = undefined;
+        session.search = undefined;
+        session.serialize = undefined;
+        session.image = undefined;
+        session.webgl = undefined;
       }
-      markPaneError(pane.id, error instanceof Error ? error.message : String(error));
+      markSessionError(session.id, error instanceof Error ? error.message : String(error));
     }
   }
 
   function scheduleFit(id: string, viewId?: string) {
-    const pane = paneById(id);
-    if (!pane) return;
+    const session = sessionById(id);
+    if (!session) return;
     requestAnimationFrame(() => {
       const views = viewId
-        ? [pane.views.get(viewId)].filter((view): view is TerminalView => view !== undefined)
-        : Array.from(pane.views.values());
+        ? [session.views.get(viewId)].filter((view): view is TerminalView => view !== undefined)
+        : Array.from(session.views.values());
       for (const view of views) {
-        fitTerminal(pane, view);
+        fitTerminal(session, view);
         if (view.webgl) stabilizeWebglTerminal(view.term, view.webgl);
       }
       scheduleResize(id);
@@ -477,220 +480,210 @@ export function createTerminalTabController(context: TerminalTabContext) {
     });
   }
 
-  function refreshPanePresentation(id: string) {
-    const pane = paneById(id);
-    if (!pane) return;
-    refreshTerminalPanePresentation(pane);
+  function refreshSessionPresentation(id: string) {
+    const session = sessionById(id);
+    if (!session) return;
+    refreshTerminalSessionPresentation(session);
   }
 
   function scheduleResize(id: string) {
-    const pane = paneById(id);
-    if (!pane || pane.status !== "running") return;
+    const session = sessionById(id);
+    if (!session || session.status !== "running") return;
     const result = computeTerminalMirrorPtySize({
-      views: terminalViewMeasurements(pane),
+      views: sessionViewMeasurements(session),
       lastValidSize: {
-        cols: pane.lastCols,
-        rows: pane.lastRows,
-        pixelWidth: pane.lastPixelWidth,
-        pixelHeight: pane.lastPixelHeight,
+        cols: session.lastCols,
+        rows: session.lastRows,
+        pixelWidth: session.lastPixelWidth,
+        pixelHeight: session.lastPixelHeight,
       },
       lastSentSize: {
-        cols: pane.lastCols,
-        rows: pane.lastRows,
-        pixelWidth: pane.lastPixelWidth,
-        pixelHeight: pane.lastPixelHeight,
+        cols: session.lastCols,
+        rows: session.lastRows,
+        pixelWidth: session.lastPixelWidth,
+        pixelHeight: session.lastPixelHeight,
       },
     });
-    updateTerminalViewSizeState(pane, result.tooSmallViewIds, result.constrainingViewIds);
+    updateTerminalViewSizeState(session, result.tooSmallViewIds, result.constrainingViewIds);
     if (!result.shouldSendResize) return;
     const normalized = normalizeTerminalFitSize(result.size, {
-      cols: pane.lastCols,
-      rows: pane.lastRows,
-      pixelWidth: pane.lastPixelWidth,
-      pixelHeight: pane.lastPixelHeight,
+      cols: session.lastCols,
+      rows: session.lastRows,
+      pixelWidth: session.lastPixelWidth,
+      pixelHeight: session.lastPixelHeight,
     });
     if (
-      pane.lastCols === normalized.cols &&
-      pane.lastRows === normalized.rows &&
-      pane.lastPixelWidth === normalized.pixelWidth &&
-      pane.lastPixelHeight === normalized.pixelHeight
+      session.lastCols === normalized.cols &&
+      session.lastRows === normalized.rows &&
+      session.lastPixelWidth === normalized.pixelWidth &&
+      session.lastPixelHeight === normalized.pixelHeight
     ) {
       return;
     }
-    pane.lastCols = normalized.cols;
-    pane.lastRows = normalized.rows;
-    pane.lastPixelWidth = normalized.pixelWidth;
-    pane.lastPixelHeight = normalized.pixelHeight;
-    if (pane.resizeTimer !== null) window.clearTimeout(pane.resizeTimer);
-    pane.resizeTimer = window.setTimeout(() => {
-      pane.resizeTimer = null;
+    session.lastCols = normalized.cols;
+    session.lastRows = normalized.rows;
+    session.lastPixelWidth = normalized.pixelWidth;
+    session.lastPixelHeight = normalized.pixelHeight;
+    if (session.resizeTimer !== null) window.clearTimeout(session.resizeTimer);
+    session.resizeTimer = window.setTimeout(() => {
+      session.resizeTimer = null;
       void unwrapCommand(
         commands.resizeTerminal({
           session_id: id,
-          cols: pane.lastCols,
-          rows: pane.lastRows,
-          pixel_width: pane.lastPixelWidth,
-          pixel_height: pane.lastPixelHeight,
+          cols: session.lastCols,
+          rows: session.lastRows,
+          pixel_width: session.lastPixelWidth,
+          pixel_height: session.lastPixelHeight,
         }),
       ).catch((error) => markWriteFailure(id, error instanceof Error ? error.message : String(error)));
     }, resizeDelayMs);
   }
 
   function enqueueOutput(event: TerminalOutputEvent) {
-    const pane = paneById(event.session_id);
-    if (!pane) return;
-    const chunks = orderedTerminalOutputChunks(pane, event, pane.decoder);
+    const session = sessionById(event.session_id);
+    if (!session) return;
+    const chunks = orderedTerminalOutputChunks(session, event, session.decoder);
     if (!chunks.length) return;
-    pane.outputQueue.push(...chunks);
-    scheduleOutputFlush(pane);
+    if (updateTerminalSessionDirectoryFromOutput(session, chunks)) refreshTitleForSession(session);
+    session.outputQueue.push(...chunks);
+    scheduleOutputFlush(session);
   }
 
   function markExited(event: TerminalExitEvent) {
-    const pane = paneById(event.session_id);
-    if (!pane) return;
-    if (pane.everConnected && event.signal && event.signal !== "closed") {
-      markDisconnected(pane, disconnectMessage(event.signal));
+    const session = sessionById(event.session_id);
+    if (!session) return;
+    if (session.everConnected && event.signal && event.signal !== "closed") {
+      markDisconnected(session, disconnectMessage(event.signal));
       return;
     }
-    if (pane.status === "starting" && event.signal) {
-      pane.status = "error";
-      pane.error = event.signal;
-      writeTerminalPaneViews(pane, `\r\n[Connection stopped: ${event.signal}]\r\n`);
+    if (session.status === "starting" && event.signal) {
+      session.status = "error";
+      session.error = event.signal;
+      writeTerminalSessionViews(session, `\r\n[Connection stopped: ${event.signal}]\r\n`);
       return;
     }
-    if (pane.status === "running" && event.signal && event.signal !== "closed") {
-      markDisconnected(pane, event.signal);
+    if (session.status === "running" && event.signal && event.signal !== "closed") {
+      markDisconnected(session, event.signal);
       return;
     }
-    if (pane.status === "error") {
-      pane.error = event.signal ?? pane.error;
-      writeTerminalPaneViews(pane, `\r\n[Terminal error: ${pane.error || "connection failed"}]\r\n`);
+    if (session.status === "error") {
+      session.error = event.signal ?? session.error;
+      writeTerminalSessionViews(session, `\r\n[Terminal error: ${session.error || "connection failed"}]\r\n`);
       return;
     }
-    pane.status = "exited";
-    pane.reconnectPending = false;
-    pane.exitText = event.signal ? `Signal: ${event.signal}` : `Exit ${event.exit_code ?? "unknown"}`;
-    pane.titleOverride = "";
-    refreshPaneTitle(pane);
-    writeTerminalPaneViews(pane, `\r\n[Process completed: ${pane.exitText}]\r\n`);
+    session.status = "exited";
+    session.reconnectPending = false;
+    session.exitText = event.signal ? `Signal: ${event.signal}` : `Exit ${event.exit_code ?? "unknown"}`;
+    session.titleOverride = "";
+    refreshTitleForSession(session);
+    writeTerminalSessionViews(session, `\r\n[Process completed: ${session.exitText}]\r\n`);
   }
 
   function markTransportState(event: TerminalTransportStateEvent) {
-    const pane = paneById(event.session_id);
-    if (!pane) return;
+    const session = sessionById(event.session_id);
+    if (!session) return;
     const line = `[${transportStateLabel(event.state)}]\r\n`;
-    writeTerminalPaneViews(pane, line);
+    writeTerminalSessionViews(session, line);
     if (event.state === "failed") {
-      if (pane.everConnected) {
+      if (session.everConnected) {
         return;
       }
-      pane.status = "error";
-      pane.reconnectPending = false;
+      session.status = "error";
+      session.reconnectPending = false;
       return;
     }
     if (event.state === "connected") {
-      pane.status = "running";
-      pane.reconnectPending = false;
-      pane.everConnected = true;
+      session.status = "running";
+      session.reconnectPending = false;
+      session.everConnected = true;
     }
   }
 
-  function markPaneError(id: string, message: string) {
-    const pane = paneById(id);
-    if (!pane) {
-      return;
-    }
+  function markSessionError(id: string, message: string) {
+    const session = sessionById(id);
+    if (!session) return;
     if (isTerminalSessionInactiveMessage(message)) {
-      markDisconnected(pane, "connection is no longer active");
+      markDisconnected(session, "connection is no longer active");
       return;
     }
-    pane.status = "error";
-    pane.reconnectPending = false;
-    pane.error = message;
-    writeTerminalPaneViews(pane, `\r\n[Terminal error: ${message}]\r\n`);
+    session.status = "error";
+    session.reconnectPending = false;
+    session.error = message;
+    writeTerminalSessionViews(session, `\r\n[Terminal error: ${message}]\r\n`);
   }
 
   function markWriteFailure(id: string, message: string) {
-    const pane = paneById(id);
-    if (!pane) {
-      return;
-    }
+    const session = sessionById(id);
+    if (!session) return;
     if (isTerminalSessionInactiveMessage(message)) {
-      markDisconnected(pane, "connection is no longer active");
+      markDisconnected(session, "connection is no longer active");
       return;
     }
-    markPaneError(id, message);
+    markSessionError(id, message);
   }
 
-  function markDisconnected(pane: TerminalPane, message: string) {
-    if (pane.reconnectPending) return;
-    pane.status = "disconnected";
-    pane.reconnectPending = true;
-    pane.exitText = message;
-    pane.error = "";
-    writeTerminalPaneViews(pane, `\r\n[Connection disconnected: ${message}]\r\n[Press any key to reconnect]\r\n`);
+  function markDisconnected(session: TerminalSession, message: string) {
+    if (session.reconnectPending) return;
+    session.status = "disconnected";
+    session.reconnectPending = true;
+    session.exitText = message;
+    session.error = "";
+    writeTerminalSessionViews(session, `\r\n[Connection disconnected: ${message}]\r\n[Press any key to reconnect]\r\n`);
   }
 
   function markReconnectUnavailable(id: string, message: string) {
-    const pane = paneById(id);
-    if (!pane) return;
-    pane.status = "error";
-    pane.reconnectPending = false;
-    pane.error = message;
-    writeTerminalPaneViews(pane, `\r\n[Reconnect failed: ${message}]\r\n`);
+    const session = sessionById(id);
+    if (!session) return;
+    session.status = "error";
+    session.reconnectPending = false;
+    session.error = message;
+    writeTerminalSessionViews(session, `\r\n[Reconnect failed: ${message}]\r\n`);
   }
 
   function markReconnectRequested(id: string) {
-    const pane = paneById(id);
-    if (!pane || !pane.reconnectPending) return;
-    pane.status = "starting";
-    pane.reconnectPending = false;
-    pane.exitText = "Reconnecting";
-    pane.error = "";
-    writeTerminalPaneViews(pane, "\r\n[Reconnecting]\r\n");
+    const session = sessionById(id);
+    if (!session || !session.reconnectPending) return;
+    session.status = "starting";
+    session.reconnectPending = false;
+    session.exitText = "Reconnecting";
+    session.error = "";
+    writeTerminalSessionViews(session, "\r\n[Reconnecting]\r\n");
   }
 
   function markConnectionError(id: string, message: string) {
-    markPaneError(id, message);
+    markSessionError(id, message);
   }
 
   function markConnectionPrompt(id: string, message: string) {
-    const pane = paneById(id);
-    if (!pane) return;
-    pane.status = "exited";
-    pane.reconnectPending = false;
-    pane.exitText = message;
-    pane.error = "";
-    writeTerminalPaneViews(pane, `\r\n[Connection paused: ${message}]\r\n`);
+    const session = sessionById(id);
+    if (!session) return;
+    session.status = "exited";
+    session.reconnectPending = false;
+    session.exitText = message;
+    session.error = "";
+    writeTerminalSessionViews(session, `\r\n[Connection paused: ${message}]\r\n`);
   }
 
   function markConnectionCancelled(id: string, message: string) {
-    const pane = paneById(id);
-    if (!pane) return;
-    pane.status = "error";
-    pane.reconnectPending = false;
-    pane.error = message;
-    pane.exitText = message;
-    writeTerminalPaneViews(pane, `\r\n[Connection canceled: ${message}]\r\n`);
+    const session = sessionById(id);
+    if (!session) return;
+    session.status = "error";
+    session.reconnectPending = false;
+    session.error = message;
+    session.exitText = message;
+    writeTerminalSessionViews(session, `\r\n[Connection canceled: ${message}]\r\n`);
   }
 
-  function refreshPaneTitle(pane: TerminalPane) {
-    pane.title = derivePaneTitle(pane);
-    const tab = tabById(pane.tabId);
-    if (tab && tab.activePaneId === pane.id) refreshTerminalTabTitle(tab);
-    context.notifyPaneTitleRefresh?.();
-  }
-
-  function scheduleOutputFlush(pane: TerminalPane) {
-    if (pane.views.size === 0 || pane.outputFrame !== null) return;
-    pane.outputFrame = requestAnimationFrame(() => {
-      pane.outputFrame = null;
-      if (pane.views.size === 0 || !pane.outputQueue.length) return;
-      const text = pane.outputQueue.join("");
-      pane.outputQueue = [];
-      pane.replayBuffer.push(text);
-      trimReplayBuffer(pane);
-      for (const view of pane.views.values()) {
+  function scheduleOutputFlush(session: TerminalSession) {
+    if (session.views.size === 0 || session.outputFrame !== null) return;
+    session.outputFrame = requestAnimationFrame(() => {
+      session.outputFrame = null;
+      if (session.views.size === 0 || !session.outputQueue.length) return;
+      const text = session.outputQueue.join("");
+      session.outputQueue = [];
+      session.replayBuffer.push(text);
+      trimReplayBuffer(session);
+      for (const view of session.views.values()) {
         view.term.write(text);
       }
     });
@@ -705,12 +698,47 @@ export function createTerminalTabController(context: TerminalTabContext) {
     markReconnectUnavailable,
     markTransportState,
     mountTerminal,
-    refreshPanePresentation,
+    refreshSessionPresentation,
     scheduleFit,
   };
 }
 
-function attachMountedTerminal(pane: TerminalPane, view: TerminalView, scheduleFit: () => void) {
+export function handleTerminalSessionInput(
+  session: Pick<TerminalSession, "id" | "readOnly" | "reconnectPending">,
+  data: string,
+  callbacks: {
+    markReconnectRequested?: (sessionId: string) => void;
+    requestReconnect?: (sessionId: string) => void;
+    writeTerminal: (data: string) => void;
+  },
+) {
+  if (session.readOnly) return;
+  if (session.reconnectPending) {
+    callbacks.markReconnectRequested?.(session.id);
+    callbacks.requestReconnect?.(session.id);
+    return;
+  }
+  callbacks.writeTerminal(data);
+}
+
+export function updateTerminalSessionDirectoryFromOutput(
+  session: Pick<TerminalSession, "currentDirectory">,
+  chunks: string[],
+) {
+  const cwd = inferDirectoryFromPromptOutput(chunks.join(""));
+  if (!cwd || cwd === session.currentDirectory) return false;
+  session.currentDirectory = cwd;
+  return true;
+}
+
+function inferDirectoryFromPromptOutput(output: string) {
+  const normalized = output.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "");
+  const matches = [...normalized.matchAll(/(?:^|[\r\n])([A-Za-z]:\\[^\r\n<>:"|?*]+)>/g)];
+  const match = matches.at(-1);
+  return match?.[1]?.trim() ?? "";
+}
+
+function attachMountedTerminal(session: TerminalSession, view: TerminalView, scheduleFit: () => void) {
   const element = view.term.element;
   if (!element) return;
   if (element.parentElement !== view.container) {
@@ -719,52 +747,52 @@ function attachMountedTerminal(pane: TerminalPane, view: TerminalView, scheduleF
     view.resizeObserver = new ResizeObserver(scheduleFit);
     view.resizeObserver.observe(view.container);
   }
-  setActivePaneView(pane, view);
-  attachTerminalScrollbar(pane, view);
-  fitTerminal(pane, view);
+  setActiveSessionView(session, view);
+  attachTerminalScrollbar(session, view);
+  fitTerminal(session, view);
   view.term.refresh(0, Math.max(0, view.term.rows - 1));
 }
 
-export function refreshTerminalPanePresentation(pane: TerminalPane) {
-  for (const view of pane.views.values()) {
-    attachTerminalScrollbar(pane, view);
+export function refreshTerminalSessionPresentation(session: TerminalSession) {
+  for (const view of session.views.values()) {
+    attachTerminalScrollbar(session, view);
     view.term.refresh(0, Math.max(0, view.term.rows - 1));
     updateTerminalScrollbar(view);
   }
 }
 
 export function disposeTerminalTab(tab: TerminalTab) {
-  tab.panes.forEach(disposeTerminalPane);
+  detachTerminalSession(tab.session);
 }
 
-export function disposeTerminalPane(pane: TerminalPane) {
-  detachTerminalPane(pane);
+export function disposeTerminalSession(session: TerminalSession) {
+  detachTerminalSession(session);
 }
 
-export function detachTerminalPane(pane: TerminalPane) {
-  const serialized = pane.serialize?.serialize({ scrollback: 1000 }) ?? "";
-  if (serialized) pane.outputQueue = [serialized, ...pane.outputQueue];
-  if (pane.outputFrame !== null) cancelAnimationFrame(pane.outputFrame);
-  pane.outputFrame = null;
-  if (pane.resizeTimer !== null) window.clearTimeout(pane.resizeTimer);
-  pane.resizeTimer = null;
-  for (const view of pane.views.values()) {
+export function detachTerminalSession(session: TerminalSession) {
+  const serialized = session.serialize?.serialize({ scrollback: 1000 }) ?? "";
+  if (serialized) session.outputQueue = [serialized, ...session.outputQueue];
+  if (session.outputFrame !== null) cancelAnimationFrame(session.outputFrame);
+  session.outputFrame = null;
+  if (session.resizeTimer !== null) window.clearTimeout(session.resizeTimer);
+  session.resizeTimer = null;
+  for (const view of session.views.values()) {
     disposeTerminalView(view);
   }
-  pane.views.clear();
-  pane.viewContainers.clear();
-  pane.term = undefined;
-  pane.fit = undefined;
-  pane.search = undefined;
-  pane.serialize = undefined;
-  pane.image = undefined;
-  pane.webgl = undefined;
-  pane.scrollbarDom = undefined;
-  pane.scrollbarInteraction = undefined;
-  pane.resizeObserver = undefined;
-  pane.dataDisposables = [];
-  pane.container?.replaceChildren();
-  pane.container = undefined;
+  session.views.clear();
+  session.viewContainers.clear();
+  session.term = undefined;
+  session.fit = undefined;
+  session.search = undefined;
+  session.serialize = undefined;
+  session.image = undefined;
+  session.webgl = undefined;
+  session.scrollbarDom = undefined;
+  session.scrollbarInteraction = undefined;
+  session.resizeObserver = undefined;
+  session.dataDisposables = [];
+  session.container?.replaceChildren();
+  session.container = undefined;
 }
 
 function disposeTerminalView(view: TerminalView) {
@@ -781,13 +809,13 @@ function disposeTerminalView(view: TerminalView) {
   view.container.replaceChildren();
 }
 
-function fitTerminal(pane: TerminalPane, view: TerminalView): TerminalFitSize | null {
+function fitTerminal(session: TerminalSession, view: TerminalView): TerminalFitSize | null {
   const dimensions = view.fit.proposeDimensions();
   const fallback = {
-    cols: pane.lastCols,
-    rows: pane.lastRows,
-    pixelWidth: pane.lastPixelWidth,
-    pixelHeight: pane.lastPixelHeight,
+    cols: session.lastCols,
+    rows: session.lastRows,
+    pixelWidth: session.lastPixelWidth,
+    pixelHeight: session.lastPixelHeight,
   };
   const pixels = measureTerminalPixels(view.container);
   const size = normalizeTerminalFitSize(
@@ -804,7 +832,7 @@ function fitTerminal(pane: TerminalPane, view: TerminalView): TerminalFitSize | 
   return size;
 }
 
-function attachTerminalScrollbar(_pane: TerminalPane, view: TerminalView) {
+function attachTerminalScrollbar(_session: TerminalSession, view: TerminalView) {
   const previousRoot = view.scrollbarDom?.root;
   const dom = ensureTerminalScrollbarDom(view);
   if (!dom) {
@@ -822,7 +850,7 @@ function attachTerminalScrollbar(_pane: TerminalPane, view: TerminalView) {
   updateTerminalScrollbar(view);
 }
 
-function attachTerminalScrollSync(_pane: TerminalPane, view: TerminalView): { dispose: () => void } {
+function attachTerminalScrollSync(_session: TerminalSession, view: TerminalView): { dispose: () => void } {
   const term = view.term;
 
   const update = () => updateTerminalScrollbar(view);
@@ -999,23 +1027,23 @@ function attachTerminalScrollbarInteraction(view: TerminalView): { dispose: () =
   };
 }
 
-function setActivePaneView(pane: TerminalPane, view: TerminalView) {
-  pane.term = view.term;
-  pane.fit = view.fit;
-  pane.search = view.search;
-  pane.serialize = view.serialize;
-  pane.image = view.image;
-  pane.webgl = view.webgl;
-  pane.scrollbarDom = view.scrollbarDom;
-  pane.scrollbarInteraction = view.scrollbarInteraction;
-  pane.container = view.container;
-  pane.resizeObserver = view.resizeObserver;
-  pane.dataDisposables = view.dataDisposables;
-  pane.wheelRemainder = view.wheelRemainder;
+function setActiveSessionView(session: TerminalSession, view: TerminalView) {
+  session.term = view.term;
+  session.fit = view.fit;
+  session.search = view.search;
+  session.serialize = view.serialize;
+  session.image = view.image;
+  session.webgl = view.webgl;
+  session.scrollbarDom = view.scrollbarDom;
+  session.scrollbarInteraction = view.scrollbarInteraction;
+  session.container = view.container;
+  session.resizeObserver = view.resizeObserver;
+  session.dataDisposables = view.dataDisposables;
+  session.wheelRemainder = view.wheelRemainder;
 }
 
-function terminalViewMeasurements(pane: TerminalPane): TerminalMirrorViewMeasurement[] {
-  return Array.from(pane.views.values()).map((view) => ({
+function sessionViewMeasurements(session: TerminalSession): TerminalMirrorViewMeasurement[] {
+  return Array.from(session.views.values()).map((view) => ({
     id: view.id,
     visible: view.container.isConnected && view.container.getClientRects().length > 0,
     mounted: view.term.element?.isConnected === true,
@@ -1024,10 +1052,10 @@ function terminalViewMeasurements(pane: TerminalPane): TerminalMirrorViewMeasure
   }));
 }
 
-function updateTerminalViewSizeState(pane: TerminalPane, tooSmallViewIds: string[], constrainingViewIds: string[]) {
+function updateTerminalViewSizeState(session: TerminalSession, tooSmallViewIds: string[], constrainingViewIds: string[]) {
   const tooSmall = new Set(tooSmallViewIds);
   const constraining = new Set(constrainingViewIds);
-  for (const view of pane.views.values()) {
+  for (const view of session.views.values()) {
     view.tooSmall = tooSmall.has(view.id);
     view.constraining = constraining.has(view.id);
     view.container.toggleAttribute("data-terminal-too-small", view.tooSmall);
@@ -1035,27 +1063,27 @@ function updateTerminalViewSizeState(pane: TerminalPane, tooSmallViewIds: string
   }
 }
 
-function trimReplayBuffer(pane: TerminalPane) {
+function trimReplayBuffer(session: TerminalSession) {
   const maxReplayChars = 500_000;
   let total = 0;
   const retained: string[] = [];
-  for (let index = pane.replayBuffer.length - 1; index >= 0; index -= 1) {
-    const chunk = pane.replayBuffer[index];
+  for (let index = session.replayBuffer.length - 1; index >= 0; index -= 1) {
+    const chunk = session.replayBuffer[index];
     if (total + chunk.length > maxReplayChars && retained.length > 0) break;
     retained.push(chunk);
     total += chunk.length;
   }
-  pane.replayBuffer = retained.reverse();
+  session.replayBuffer = retained.reverse();
 }
 
-function writeTerminalPaneViews(pane: TerminalPane, text: string) {
-  if (pane.views.size === 0) {
-    pane.outputQueue.push(text);
+function writeTerminalSessionViews(session: TerminalSession, text: string) {
+  if (session.views.size === 0) {
+    session.outputQueue.push(text);
     return;
   }
-  pane.replayBuffer.push(text);
-  trimReplayBuffer(pane);
-  for (const view of pane.views.values()) {
+  session.replayBuffer.push(text);
+  trimReplayBuffer(session);
+  for (const view of session.views.values()) {
     view.term.write(text);
   }
 }
@@ -1088,21 +1116,6 @@ function refreshWebglTerminal(term: Terminal, webgl: WebglTerminalAddon) {
   term.clearTextureAtlas();
   term.refresh(0, term.rows - 1);
   renderService?.refreshRows?.(0, term.rows - 1, true);
-}
-
-function derivePaneTitle(pane: TerminalPane): string {
-  const programTitle = pane.titleOverride.trim();
-  if (programTitle) return programTitle;
-
-  const currentDirectory = pane.currentDirectory.trim();
-  if (currentDirectory) {
-    const leaf = currentDirectory.replace(/\\/g, "/").replace(/\/+$/, "").split("/").filter(Boolean).pop();
-    if (leaf) return leaf;
-    return currentDirectory;
-  }
-
-  if (pane.command.trim()) return pane.command;
-  return pane.baseTitle || "Session";
 }
 
 function parseOsc7Directory(data: string): string {

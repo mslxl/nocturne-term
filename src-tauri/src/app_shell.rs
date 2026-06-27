@@ -20,9 +20,8 @@ use crate::{
     error::{invalid_error, Result},
     terminal,
     types::{
-        AppMenuPopupInput, AppMenuRoot, PaneContextMenuInput, PaneMenuAction, PaneMenuEvent,
-        TabBarContextMenuInput, TabBarOrientation, TerminalMenuCommand, TerminalMenuEvent,
-        TerminalMenuStateInput,
+        AppMenuPopupInput, AppMenuRoot, TabBarContextMenuInput, TabBarOrientation,
+        TerminalMenuCommand, TerminalMenuEvent, TerminalMenuStateInput,
     },
     workspace,
 };
@@ -49,10 +48,6 @@ const TAB_BAR_ORIENTATION_VERTICAL_RIGHT: &str = "terminal.tab_bar_orientation.v
 const MENU_TERMINAL_PREFIX: &str = "terminal.menu.";
 const MENU_NEW_WINDOW: &str = "terminal.menu.new_window";
 const MENU_NEW_TAB: &str = "terminal.menu.new_tab";
-const MENU_SPLIT_RIGHT: &str = "terminal.menu.split_right";
-const MENU_SPLIT_LEFT: &str = "terminal.menu.split_left";
-const MENU_SPLIT_DOWN: &str = "terminal.menu.split_down";
-const MENU_SPLIT_UP: &str = "terminal.menu.split_up";
 const MENU_CLOSE: &str = "terminal.menu.close";
 const MENU_CLOSE_TAB: &str = "terminal.menu.close_tab";
 const MENU_CLOSE_WINDOW: &str = "terminal.menu.close_window";
@@ -89,27 +84,8 @@ const MENU_TOGGLE_FULL_SCREEN: &str = "terminal.menu.toggle_full_screen";
 const MENU_SHOW_PREVIOUS_TAB: &str = "terminal.menu.show_previous_tab";
 const MENU_SHOW_NEXT_TAB: &str = "terminal.menu.show_next_tab";
 const MENU_MOVE_TAB_TO_NEW_WINDOW: &str = "terminal.menu.move_tab_to_new_window";
-const MENU_ZOOM_SPLIT: &str = "terminal.menu.zoom_split";
-const MENU_SELECT_PREVIOUS_SPLIT: &str = "terminal.menu.select_previous_split";
-const MENU_SELECT_NEXT_SPLIT: &str = "terminal.menu.select_next_split";
-const MENU_SELECT_SPLIT_LEFT: &str = "terminal.menu.select_split_left";
-const MENU_SELECT_SPLIT_RIGHT: &str = "terminal.menu.select_split_right";
-const MENU_SELECT_SPLIT_UP: &str = "terminal.menu.select_split_up";
-const MENU_SELECT_SPLIT_DOWN: &str = "terminal.menu.select_split_down";
-const MENU_RESIZE_SPLIT_LEFT: &str = "terminal.menu.resize_split_left";
-const MENU_RESIZE_SPLIT_RIGHT: &str = "terminal.menu.resize_split_right";
-const MENU_RESIZE_SPLIT_UP: &str = "terminal.menu.resize_split_up";
-const MENU_RESIZE_SPLIT_DOWN: &str = "terminal.menu.resize_split_down";
 const MENU_BRING_ALL_TO_FRONT: &str = "terminal.menu.bring_all_to_front";
-const PANE_COPY: &str = "terminal.pane.copy";
-const PANE_PASTE: &str = "terminal.pane.paste";
-const PANE_RESET_TERMINAL: &str = "terminal.pane.reset_terminal";
-const PANE_TOGGLE_READ_ONLY: &str = "terminal.pane.toggle_read_only";
-const PANE_CHANGE_TAB_TITLE: &str = "terminal.pane.change_tab_title";
-const PANE_DETACH_SESSION: &str = "terminal.pane.detach_session";
-const PANE_CLOSE_PANE: &str = "terminal.pane.close_pane";
 const SETTINGS_NAVIGATE_EVENT: &str = "settings://navigate";
-const PANE_MENU_EVENT: &str = "terminal://pane-menu";
 const TERMINAL_MENU_EVENT: &str = "terminal://menu-command";
 const DEFAULT_WINDOW_WIDTH: f64 = 960.0;
 const DEFAULT_WINDOW_HEIGHT: f64 = 640.0;
@@ -150,7 +126,6 @@ struct MenuText {
     profile_delete: &'static str,
     command_palette: &'static str,
     close: &'static str,
-    close_pane: &'static str,
     close_tab: &'static str,
     close_window: &'static str,
     undo: &'static str,
@@ -188,21 +163,10 @@ struct MenuText {
     show_previous_tab: &'static str,
     show_next_tab: &'static str,
     move_tab_to_new_window: &'static str,
-    zoom_split: &'static str,
-    select_previous_split: &'static str,
-    select_next_split: &'static str,
-    select_split: &'static str,
-    resize_split: &'static str,
     bring_all_to_front: &'static str,
-    reset_terminal: &'static str,
-    detach_session: &'static str,
     horizontal_tabs: &'static str,
     vertical_left_tabs: &'static str,
     vertical_right_tabs: &'static str,
-    split_left: &'static str,
-    split_right: &'static str,
-    split_up: &'static str,
-    split_down: &'static str,
     settings_title: &'static str,
     hosts_title: &'static str,
     new_profile_title: &'static str,
@@ -225,7 +189,6 @@ fn menu_text(language: UiLanguage) -> MenuText {
             profile_delete: "Delete...",
             command_palette: "Command Palette...",
             close: "Close",
-            close_pane: "Close Pane",
             close_tab: "Close Tab",
             close_window: "Close Window",
             undo: "Undo",
@@ -263,21 +226,10 @@ fn menu_text(language: UiLanguage) -> MenuText {
             show_previous_tab: "Show Previous Tab",
             show_next_tab: "Show Next Tab",
             move_tab_to_new_window: "Move Tab to New Window",
-            zoom_split: "Zoom Split",
-            select_previous_split: "Select Previous Split",
-            select_next_split: "Select Next Split",
-            select_split: "Select Split",
-            resize_split: "Resize Split",
             bring_all_to_front: "Bring All to Front",
-            reset_terminal: "Reset Terminal",
-            detach_session: "Detach Session",
             horizontal_tabs: "Horizontal Tabs",
             vertical_left_tabs: "Vertical Tabs on Left",
             vertical_right_tabs: "Vertical Tabs on Right",
-            split_left: "Split Left",
-            split_right: "Split Right",
-            split_up: "Split Up",
-            split_down: "Split Down",
             settings_title: "Nocturne Settings",
             hosts_title: "Nocturne Hosts",
             new_profile_title: "New Profile",
@@ -297,7 +249,6 @@ fn menu_text(language: UiLanguage) -> MenuText {
             profile_delete: "删除...",
             command_palette: "命令面板...",
             close: "关闭",
-            close_pane: "关闭窗格",
             close_tab: "关闭标签",
             close_window: "关闭窗口",
             undo: "撤销",
@@ -335,21 +286,10 @@ fn menu_text(language: UiLanguage) -> MenuText {
             show_previous_tab: "显示上一个标签",
             show_next_tab: "显示下一个标签",
             move_tab_to_new_window: "将标签移到新窗口",
-            zoom_split: "缩放分割",
-            select_previous_split: "选择上一个分割",
-            select_next_split: "选择下一个分割",
-            select_split: "选择分割",
-            resize_split: "调整分割大小",
             bring_all_to_front: "全部置于前面",
-            reset_terminal: "重置终端",
-            detach_session: "分离 Session",
             horizontal_tabs: "水平标签",
             vertical_left_tabs: "左侧标签",
             vertical_right_tabs: "右侧标签",
-            split_left: "向左分割",
-            split_right: "向右分割",
-            split_up: "向上分割",
-            split_down: "向下分割",
             settings_title: "Nocturne 设置",
             hosts_title: "Nocturne 主机",
             new_profile_title: "新建档案",
@@ -367,10 +307,6 @@ pub(crate) fn build_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R
     let new_window =
         terminal_menu_item(app, MENU_NEW_WINDOW, labels.new_window, Some("CmdOrCtrl+N"))?;
     let new_tab = terminal_menu_item(app, MENU_NEW_TAB, labels.new_tab, Some("CmdOrCtrl+T"))?;
-    let split_right = terminal_menu_item(app, MENU_SPLIT_RIGHT, labels.split_right, None::<&str>)?;
-    let split_left = terminal_menu_item(app, MENU_SPLIT_LEFT, labels.split_left, None::<&str>)?;
-    let split_down = terminal_menu_item(app, MENU_SPLIT_DOWN, labels.split_down, None::<&str>)?;
-    let split_up = terminal_menu_item(app, MENU_SPLIT_UP, labels.split_up, None::<&str>)?;
     let close = terminal_menu_item(app, MENU_CLOSE, labels.close, Some("CmdOrCtrl+W"))?;
     let close_tab = terminal_menu_item(
         app,
@@ -454,11 +390,6 @@ pub(crate) fn build_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R
             &new_window,
             &new_tab,
             &file_sep1,
-            &split_right,
-            &split_left,
-            &split_down,
-            &split_up,
-            &file_sep2,
             &close,
             &close_tab,
             &close_window,
@@ -679,89 +610,6 @@ pub(crate) fn build_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R
         labels.move_tab_to_new_window,
         None::<&str>,
     )?;
-    let zoom_split = terminal_menu_item(app, MENU_ZOOM_SPLIT, labels.zoom_split, None::<&str>)?;
-    let select_previous_split = terminal_menu_item(
-        app,
-        MENU_SELECT_PREVIOUS_SPLIT,
-        labels.select_previous_split,
-        None::<&str>,
-    )?;
-    let select_next_split = terminal_menu_item(
-        app,
-        MENU_SELECT_NEXT_SPLIT,
-        labels.select_next_split,
-        None::<&str>,
-    )?;
-    let select_split_left = terminal_menu_item(
-        app,
-        MENU_SELECT_SPLIT_LEFT,
-        labels.move_resize_left,
-        None::<&str>,
-    )?;
-    let select_split_right = terminal_menu_item(
-        app,
-        MENU_SELECT_SPLIT_RIGHT,
-        labels.move_resize_right,
-        None::<&str>,
-    )?;
-    let select_split_up = terminal_menu_item(
-        app,
-        MENU_SELECT_SPLIT_UP,
-        labels.move_resize_top,
-        None::<&str>,
-    )?;
-    let select_split_down = terminal_menu_item(
-        app,
-        MENU_SELECT_SPLIT_DOWN,
-        labels.move_resize_bottom,
-        None::<&str>,
-    )?;
-    let select_split_menu = Submenu::with_items(
-        app,
-        labels.select_split,
-        true,
-        &[
-            &select_split_left,
-            &select_split_right,
-            &select_split_up,
-            &select_split_down,
-        ],
-    )?;
-    let resize_split_left = terminal_menu_item(
-        app,
-        MENU_RESIZE_SPLIT_LEFT,
-        labels.move_resize_left,
-        None::<&str>,
-    )?;
-    let resize_split_right = terminal_menu_item(
-        app,
-        MENU_RESIZE_SPLIT_RIGHT,
-        labels.move_resize_right,
-        None::<&str>,
-    )?;
-    let resize_split_up = terminal_menu_item(
-        app,
-        MENU_RESIZE_SPLIT_UP,
-        labels.move_resize_top,
-        None::<&str>,
-    )?;
-    let resize_split_down = terminal_menu_item(
-        app,
-        MENU_RESIZE_SPLIT_DOWN,
-        labels.move_resize_bottom,
-        None::<&str>,
-    )?;
-    let resize_split_menu = Submenu::with_items(
-        app,
-        labels.resize_split,
-        true,
-        &[
-            &resize_split_left,
-            &resize_split_right,
-            &resize_split_up,
-            &resize_split_down,
-        ],
-    )?;
     let bring_all_to_front = terminal_menu_item(
         app,
         MENU_BRING_ALL_TO_FRONT,
@@ -789,12 +637,6 @@ pub(crate) fn build_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R
             &show_next_tab,
             &move_tab_to_new_window,
             &window_sep3,
-            &zoom_split,
-            &select_previous_split,
-            &select_next_split,
-            &select_split_menu,
-            &resize_split_menu,
-            &window_sep4,
             &bring_all_to_front,
         ],
     )?;
@@ -938,14 +780,6 @@ pub(crate) fn handle_menu_event(app: &AppHandle, id: &str) {
         orientation.and_then(|value| config::set_effective_tab_bar_orientation(app, value))
     } else if id.starts_with(MENU_TERMINAL_PREFIX) {
         handle_terminal_menu(app, id)
-    } else if id.starts_with(&format!("{PANE_COPY}:"))
-        || id.starts_with(&format!("{PANE_PASTE}:"))
-        || id.starts_with(&format!("{PANE_RESET_TERMINAL}:"))
-        || id.starts_with(&format!("{PANE_TOGGLE_READ_ONLY}:"))
-        || id.starts_with(&format!("{PANE_CHANGE_TAB_TITLE}:"))
-        || id.starts_with(&format!("{PANE_CLOSE_PANE}:"))
-    {
-        emit_pane_menu_event(app, id)
     } else {
         Ok(())
     };
@@ -1495,91 +1329,6 @@ fn floating_window_id_from_label(label: &str) -> Option<&str> {
 
 #[tauri::command]
 #[specta::specta]
-pub(crate) fn show_pane_context_menu(app: AppHandle, input: PaneContextMenuInput) -> Result<()> {
-    let labels = menu_text(resolve_ui_language(&app));
-    let copy = MenuItem::with_id(
-        &app,
-        format!("{PANE_COPY}:{}", input.pane_id),
-        labels.copy,
-        input.has_selection,
-        None::<&str>,
-    )
-    .map_err(to_config_error)?;
-    let paste = MenuItem::with_id(
-        &app,
-        format!("{PANE_PASTE}:{}", input.pane_id),
-        labels.paste,
-        !input.read_only,
-        None::<&str>,
-    )
-    .map_err(to_config_error)?;
-    let reset_terminal = MenuItem::with_id(
-        &app,
-        format!("{PANE_RESET_TERMINAL}:{}", input.pane_id),
-        labels.reset_terminal,
-        true,
-        None::<&str>,
-    )
-    .map_err(to_config_error)?;
-    let toggle_read_only = MenuItem::with_id(
-        &app,
-        format!("{PANE_TOGGLE_READ_ONLY}:{}", input.pane_id),
-        labels.toggle_read_only,
-        true,
-        None::<&str>,
-    )
-    .map_err(to_config_error)?;
-    let change_tab_title = MenuItem::with_id(
-        &app,
-        format!("{PANE_CHANGE_TAB_TITLE}:{}", input.pane_id),
-        labels.change_tab_title,
-        true,
-        None::<&str>,
-    )
-    .map_err(to_config_error)?;
-    let detach_session = MenuItem::with_id(
-        &app,
-        format!("{PANE_DETACH_SESSION}:{}", input.pane_id),
-        labels.detach_session,
-        input.can_detach,
-        None::<&str>,
-    )
-    .map_err(to_config_error)?;
-    let close_pane = MenuItem::with_id(
-        &app,
-        format!("{PANE_CLOSE_PANE}:{}", input.pane_id),
-        labels.close_pane,
-        true,
-        None::<&str>,
-    )
-    .map_err(to_config_error)?;
-    let separator1 = PredefinedMenuItem::separator(&app).map_err(to_config_error)?;
-    let separator2 = PredefinedMenuItem::separator(&app).map_err(to_config_error)?;
-    let menu = Menu::with_items(
-        &app,
-        &[
-            &copy,
-            &paste,
-            &separator1,
-            &reset_terminal,
-            &toggle_read_only,
-            &change_tab_title,
-            &detach_session,
-            &separator2,
-            &close_pane,
-        ],
-    )
-    .map_err(to_config_error)?;
-    let window = app
-        .get_webview_window(&input.window_label)
-        .ok_or_else(|| invalid_error(format!("window {} not found", input.window_label)))?;
-    window
-        .popup_menu_at(&menu, LogicalPosition::new(input.x, input.y))
-        .map_err(to_config_error)
-}
-
-#[tauri::command]
-#[specta::specta]
 pub(crate) fn show_app_menu(app: AppHandle, input: AppMenuPopupInput) -> Result<()> {
     let menu = build_app_popup_menu(&app, input.root).map_err(to_config_error)?;
     let window = app
@@ -1614,10 +1363,6 @@ fn build_file_popup_menu<R: Runtime>(
     let new_window =
         terminal_menu_item(app, MENU_NEW_WINDOW, labels.new_window, Some("CmdOrCtrl+N"))?;
     let new_tab = terminal_menu_item(app, MENU_NEW_TAB, labels.new_tab, Some("CmdOrCtrl+T"))?;
-    let split_right = terminal_menu_item(app, MENU_SPLIT_RIGHT, labels.split_right, None::<&str>)?;
-    let split_left = terminal_menu_item(app, MENU_SPLIT_LEFT, labels.split_left, None::<&str>)?;
-    let split_down = terminal_menu_item(app, MENU_SPLIT_DOWN, labels.split_down, None::<&str>)?;
-    let split_up = terminal_menu_item(app, MENU_SPLIT_UP, labels.split_up, None::<&str>)?;
     let close = terminal_menu_item(app, MENU_CLOSE, labels.close, Some("CmdOrCtrl+W"))?;
     let close_tab = terminal_menu_item(
         app,
@@ -1696,11 +1441,6 @@ fn build_file_popup_menu<R: Runtime>(
             &new_window,
             &new_tab,
             &sep1,
-            &split_right,
-            &split_left,
-            &split_down,
-            &split_up,
-            &sep2,
             &close,
             &close_tab,
             &close_window,
@@ -1933,89 +1673,6 @@ fn build_window_popup_menu<R: Runtime>(
         labels.move_tab_to_new_window,
         None::<&str>,
     )?;
-    let zoom_split = terminal_menu_item(app, MENU_ZOOM_SPLIT, labels.zoom_split, None::<&str>)?;
-    let select_previous_split = terminal_menu_item(
-        app,
-        MENU_SELECT_PREVIOUS_SPLIT,
-        labels.select_previous_split,
-        None::<&str>,
-    )?;
-    let select_next_split = terminal_menu_item(
-        app,
-        MENU_SELECT_NEXT_SPLIT,
-        labels.select_next_split,
-        None::<&str>,
-    )?;
-    let select_split_left = terminal_menu_item(
-        app,
-        MENU_SELECT_SPLIT_LEFT,
-        labels.move_resize_left,
-        None::<&str>,
-    )?;
-    let select_split_right = terminal_menu_item(
-        app,
-        MENU_SELECT_SPLIT_RIGHT,
-        labels.move_resize_right,
-        None::<&str>,
-    )?;
-    let select_split_up = terminal_menu_item(
-        app,
-        MENU_SELECT_SPLIT_UP,
-        labels.move_resize_top,
-        None::<&str>,
-    )?;
-    let select_split_down = terminal_menu_item(
-        app,
-        MENU_SELECT_SPLIT_DOWN,
-        labels.move_resize_bottom,
-        None::<&str>,
-    )?;
-    let select_split_menu = Submenu::with_items(
-        app,
-        labels.select_split,
-        true,
-        &[
-            &select_split_left,
-            &select_split_right,
-            &select_split_up,
-            &select_split_down,
-        ],
-    )?;
-    let resize_split_left = terminal_menu_item(
-        app,
-        MENU_RESIZE_SPLIT_LEFT,
-        labels.move_resize_left,
-        None::<&str>,
-    )?;
-    let resize_split_right = terminal_menu_item(
-        app,
-        MENU_RESIZE_SPLIT_RIGHT,
-        labels.move_resize_right,
-        None::<&str>,
-    )?;
-    let resize_split_up = terminal_menu_item(
-        app,
-        MENU_RESIZE_SPLIT_UP,
-        labels.move_resize_top,
-        None::<&str>,
-    )?;
-    let resize_split_down = terminal_menu_item(
-        app,
-        MENU_RESIZE_SPLIT_DOWN,
-        labels.move_resize_bottom,
-        None::<&str>,
-    )?;
-    let resize_split_menu = Submenu::with_items(
-        app,
-        labels.resize_split,
-        true,
-        &[
-            &resize_split_left,
-            &resize_split_right,
-            &resize_split_up,
-            &resize_split_down,
-        ],
-    )?;
     let bring_all_to_front = terminal_menu_item(
         app,
         MENU_BRING_ALL_TO_FRONT,
@@ -2041,12 +1698,6 @@ fn build_window_popup_menu<R: Runtime>(
             &show_next_tab,
             &move_tab_to_new_window,
             &sep3,
-            &zoom_split,
-            &select_previous_split,
-            &select_next_split,
-            &select_split_menu,
-            &resize_split_menu,
-            &sep4,
             &bring_all_to_front,
         ],
     )
@@ -2069,10 +1720,6 @@ pub(crate) fn update_terminal_menu_state(
     };
     let items = menu.items().map_err(to_config_error)?;
     set_menu_item_enabled(&items, MENU_NEW_TAB, true)?;
-    set_menu_item_enabled(&items, MENU_SPLIT_RIGHT, input.has_active_pane)?;
-    set_menu_item_enabled(&items, MENU_SPLIT_LEFT, input.has_active_pane)?;
-    set_menu_item_enabled(&items, MENU_SPLIT_DOWN, input.has_active_pane)?;
-    set_menu_item_enabled(&items, MENU_SPLIT_UP, input.has_active_pane)?;
     set_menu_item_enabled(&items, MENU_CLOSE, input.has_active_tab)?;
     set_menu_item_enabled(&items, MENU_CLOSE_TAB, input.has_active_tab)?;
     set_menu_item_enabled(&items, MENU_UNDO, input.can_undo_text)?;
@@ -2081,16 +1728,16 @@ pub(crate) fn update_terminal_menu_state(
     set_menu_item_enabled(&items, MENU_PASTE, input.can_paste)?;
     set_menu_item_enabled(&items, MENU_PASTE_SELECTION, input.can_paste_selection)?;
     set_menu_item_enabled(&items, MENU_SELECT_ALL, input.can_select_all)?;
-    set_menu_item_enabled(&items, MENU_FIND, input.has_active_pane)?;
+    set_menu_item_enabled(&items, MENU_FIND, input.has_active_tab)?;
     set_menu_item_enabled(
         &items,
         MENU_FIND_NEXT,
-        input.has_active_pane && input.has_find_query,
+        input.has_active_tab && input.has_find_query,
     )?;
     set_menu_item_enabled(
         &items,
         MENU_FIND_PREVIOUS,
-        input.has_active_pane && input.has_find_query,
+        input.has_active_tab && input.has_find_query,
     )?;
     set_menu_item_enabled(&items, MENU_HIDE_FIND_BAR, input.find_visible)?;
     set_menu_item_enabled(&items, MENU_USE_SELECTION_FOR_FIND, input.has_selection)?;
@@ -2099,21 +1746,10 @@ pub(crate) fn update_terminal_menu_state(
     set_menu_item_enabled(&items, MENU_INCREASE_FONT_SIZE, input.has_active_tab)?;
     set_menu_item_enabled(&items, MENU_DECREASE_FONT_SIZE, input.has_active_tab)?;
     set_menu_item_enabled(&items, MENU_CHANGE_TAB_TITLE, input.has_active_tab)?;
-    set_menu_item_enabled(&items, MENU_TOGGLE_READ_ONLY, input.has_active_pane)?;
+    set_menu_item_enabled(&items, MENU_TOGGLE_READ_ONLY, input.has_active_tab)?;
     set_menu_item_enabled(&items, MENU_SHOW_PREVIOUS_TAB, input.has_multiple_tabs)?;
     set_menu_item_enabled(&items, MENU_SHOW_NEXT_TAB, input.has_multiple_tabs)?;
     set_menu_item_enabled(&items, MENU_MOVE_TAB_TO_NEW_WINDOW, input.has_active_tab)?;
-    set_menu_item_enabled(&items, MENU_ZOOM_SPLIT, input.has_multiple_panes)?;
-    set_menu_item_enabled(&items, MENU_SELECT_PREVIOUS_SPLIT, input.has_multiple_panes)?;
-    set_menu_item_enabled(&items, MENU_SELECT_NEXT_SPLIT, input.has_multiple_panes)?;
-    set_menu_item_enabled(&items, MENU_SELECT_SPLIT_LEFT, input.has_multiple_panes)?;
-    set_menu_item_enabled(&items, MENU_SELECT_SPLIT_RIGHT, input.has_multiple_panes)?;
-    set_menu_item_enabled(&items, MENU_SELECT_SPLIT_UP, input.has_multiple_panes)?;
-    set_menu_item_enabled(&items, MENU_SELECT_SPLIT_DOWN, input.has_multiple_panes)?;
-    set_menu_item_enabled(&items, MENU_RESIZE_SPLIT_LEFT, input.has_multiple_panes)?;
-    set_menu_item_enabled(&items, MENU_RESIZE_SPLIT_RIGHT, input.has_multiple_panes)?;
-    set_menu_item_enabled(&items, MENU_RESIZE_SPLIT_UP, input.has_multiple_panes)?;
-    set_menu_item_enabled(&items, MENU_RESIZE_SPLIT_DOWN, input.has_multiple_panes)?;
     Ok(())
 }
 
@@ -2219,10 +1855,6 @@ fn terminal_command_from_menu_id(id: &str) -> Option<TerminalMenuCommand> {
         MENU_NEW_WINDOW => Some(TerminalMenuCommand::NewWindow),
         MENU_COMMAND_PALETTE => Some(TerminalMenuCommand::OpenCommandPalette),
         MENU_NEW_TAB => Some(TerminalMenuCommand::NewTab),
-        MENU_SPLIT_RIGHT => Some(TerminalMenuCommand::SplitRight),
-        MENU_SPLIT_LEFT => Some(TerminalMenuCommand::SplitLeft),
-        MENU_SPLIT_DOWN => Some(TerminalMenuCommand::SplitDown),
-        MENU_SPLIT_UP => Some(TerminalMenuCommand::SplitUp),
         MENU_CLOSE => Some(TerminalMenuCommand::Close),
         MENU_CLOSE_TAB => Some(TerminalMenuCommand::CloseTab),
         MENU_CLOSE_WINDOW => Some(TerminalMenuCommand::CloseWindow),
@@ -2259,17 +1891,6 @@ fn terminal_command_from_menu_id(id: &str) -> Option<TerminalMenuCommand> {
         MENU_SHOW_PREVIOUS_TAB => Some(TerminalMenuCommand::ShowPreviousTab),
         MENU_SHOW_NEXT_TAB => Some(TerminalMenuCommand::ShowNextTab),
         MENU_MOVE_TAB_TO_NEW_WINDOW => Some(TerminalMenuCommand::MoveTabToNewWindow),
-        MENU_ZOOM_SPLIT => Some(TerminalMenuCommand::ZoomSplit),
-        MENU_SELECT_PREVIOUS_SPLIT => Some(TerminalMenuCommand::SelectPreviousSplit),
-        MENU_SELECT_NEXT_SPLIT => Some(TerminalMenuCommand::SelectNextSplit),
-        MENU_SELECT_SPLIT_LEFT => Some(TerminalMenuCommand::SelectSplitLeft),
-        MENU_SELECT_SPLIT_RIGHT => Some(TerminalMenuCommand::SelectSplitRight),
-        MENU_SELECT_SPLIT_UP => Some(TerminalMenuCommand::SelectSplitUp),
-        MENU_SELECT_SPLIT_DOWN => Some(TerminalMenuCommand::SelectSplitDown),
-        MENU_RESIZE_SPLIT_LEFT => Some(TerminalMenuCommand::ResizeSplitLeft),
-        MENU_RESIZE_SPLIT_RIGHT => Some(TerminalMenuCommand::ResizeSplitRight),
-        MENU_RESIZE_SPLIT_UP => Some(TerminalMenuCommand::ResizeSplitUp),
-        MENU_RESIZE_SPLIT_DOWN => Some(TerminalMenuCommand::ResizeSplitDown),
         MENU_BRING_ALL_TO_FRONT => Some(TerminalMenuCommand::BringAllToFront),
         _ => None,
     }
@@ -2285,36 +1906,6 @@ fn emit_terminal_menu_event<R: Runtime>(
         EventTarget::webview_window(window.label()),
         TERMINAL_MENU_EVENT,
         TerminalMenuEvent { command },
-    )
-    .map_err(to_config_error)
-}
-
-fn emit_pane_menu_event<R: Runtime>(app: &AppHandle<R>, id: &str) -> Result<()> {
-    let (action, pane_id) = if let Some(pane_id) = id.strip_prefix(&format!("{PANE_COPY}:")) {
-        (PaneMenuAction::Copy, pane_id)
-    } else if let Some(pane_id) = id.strip_prefix(&format!("{PANE_PASTE}:")) {
-        (PaneMenuAction::Paste, pane_id)
-    } else if let Some(pane_id) = id.strip_prefix(&format!("{PANE_RESET_TERMINAL}:")) {
-        (PaneMenuAction::ResetTerminal, pane_id)
-    } else if let Some(pane_id) = id.strip_prefix(&format!("{PANE_TOGGLE_READ_ONLY}:")) {
-        (PaneMenuAction::ToggleReadOnly, pane_id)
-    } else if let Some(pane_id) = id.strip_prefix(&format!("{PANE_CHANGE_TAB_TITLE}:")) {
-        (PaneMenuAction::ChangeTabTitle, pane_id)
-    } else if let Some(pane_id) = id.strip_prefix(&format!("{PANE_DETACH_SESSION}:")) {
-        (PaneMenuAction::DetachSession, pane_id)
-    } else if let Some(pane_id) = id.strip_prefix(&format!("{PANE_CLOSE_PANE}:")) {
-        (PaneMenuAction::ClosePane, pane_id)
-    } else {
-        return Ok(());
-    };
-    let window = focused_or_main_window(app)?;
-    app.emit_to(
-        EventTarget::webview_window(window.label()),
-        PANE_MENU_EVENT,
-        PaneMenuEvent {
-            action,
-            pane_id: pane_id.to_string(),
-        },
     )
     .map_err(to_config_error)
 }

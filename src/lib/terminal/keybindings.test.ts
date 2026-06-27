@@ -36,7 +36,7 @@ describe("terminal keybindings", () => {
               terminal: {
                 kind: "Table",
                 value: {
-                  splitRight: { kind: "String", value: "Ctrl+R" },
+                  find: { kind: "String", value: "Ctrl+R" },
                 },
               },
             },
@@ -46,12 +46,9 @@ describe("terminal keybindings", () => {
       false,
     );
 
-    assert.equal(map["terminal.splitRight"], "Ctrl+R");
-    assert.equal(map["terminal.splitLeft"], "Ctrl+Alt+Left");
-    assert.equal(map["terminal.splitUp"], "Ctrl+Alt+Up");
+    assert.equal(map["terminal.find"], "Ctrl+R");
     assert.equal(map["terminal.newSession"], "Ctrl+Shift+T");
     assert.equal(map["terminal.openCommandPalette"], "Ctrl+Shift+P");
-    assert.equal(map["terminal.find"], "Ctrl+F");
     assert.equal(map["terminal.findNext"], "Ctrl+G");
     assert.equal(map["terminal.findPrevious"], "Ctrl+Shift+G");
   });

@@ -107,7 +107,7 @@ describe("Terminal Agent packaging", () => {
     assert.match(clientSource, /func ProbeSessionInfo/);
     assert.match(clientSource, /info returned session_id/);
     assert.match(clientSource, /func DeleteSession/);
-    assert.match(clientSource, /ProxySessionRequest\(output, sessionID, "close"/);
+    assert.match(clientSource, /ProxySessionRequest\(output, sessionID, "close_run"/);
     assert.doesNotMatch(clientSource, /--endpoint/);
     assert.match(protocolSource, /type eventLine/);
     assert.match(daemonSource, /RunDaemon\(spec LaunchSpec\)/);
@@ -160,7 +160,7 @@ describe("Terminal Agent packaging", () => {
     assert.match(terminalDaemonDoc, /attached_count/);
     assert.match(terminalDaemonDoc, /never written back to the registry/);
     assert.match(terminalDaemonDoc, /client delete --session-id/);
-    assert.match(terminalDaemonDoc, /removes both the transcript and registry/);
+    assert.match(terminalDaemonDoc, /removes both the transcript and\s+registry/);
     assert.match(terminalDaemonDoc, /both local and SSH-backed sessions/);
     assert.match(terminalDaemonDoc, /native system\s+confirmation dialog/);
     assert.match(terminalDaemonDoc, /Nocturne forwards interactive terminal title changes as `title_change`/);
@@ -209,8 +209,10 @@ describe("Terminal Agent packaging", () => {
     assert.match(terminalDaemonDoc, /accept follow-up NDJSON requests on stdin/);
     assert.match(terminalDaemonDoc, /forward them to the same daemon\s+socket\/pipe connection/);
     assert.match(terminalDaemonDoc, /live Terminal\s+ToolTab control channel/);
-    assert.match(terminalDaemonDoc, /SSH live ToolTabs write the same NDJSON requests\s+to the stdin side of the existing remote helper `client subscribe` SSH exec\s+channel/);
-    assert.match(terminalDaemonDoc, /Remote live control must tolerate temporary SSH\s+backpressure by keeping unsent NDJSON bytes queued/);
+    assert.match(terminalDaemonDoc, /SSH live\s+ToolTabs write the same NDJSON requests/);
+    assert.match(terminalDaemonDoc, /client subscribe/);
+    assert.match(terminalDaemonDoc, /Remote live control must/);
+    assert.match(terminalDaemonDoc, /backpressure by keeping unsent NDJSON bytes queued/);
     assert.match(terminalDaemonDoc, /closes the helper connection so the Terminal ToolTab's client process exits/);
     assert.match(terminalDaemonDoc, /no request arrives for\s+90\s+seconds/);
     assert.match(terminalDaemonDoc, /not forwarded to Nocturne's terminal event reader/);

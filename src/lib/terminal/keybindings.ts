@@ -5,11 +5,6 @@ export type TerminalCommandId =
   | "terminal.openCommandPalette"
   | "terminal.newSession"
   | "terminal.closeTab"
-  | "terminal.splitLeft"
-  | "terminal.splitRight"
-  | "terminal.splitUp"
-  | "terminal.splitDown"
-  | "terminal.closePane"
   | "terminal.find"
   | "terminal.findNext"
   | "terminal.findPrevious";
@@ -39,36 +34,6 @@ export const terminalKeybindings: KeybindingDefinition[] = [
     label: "Close Tab",
     macDefault: "Meta+W",
     default: "Ctrl+Shift+W",
-  },
-  {
-    command: "terminal.splitLeft",
-    label: "Split Left",
-    macDefault: "Meta+Alt+D",
-    default: "Ctrl+Alt+Left",
-  },
-  {
-    command: "terminal.splitRight",
-    label: "Split Right",
-    macDefault: "Meta+D",
-    default: "Ctrl+Shift+D",
-  },
-  {
-    command: "terminal.splitUp",
-    label: "Split Up",
-    macDefault: "Meta+Alt+Shift+D",
-    default: "Ctrl+Alt+Up",
-  },
-  {
-    command: "terminal.splitDown",
-    label: "Split Down",
-    macDefault: "Meta+Shift+D",
-    default: "Ctrl+Alt+D",
-  },
-  {
-    command: "terminal.closePane",
-    label: "Close Pane",
-    macDefault: "Meta+Shift+W",
-    default: "Ctrl+Alt+W",
   },
   {
     command: "terminal.find",

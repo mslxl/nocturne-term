@@ -15,8 +15,12 @@ export async function resolveTauriTestApplication(repoRoot) {
     return requiredPath("TAURI_TEST_APPLICATION", explicit);
   }
 
-  const binaryPath = defaultDebugBinaryPath(repoRoot);
-  await run(repoRoot, "pnpm", ["tauri", "build", "--debug", "--no-bundle"]);
+  const targetDir = tauriTestTargetDir(repoRoot);
+  const binaryPath = defaultDebugBinaryPath(targetDir);
+  await run(repoRoot, "pnpm", ["tauri", "build", "--debug", "--no-bundle"], {
+    ...process.env,
+    CARGO_TARGET_DIR: targetDir,
+  });
   if (!existsSync(binaryPath)) {
     throw new Error(`Tauri debug build did not produce expected application binary: ${binaryPath}`);
   }
@@ -29,9 +33,14 @@ export function optionalEnvPath(name) {
   return requiredPath(name, value);
 }
 
-function defaultDebugBinaryPath(repoRoot) {
+function tauriTestTargetDir(repoRoot) {
+  const workerId = process.env.VITEST_WORKER_ID ?? process.env.VITEST_POOL_ID ?? "0";
+  return resolve(repoRoot, "src-tauri", "target", `tauri-tests-worker-${workerId}`);
+}
+
+function defaultDebugBinaryPath(targetDir) {
   const executable = process.platform === "win32" ? "nocturne.exe" : "nocturne";
-  return resolve(repoRoot, "src-tauri", "target", "debug", executable);
+  return resolve(targetDir, "debug", executable);
 }
 
 function requiredPath(name, value) {
@@ -42,10 +51,11 @@ function requiredPath(name, value) {
   return path;
 }
 
-function run(cwd, command, args) {
+function run(cwd, command, args, env = process.env) {
   return new Promise((resolveRun, rejectRun) => {
     const child = spawn(command, args, {
       cwd,
+      env,
       shell: process.platform === "win32",
       stdio: "inherit",
     });

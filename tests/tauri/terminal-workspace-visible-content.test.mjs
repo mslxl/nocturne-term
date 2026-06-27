@@ -13,7 +13,7 @@
  * provided by the TAURI_TEST_APPLICATION environment variable, waits for the
  * default Terminal ToolTab in the live Tauri WebView, and inspects terminal
  * host, mount, viewport, screen, and row DOM state inside the visible Terminal
- * ToolTab pane.
+ * ToolTab surface.
  *
  * Expected:
  * Exactly one visible terminal surface, host, and xterm are mounted, the
@@ -122,11 +122,11 @@ test("terminal workspace visible content", { timeout: 180_000 }, async () => {
       const allSurfaces = [...document.querySelectorAll('[data-testid="terminal-surface"]')];
       const visibleSurfaces = allSurfaces.filter((item) => {
         const rect = item.getBoundingClientRect();
-        const pane = item.closest('.tool-pane');
-        return rect.width >= 1 && rect.height >= 1 && !pane?.hidden && pane?.getAttribute('aria-hidden') !== 'true';
+        const slot = item.closest('.tool-slot-surface');
+        return rect.width >= 1 && rect.height >= 1 && !slot?.hidden && slot?.getAttribute('aria-hidden') !== 'true';
       });
       const surface = visibleSurfaces[0];
-      const activePane = surface?.closest('.tool-pane');
+      const activeSlot = surface?.closest('.tool-slot-surface');
       const host = surface?.querySelector('[data-testid="terminal-host"]');
       const mount = surface?.querySelector('[data-testid="terminal-mount"]');
       const xterm = surface?.querySelector('.xterm');
@@ -175,7 +175,7 @@ test("terminal workspace visible content", { timeout: 180_000 }, async () => {
         rowsStyle: style(rows),
         rowsText: rows?.textContent ?? '',
         activeTerminalError: surface?.querySelector('.terminal-error')?.textContent ?? '',
-        activePlaceholderText: activePane?.querySelector('.placeholder')?.textContent ?? '',
+        activePlaceholderText: activeSlot?.querySelector('.placeholder')?.textContent ?? '',
         bodyErrorText: document.querySelector('.error-state')?.textContent ?? '',
       };
     `);

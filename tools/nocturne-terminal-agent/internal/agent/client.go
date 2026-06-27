@@ -4,11 +4,14 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
+	"syscall"
 	"time"
 )
 
@@ -149,7 +152,12 @@ func writeExitedSessionClientResponse(writer io.Writer, registry Registry, reque
 			"ok":         true,
 			"session":    listedSessionFromRegistry(registry),
 		})
-	case "close", "detach":
+	case "close", "close_view", "close_run", "detach":
+		return json.NewEncoder(writer).Encode(okResponse(request.RequestID))
+	case "delete":
+		if err := DeleteSessionFiles(registry.SessionID); err != nil {
+			return err
+		}
 		return json.NewEncoder(writer).Encode(okResponse(request.RequestID))
 	default:
 		return json.NewEncoder(writer).Encode(responseLine{
@@ -227,10 +235,11 @@ func DeleteSession(writer io.Writer, sessionID string) error {
 	}
 	if registry.Exit == nil {
 		var output discardWriter
-		if err := ProxySessionRequest(output, sessionID, "close", nil, false); err != nil {
-			return fmt.Errorf("close live session before delete: %w", err)
-		}
-		if err := waitForRegistryExit(sessionID); err != nil {
+		if err := ProxySessionRequest(output, sessionID, "close_run", nil, false); err != nil {
+			if !isEndpointGoneError(err) {
+				return fmt.Errorf("close live session before delete: %w", err)
+			}
+		} else if err := waitForRegistryExit(sessionID); err != nil {
 			return err
 		}
 	}
@@ -320,6 +329,19 @@ func waitForRegistryExit(sessionID string) error {
 		return fmt.Errorf("wait for session exit registry: %w", lastErr)
 	}
 	return fmt.Errorf("session did not write exit registry before delete")
+}
+
+func isEndpointGoneError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if os.IsNotExist(err) || errors.Is(err, syscall.ECONNREFUSED) {
+		return true
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "cannot find the file specified") ||
+		strings.Contains(message, "no such file or directory") ||
+		strings.Contains(message, "connection refused")
 }
 
 type discardWriter struct{}

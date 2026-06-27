@@ -3,40 +3,90 @@ import { beforeAll, describe, expect, it } from "vitest";
 globalThis.self ??= globalThis as unknown as Window & typeof globalThis;
 
 import type { TerminalSessionInfo } from "$lib/bindings";
-import type { TerminalPane } from "./tabs";
+import type { TerminalSession } from "./tabs";
 
-let createTerminalPane: (info: TerminalSessionInfo, tabId: string) => TerminalPane;
-let retargetTerminalPaneSession: (pane: TerminalPane, info: TerminalSessionInfo) => void;
+let createTerminalPane: (info: TerminalSessionInfo) => TerminalSession;
+let retargetTerminalPaneSession: (session: TerminalSession, info: TerminalSessionInfo) => void;
+let handleTerminalPaneInput: (
+  session: Pick<TerminalSession, "id" | "readOnly" | "reconnectPending">,
+  data: string,
+  callbacks: {
+    markReconnectRequested?: (sessionId: string) => void;
+    requestReconnect?: (sessionId: string) => void;
+    writeTerminal: (data: string) => void;
+  },
+) => void;
+let updateTerminalPaneDirectoryFromOutput: (session: TerminalSession, chunks: string[]) => boolean;
 
 beforeAll(async () => {
-  ({ createTerminalPane, retargetTerminalPaneSession } = await import("./tabs"));
+  const tabs = await import("./tabs");
+  createTerminalPane = tabs.createTerminalSession;
+  retargetTerminalPaneSession = tabs.retargetTerminalSession;
+  handleTerminalPaneInput = tabs.handleTerminalSessionInput;
+  updateTerminalPaneDirectoryFromOutput = tabs.updateTerminalSessionDirectoryFromOutput;
 });
 
-describe("createTerminalPane", () => {
-  it("maps disconnected Agent sessions to read-only disconnected panes", () => {
-    const pane = createTerminalPane(sessionInfo({ transport_state: "disconnected" }), "tab-a");
+describe("terminal sessions", () => {
+  it("maps disconnected Agent sessions to read-only history sessions", () => {
+    const session = createTerminalPane(sessionInfo({ transport_state: "disconnected" }));
 
-    expect(pane.status).toBe("disconnected");
-    expect(pane.readOnly).toBe(true);
-    expect(pane.exitText).toBe("History");
-    expect(pane.outputQueue.join("")).toContain("[Disconnected: cmd]");
+    expect(session.status).toBe("disconnected");
+    expect(session.readOnly).toBe(true);
+    expect(session.exitText).toBe("History");
+    expect(session.outputQueue.join("")).toContain("[Disconnected: cmd]");
   });
 
-  it("retargets disconnected Agent sessions to read-only history panes", () => {
-    const pane = createTerminalPane(sessionInfo(), "tab-a");
+  it("retargets disconnected Agent sessions to read-only history sessions", () => {
+    const session = createTerminalPane(sessionInfo());
 
-    retargetTerminalPaneSession(pane, sessionInfo({
+    retargetTerminalPaneSession(session, sessionInfo({
       id: "term-2",
       transport_state: "disconnected",
       agent: { session_id: "registry-term-2" },
     }));
 
-    expect(pane.id).toBe("term-2");
-    expect(pane.agentSessionId).toBe("registry-term-2");
-    expect(pane.status).toBe("disconnected");
-    expect(pane.readOnly).toBe(true);
-    expect(pane.exitText).toBe("History");
-    expect(pane.outputQueue.join("")).toContain("[Disconnected: cmd]");
+    expect(session.id).toBe("term-2");
+    expect(session.agentSessionId).toBe("registry-term-2");
+    expect(session.status).toBe("disconnected");
+    expect(session.readOnly).toBe(true);
+    expect(session.exitText).toBe("History");
+    expect(session.outputQueue.join("")).toContain("[Disconnected: cmd]");
+  });
+
+  it("drops the input that triggers reconnect instead of writing it into the restarted session", () => {
+    const session = {
+      id: "term-3",
+      readOnly: false,
+      reconnectPending: true,
+    } satisfies Pick<TerminalSession, "id" | "readOnly" | "reconnectPending">;
+    const writes: string[] = [];
+    const reconnects: string[] = [];
+    const marks: string[] = [];
+
+    handleTerminalPaneInput(session, "echo should-disappear", {
+      writeTerminal: (data) => writes.push(data),
+      requestReconnect: (sessionId) => reconnects.push(sessionId),
+      markReconnectRequested: (sessionId) => marks.push(sessionId),
+    });
+
+    expect(writes).toEqual([]);
+    expect(reconnects).toEqual(["term-3"]);
+    expect(marks).toEqual(["term-3"]);
+  });
+
+  it("updates cwd from Windows prompt output when OSC 7 is unavailable", () => {
+    const session = createTerminalPane(sessionInfo({
+      title: "Session 1",
+      cwd: null,
+    }));
+    session.titleOverride = "C:\\Windows\\system32\\WindowsPowerShell\\v1.0";
+
+    const changed = updateTerminalPaneDirectoryFromOutput(session, [
+      "\r\nC:\\Sources\\nocturne-term\\src-tauri>",
+    ]);
+
+    expect(changed).toBe(true);
+    expect(session.currentDirectory).toBe("C:\\Sources\\nocturne-term\\src-tauri");
   });
 });
 

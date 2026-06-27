@@ -110,8 +110,8 @@ test("terminal font stack loads in workspace", { timeout: 180_000 }, async () =>
     return await execute(`
       const surfaces = [...document.querySelectorAll('[data-testid="terminal-surface"]')].filter((item) => {
         const rect = item.getBoundingClientRect();
-        const pane = item.closest('.tool-pane');
-        return rect.width >= 1 && rect.height >= 1 && !pane?.hidden && pane?.getAttribute('aria-hidden') !== 'true';
+        const slot = item.closest('.tool-slot-surface');
+        return rect.width >= 1 && rect.height >= 1 && !slot?.hidden && slot?.getAttribute('aria-hidden') !== 'true';
       });
       const surface = surfaces[0];
       const xterm = surface?.querySelector('.xterm');

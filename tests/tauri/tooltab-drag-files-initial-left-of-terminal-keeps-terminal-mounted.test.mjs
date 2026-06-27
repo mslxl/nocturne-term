@@ -19,7 +19,7 @@
  * is a local left side-panel immediately beside Terminal in the same upper
  * split, not a full-height global Workspace-left dock. Terminal remains a
  * content group with exactly one visible terminal surface, a mounted xterm,
- * visible terminal rows, and no "terminal pane ... did not mount a visible
+ * visible terminal rows, and no "terminal surface ... did not mount a visible
  * container" error.
  */
 import { spawn } from "node:child_process";
@@ -152,7 +152,7 @@ test("Dragging initial Files directly to the left of Terminal keeps Terminal mou
   async function assertNoTerminalMountErrors() {
     const errors = await execute(`
       return (window.__nocturneTerminalMountErrors ?? []).filter((message) =>
-        /terminal pane .* did not mount/i.test(message) ||
+        /terminal surface .* did not mount/i.test(message) ||
         /did not mount a visible container/i.test(message)
       );
     `);
@@ -263,7 +263,7 @@ test("Dragging initial Files directly to the left of Terminal keeps Terminal mou
         state.rowsRect.width >= 80 &&
         state.rowsRect.height >= 16 &&
         state.rowsText.trim().length > 0 &&
-        !/terminal pane .* did not mount/i.test(state.bodyText) &&
+        !/terminal surface .* did not mount/i.test(state.bodyText) &&
         !state.activeTerminalError &&
         !state.activePlaceholderText;
     }, async () => `${label} is not live\n${await pageSummary()}`);
@@ -339,11 +339,11 @@ test("Dragging initial Files directly to the left of Terminal keeps Terminal mou
       const allSurfaces = [...document.querySelectorAll('[data-testid="terminal-surface"]')];
       const visibleSurfaces = allSurfaces.filter((item) => {
         const rect = item.getBoundingClientRect();
-        const pane = item.closest('.tool-pane');
-        return rect.width >= 1 && rect.height >= 1 && !pane?.hidden && pane?.getAttribute('aria-hidden') !== 'true';
+        const slot = item.closest('.tool-slot-surface');
+        return rect.width >= 1 && rect.height >= 1 && !slot?.hidden && slot?.getAttribute('aria-hidden') !== 'true';
       });
       const surface = visibleSurfaces[0];
-      const activePane = surface?.closest('.tool-pane');
+      const activeSlot = surface?.closest('.tool-slot-surface');
       const host = surface?.querySelector('[data-testid="terminal-host"]');
       const rows = surface?.querySelector('.xterm .xterm-rows');
       const rect = (element) => {
@@ -364,7 +364,7 @@ test("Dragging initial Files directly to the left of Terminal keeps Terminal mou
         rowsRect: rect(rows),
         rowsText: rows?.textContent ?? '',
         activeTerminalError: surface?.querySelector('.terminal-error')?.textContent ?? '',
-        activePlaceholderText: activePane?.querySelector('.placeholder')?.textContent ?? '',
+        activePlaceholderText: activeSlot?.querySelector('.placeholder')?.textContent ?? '',
         bodyText: document.body?.innerText ?? '',
       };
     `);

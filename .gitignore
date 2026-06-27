@@ -19,6 +19,9 @@ src-tauri/resources/nocturne-host-agent/**
 src-tauri/resources/nocturne-resource-monitor-agent/**
 !src-tauri/resources/nocturne-resource-monitor-agent/
 !src-tauri/resources/nocturne-resource-monitor-agent/.gitkeep
+src-tauri/resources/nocturne-terminal-agent/**
+!src-tauri/resources/nocturne-terminal-agent/
+!src-tauri/resources/nocturne-terminal-agent/.gitkeep
 src-tauri/resources/ripgrep/**
 !src-tauri/resources/ripgrep/
 !src-tauri/resources/ripgrep/.gitkeep

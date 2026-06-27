@@ -1018,32 +1018,12 @@ pub struct TabBarContextMenuInput {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
-pub struct PaneContextMenuInput {
-    pub x: f64,
-    pub y: f64,
-    pub pane_id: String,
-    pub window_label: String,
-    pub has_selection: bool,
-    pub read_only: bool,
-    pub has_multiple_panes: bool,
-    pub can_detach: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Type)]
-pub struct PaneMenuEvent {
-    pub action: PaneMenuAction,
-    pub pane_id: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Type)]
 pub struct TerminalMenuStateInput {
     pub can_edit_text: bool,
     pub can_undo_text: bool,
     pub can_redo_text: bool,
     pub has_active_tab: bool,
-    pub has_active_pane: bool,
     pub has_multiple_tabs: bool,
-    pub has_multiple_panes: bool,
     pub has_selection: bool,
     pub can_paste: bool,
     pub can_paste_selection: bool,
@@ -1051,23 +1031,6 @@ pub struct TerminalMenuStateInput {
     pub can_jump_to_selection: bool,
     pub find_visible: bool,
     pub has_find_query: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Type)]
-#[serde(rename_all = "snake_case")]
-pub enum PaneMenuAction {
-    Copy,
-    Paste,
-    ResetTerminal,
-    ToggleReadOnly,
-    ChangeTabTitle,
-    DetachSession,
-    ZoomSplit,
-    ClosePane,
-    SplitLeft,
-    SplitRight,
-    SplitUp,
-    SplitDown,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
@@ -1081,10 +1044,6 @@ pub enum TerminalMenuCommand {
     OpenCommandPalette,
     NewWindow,
     NewTab,
-    SplitRight,
-    SplitLeft,
-    SplitDown,
-    SplitUp,
     Close,
     CloseTab,
     CloseWindow,
@@ -1121,17 +1080,6 @@ pub enum TerminalMenuCommand {
     ShowPreviousTab,
     ShowNextTab,
     MoveTabToNewWindow,
-    ZoomSplit,
-    SelectPreviousSplit,
-    SelectNextSplit,
-    SelectSplitLeft,
-    SelectSplitRight,
-    SelectSplitUp,
-    SelectSplitDown,
-    ResizeSplitLeft,
-    ResizeSplitRight,
-    ResizeSplitUp,
-    ResizeSplitDown,
     BringAllToFront,
 }
 
@@ -1432,6 +1380,7 @@ pub struct TerminalDetachedSessionInfo {
     pub session_id: String,
     pub title: String,
     pub command: String,
+    pub cwd: Option<String>,
     pub cols: u16,
     pub rows: u16,
     pub detached: bool,

@@ -19,7 +19,7 @@ export type TerminalFindSnapshot = {
 
 export type TerminalFindSearchKey = {
   caseSensitive: boolean;
-  paneId: string;
+  sessionId: string;
   query: string;
   regex: boolean;
 };
@@ -100,7 +100,7 @@ export function terminalFindSearchKeyChanged(
 ): boolean {
   return (
     previous === null ||
-    previous.paneId !== next.paneId ||
+    previous.sessionId !== next.sessionId ||
     previous.query !== next.query ||
     previous.caseSensitive !== next.caseSensitive ||
     previous.regex !== next.regex
