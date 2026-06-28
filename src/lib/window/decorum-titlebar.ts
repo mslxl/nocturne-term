@@ -2,23 +2,19 @@ import { emit } from "@tauri-apps/api/event";
 
 const DECORUM_TITLEBAR_SELECTOR = "[data-tauri-decorum-tb]";
 const DECORUM_TITLEBAR_HOST_ID = "decorum-titlebar-host";
+const DECORUM_TITLEBAR_READY_EVENT = "decorum-titlebar-ready";
+let decorumBootstrapRequested = false;
 
 export function mountDecorumTitlebarHost(node: HTMLElement) {
   let disposed = false;
   let host: HTMLElement | null = null;
   let observer: MutationObserver | null = null;
-  let decorumInjectionAttempts = 0;
-  let retryTimer: number | null = null;
   const originalParentByHost = new WeakMap<HTMLElement, HTMLElement>();
 
   function attach(candidate: HTMLElement) {
     if (disposed || host === candidate) return;
     observer?.disconnect();
     observer = null;
-    if (retryTimer !== null) {
-      window.clearTimeout(retryTimer);
-      retryTimer = null;
-    }
     if (!originalParentByHost.has(candidate) && candidate.parentElement) {
       originalParentByHost.set(candidate, candidate.parentElement);
     }
@@ -41,6 +37,9 @@ export function mountDecorumTitlebarHost(node: HTMLElement) {
       else if (control === "close") button.setAttribute("aria-label", "Close window");
     });
     node.appendChild(candidate);
+    void emit(DECORUM_TITLEBAR_READY_EVENT).catch((error) => {
+      console.warn("failed to acknowledge decorum titlebar mount", error);
+    });
   }
 
   function findAndAttach() {
@@ -48,28 +47,12 @@ export function mountDecorumTitlebarHost(node: HTMLElement) {
     if (candidate instanceof HTMLElement) attach(candidate);
   }
 
-  function requestDecorumInjection() {
-    if (disposed || host || decorumInjectionAttempts >= 20) return;
-    decorumInjectionAttempts += 1;
-    void emit("decorum-page-load")
-      .catch((error) => {
-        console.warn("failed to request decorum titlebar injection", error);
-      })
-      .finally(() => {
-        document.dispatchEvent(new Event("DOMContentLoaded"));
-        window.setTimeout(() => document.dispatchEvent(new Event("DOMContentLoaded")), 30);
-        if (disposed || host || decorumInjectionAttempts >= 20) return;
-        retryTimer = window.setTimeout(() => {
-          retryTimer = null;
-          findAndAttach();
-          if (!host) requestDecorumInjection();
-        }, 150);
-      });
-  }
-
   findAndAttach();
-  if (!host) {
-    requestDecorumInjection();
+  if (!host && !decorumBootstrapRequested) {
+    decorumBootstrapRequested = true;
+    void emit("decorum-page-load").catch((error) => {
+      console.warn("failed to request decorum titlebar injection", error);
+    });
     observer = new MutationObserver(findAndAttach);
     observer.observe(document.body, { childList: true, subtree: true });
   }
@@ -78,10 +61,6 @@ export function mountDecorumTitlebarHost(node: HTMLElement) {
     destroy() {
       disposed = true;
       observer?.disconnect();
-      if (retryTimer !== null) {
-        window.clearTimeout(retryTimer);
-        retryTimer = null;
-      }
       if (!host || host.parentElement !== node) return;
       host.classList.remove("mounted");
       const originalParent = originalParentByHost.get(host);

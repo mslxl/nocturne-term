@@ -14,13 +14,11 @@
  * Expected:
  * Integrated chrome is eligible only for Workspace and floating windows;
  * settings, host manager, and dialogs are excluded, and decorum setup is
- * present for Windows/Linux fallback-capable titlebar integration. Because the
- * decorum plugin installs its DOM with a page-load event and DOMContentLoaded
- * listener pair, the app shell also schedules a short refresh loop so controls
- * are still mounted when the plugin receives the event after DOMContentLoaded.
- * Windows/Linux Workspace windows also use builder-level decoration settings
- * and the mounted Workspace slot requests decorum injection, which keeps the
- * controls visible under dev URL / HMR launches such as `pnpm tauri dev`.
+ * present for Windows/Linux fallback-capable titlebar integration. The app
+ * shell requests one decorum page-load refresh and waits for the mounted
+ * Workspace slot to acknowledge readiness; the frontend must not synthesize
+ * DOMContentLoaded events because doing so can repeatedly trigger decorum's
+ * bootstrap path after controls already exist.
  */
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
@@ -56,7 +54,9 @@ describe("integrated titlebar window scope source", () => {
     assert.match(appShell, /schedule_decorum_titlebar_refresh/);
     assert.match(appShell, /DECORUM_TITLEBAR_REFRESH_ATTEMPTS/);
     assert.match(appShell, /window\.emit\("decorum-page-load", \(\)\)/);
-    assert.match(appShell, /document\.dispatchEvent\(new Event\("DOMContentLoaded"\)\)/);
+    assert.match(appShell, /DECORUM_TITLEBAR_READY_EVENT/);
+    assert.match(appShell, /window\.listen_any\(DECORUM_TITLEBAR_READY_EVENT/);
+    assert.match(appShell, /decorum titlebar refresh did not receive a ready acknowledgment/);
     assert.match(appShell, /log::warn!\([^;]*decorum/i);
   });
 
@@ -64,9 +64,10 @@ describe("integrated titlebar window scope source", () => {
     const decorumHost = await readFile(new URL("../src/lib/window/decorum-titlebar.ts", import.meta.url), "utf8");
 
     assert.match(decorumHost, /emit\("decorum-page-load"\)/);
-    assert.match(decorumHost, /document\.dispatchEvent\(new Event\("DOMContentLoaded"\)\)/);
-    assert.match(decorumHost, /setTimeout\(\(\) => document\.dispatchEvent\(new Event\("DOMContentLoaded"\)\), 30\)/);
-    assert.match(decorumHost, /decorumInjectionAttempts >= 20/);
+    assert.match(decorumHost, /emit\(DECORUM_TITLEBAR_READY_EVENT\)/);
+    assert.match(decorumHost, /decorumBootstrapRequested/);
+    assert.doesNotMatch(decorumHost, /document\.dispatchEvent\(new Event\("DOMContentLoaded"\)\)/);
+    assert.doesNotMatch(decorumHost, /setTimeout\(\(\) => document\.dispatchEvent\(new Event\("DOMContentLoaded"\)\), 30\)/);
     assert.match(decorumHost, /findAndAttach\(\)/);
   });
 

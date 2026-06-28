@@ -270,12 +270,16 @@
   }
 
   .workspace-titlebar-menu-row {
+    position: relative;
+    z-index: 5;
     min-height: 32px;
     padding-left: 8px;
     border-bottom: 1px solid color-mix(in srgb, var(--app-border) 70%, transparent);
   }
 
   .workspace-titlebar-tab-row {
+    position: relative;
+    z-index: 5;
     min-height: 40px;
     padding: 5px 8px;
   }
@@ -289,7 +293,7 @@
   .workspace-tabs {
     min-width: 0;
     position: relative;
-    z-index: 1;
+    z-index: 6;
     flex: 0 1 auto;
     display: flex;
     overflow: auto;
@@ -298,7 +302,7 @@
 
   .workspace-app-menu {
     position: relative;
-    z-index: 1;
+    z-index: 6;
     flex: none;
     display: flex;
     align-items: center;
@@ -463,12 +467,13 @@
   .workspace-decorum-slot {
     flex: none;
     position: relative;
-    z-index: 2;
+    z-index: 0;
     width: 138px;
     height: 100%;
     display: grid;
     align-items: stretch;
     justify-content: end;
+    pointer-events: none;
   }
 
   .workspace-actions button {

@@ -4,8 +4,9 @@ use tauri::menu::AboutMetadata;
 use tauri::TitleBarStyle;
 use tauri::{
     menu::{CheckMenuItem, Menu, MenuItem, MenuItemKind, PredefinedMenuItem, Submenu},
-    AppHandle, Emitter, EventTarget, LogicalPosition, Manager, PhysicalPosition, PhysicalSize,
-    Runtime, Size, WebviewUrl, WebviewWindow, WebviewWindowBuilder, Window, WindowEvent,
+    AppHandle, Emitter, EventTarget, Listener, LogicalPosition, Manager, PhysicalPosition,
+    PhysicalSize, Runtime, Size, WebviewUrl, WebviewWindow, WebviewWindowBuilder, Window,
+    WindowEvent,
 };
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 use tauri_plugin_decorum::WebviewWindowExt;
@@ -27,7 +28,10 @@ use crate::{
 };
 use std::{
     env,
-    sync::{Mutex, OnceLock},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex, OnceLock,
+    },
 };
 
 const MAIN_WINDOW_LABEL: &str = "main";
@@ -94,6 +98,8 @@ const MIN_WINDOW_HEIGHT: f64 = 360.0;
 const DECORUM_TITLEBAR_REFRESH_ATTEMPTS: usize = 24;
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 const DECORUM_TITLEBAR_REFRESH_DELAY_MS: u64 = 100;
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+const DECORUM_TITLEBAR_READY_EVENT: &str = "decorum-titlebar-ready";
 static LAST_FOCUSED_MAIN_WINDOW: OnceLock<Mutex<String>> = OnceLock::new();
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 static DECORUM_TITLEBAR_WINDOWS: OnceLock<Mutex<std::collections::HashSet<String>>> =
@@ -376,7 +382,6 @@ pub(crate) fn build_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R
 
     let profile_menu = Submenu::with_items(app, labels.profile, true, &profile_children)?;
     let file_sep1 = PredefinedMenuItem::separator(app)?;
-    let file_sep2 = PredefinedMenuItem::separator(app)?;
     let file_sep3 = PredefinedMenuItem::separator(app)?;
     let file = Submenu::with_items(
         app,
@@ -608,7 +613,6 @@ pub(crate) fn build_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R
     let window_sep1 = PredefinedMenuItem::separator(app)?;
     let window_sep2 = PredefinedMenuItem::separator(app)?;
     let window_sep3 = PredefinedMenuItem::separator(app)?;
-    let window_sep4 = PredefinedMenuItem::separator(app)?;
     let window = Submenu::with_items(
         app,
         labels.window,
@@ -1044,7 +1048,6 @@ fn apply_decorum_titlebar(window: &WebviewWindow, integrated: bool) {
         }
     };
     if !labels.insert(window.label().to_string()) {
-        schedule_decorum_titlebar_refresh(window);
         return;
     }
     if let Err(error) = window.create_overlay_titlebar() {
@@ -1072,34 +1075,34 @@ fn apply_workspace_decorum_chrome(window: &WebviewWindow, integrated: bool) {
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 fn schedule_decorum_titlebar_refresh(window: &WebviewWindow) {
     let window = window.clone();
+    let ready = Arc::new(AtomicBool::new(false));
+    let ready_listener = {
+        let ready = Arc::clone(&ready);
+        window.listen_any(DECORUM_TITLEBAR_READY_EVENT, move |_| {
+            ready.store(true, Ordering::SeqCst);
+        })
+    };
     std::thread::spawn(move || {
-        for attempt in 0..DECORUM_TITLEBAR_REFRESH_ATTEMPTS {
-            if let Err(error) = window.emit("decorum-page-load", ()) {
-                log::warn!(
-                    "failed to request decorum titlebar refresh for {}: {error}",
-                    window.label()
-                );
+        let _ready_listener = ready_listener;
+        if let Err(error) = window.emit("decorum-page-load", ()) {
+            log::warn!(
+                "failed to request decorum titlebar refresh for {}: {error}",
+                window.label()
+            );
+        }
+        for _ in 0..DECORUM_TITLEBAR_REFRESH_ATTEMPTS {
+            if ready.load(Ordering::SeqCst) {
+                return;
             }
-            let script = r#"
-                (() => {
-                    const controls = document.querySelectorAll("[data-tauri-decorum-tb] .decorum-tb-btn");
-                    if (controls.length >= 3) return true;
-                    document.dispatchEvent(new Event("DOMContentLoaded"));
-                    return document.querySelectorAll("[data-tauri-decorum-tb] .decorum-tb-btn").length >= 3;
-                })();
-            "#;
-            match window.eval(script) {
-                Ok(_) => {}
-                Err(error) => log::warn!(
-                    "failed to dispatch decorum titlebar bootstrap event for {}: {error}",
-                    window.label()
-                ),
-            }
-            if attempt + 1 < DECORUM_TITLEBAR_REFRESH_ATTEMPTS {
-                std::thread::sleep(std::time::Duration::from_millis(
-                    DECORUM_TITLEBAR_REFRESH_DELAY_MS,
-                ));
-            }
+            std::thread::sleep(std::time::Duration::from_millis(
+                DECORUM_TITLEBAR_REFRESH_DELAY_MS,
+            ));
+        }
+        if !ready.load(Ordering::SeqCst) {
+            log::warn!(
+                "decorum titlebar refresh did not receive a ready acknowledgment for {}",
+                window.label()
+            );
         }
     });
 }
@@ -1422,7 +1425,6 @@ fn build_file_popup_menu<R: Runtime>(
     }
     let profile_menu = Submenu::with_items(app, labels.profile, true, &profile_children)?;
     let sep1 = PredefinedMenuItem::separator(app)?;
-    let sep2 = PredefinedMenuItem::separator(app)?;
     let sep3 = PredefinedMenuItem::separator(app)?;
     Menu::with_items(
         app,
@@ -1664,7 +1666,6 @@ fn build_window_popup_menu<R: Runtime>(
     let sep1 = PredefinedMenuItem::separator(app)?;
     let sep2 = PredefinedMenuItem::separator(app)?;
     let sep3 = PredefinedMenuItem::separator(app)?;
-    let sep4 = PredefinedMenuItem::separator(app)?;
     Menu::with_items(
         app,
         &[

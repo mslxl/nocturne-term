@@ -72,6 +72,7 @@ test("integrated titlebar decorum layout", { timeout: 180_000 }, async () => {
       nativeDriverPort: baseNativeDriverPort,
       configText: "",
       expectedLayout: "two-row",
+      expectedTheme: "light",
     });
     await runScenario({
       name: "enabled-single-row",
@@ -79,6 +80,15 @@ test("integrated titlebar decorum layout", { timeout: 180_000 }, async () => {
       nativeDriverPort: baseNativeDriverPort + 1,
       configText: "[ui]\nintegrated_titlebar = true\nintegrated_titlebar_single_row = true\n",
       expectedLayout: "single-row",
+      expectedTheme: "light",
+    });
+    await runScenario({
+      name: "dark-two-row",
+      driverPort: baseDriverPort + 2,
+      nativeDriverPort: baseNativeDriverPort + 2,
+      configText: "[ui]\ntheme = \"dark\"\nintegrated_titlebar = true\nintegrated_titlebar_single_row = false\n",
+      expectedLayout: "two-row",
+      expectedTheme: "dark",
     });
 
     console.log("tauri integrated titlebar decorum layout unit test passed");
@@ -86,7 +96,7 @@ test("integrated titlebar decorum layout", { timeout: 180_000 }, async () => {
     await devServer.close();
   }
 
-  async function runScenario({ name, driverPort, nativeDriverPort, configText, expectedLayout }) {
+  async function runScenario({ name, driverPort, nativeDriverPort, configText, expectedLayout, expectedTheme }) {
     const isolatedAppConfig = await createIsolatedAppConfigEnv(`integrated-titlebar-decorum-layout-${name}`);
     if (configText) {
       await writeFile(resolve(isolatedAppConfig.env.NOCTURNE_CONFIG_ROOT, "config.toml"), configText);
@@ -124,12 +134,13 @@ test("integrated titlebar decorum layout", { timeout: 180_000 }, async () => {
       );
 
       const state = await titlebarState(driverUrl, sessionId);
-      assertCommonTitlebarState(state, name);
+      assertCommonTitlebarState(state, name, expectedTheme);
       if (expectedLayout === "two-row") {
         assertTwoRowTitlebarState(state, name);
       } else {
         assertSingleRowTitlebarState(state, name);
       }
+      assertNoRepeatedDecorumBootstrapLogs(driverOutput, name);
     } finally {
       if (sessionId) {
         await webdriver(driverUrl, "DELETE", `/session/${sessionId}`).catch(() => undefined);
@@ -139,7 +150,10 @@ test("integrated titlebar decorum layout", { timeout: 180_000 }, async () => {
     }
   }
 
-  function assertCommonTitlebarState(state, name) {
+  function assertCommonTitlebarState(state, name, expectedTheme) {
+    if (state.resolvedTheme !== expectedTheme) {
+      throw new Error(`${name}: expected ${expectedTheme} theme, found ${state.resolvedTheme}\n${JSON.stringify(state, null, 2)}`);
+    }
     if (state.decorumHostCount !== 1) {
       throw new Error(`${name}: expected one decorum host, found ${state.decorumHostCount}\n${JSON.stringify(state, null, 2)}`);
     }
@@ -160,6 +174,9 @@ test("integrated titlebar decorum layout", { timeout: 180_000 }, async () => {
     }
     if (!state.appMenuRootsVisible) {
       throw new Error(`${name}: app menu roots were not visible\n${JSON.stringify(state, null, 2)}`);
+    }
+    if (!state.appMenuRootsClickable) {
+      throw new Error(`${name}: app menu roots were not clickable at their centers\n${JSON.stringify(state, null, 2)}`);
     }
     if (state.actionGapFromWorkspaceTab < 5 || state.actionGapFromWorkspaceTab > 16) {
       throw new Error(`${name}: New Workspace split button was not positioned next to Workspace tabs\n${JSON.stringify(state, null, 2)}`);
@@ -184,6 +201,18 @@ test("integrated titlebar decorum layout", { timeout: 180_000 }, async () => {
     }
     if (!state.newWorkspaceMatchesInactiveTabBackground) {
       throw new Error(`${name}: New Workspace button background did not match inactive tab button background\n${JSON.stringify(state, null, 2)}`);
+    }
+    if (!state.decorumButtonsHaveCssGlyphs || state.buttonStates?.some((button) => !button.glyphColorReadable)) {
+      throw new Error(`${name}: decorum glyph colors were not readable in the rendered theme\n${JSON.stringify(state, null, 2)}`);
+    }
+    if (expectedTheme === "dark" && state.buttonStates?.some((button) => button.glyphColorLooksBlack)) {
+      throw new Error(`${name}: decorum glyph colors were still black in dark mode\n${JSON.stringify(state, null, 2)}`);
+    }
+  }
+
+  function assertNoRepeatedDecorumBootstrapLogs(driverOutput, name) {
+    if (/DECORUM:\s*Controls already exist\. Skipping creation\./.test(driverOutput)) {
+      throw new Error(`${name}: decorum repeatedly attempted to create controls after they already existed\n${driverOutput}`);
     }
   }
 
@@ -251,6 +280,7 @@ test("integrated titlebar decorum layout", { timeout: 180_000 }, async () => {
         rects.every((rect) => Math.abs(rect.centerY - outer.centerY) <= 1)
       );
       const tabbar = document.querySelector('.workspace-tabbar');
+      const resolvedTheme = document.documentElement.dataset.theme ?? '';
       const menuRow = document.querySelector('.workspace-titlebar-menu-row');
       const tabRow = document.querySelector('.workspace-titlebar-tab-row');
       const workspaceTab = document.querySelector('.workspace-tab');
@@ -275,6 +305,19 @@ test("integrated titlebar decorum layout", { timeout: 180_000 }, async () => {
       const workspaceTabRect = rectOf(workspaceTab);
       const appMenuRect = rectOf(appMenu);
       const appMenuRootRects = appMenuRoots.map(rectOf).filter(Boolean);
+      const appMenuRootHitStates = appMenuRoots.map((root) => {
+        const rect = rectOf(root);
+        const centerElement = rect
+          ? document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2)
+          : null;
+        return {
+          id: root.getAttribute('data-app-menu-root'),
+          rect,
+          receivesPointerAtCenter: centerElement === root || root.contains(centerElement),
+          centerElementClassName: centerElement?.className ?? '',
+          centerElementTagName: centerElement?.tagName ?? '',
+        };
+      });
       const splitButtonRect = rectOf(splitButton);
       const newWorkspaceRect = rectOf(newWorkspace);
       const inactiveWorkspaceActivateStyle = inactiveWorkspaceActivate ? getComputedStyle(inactiveWorkspaceActivate) : null;
@@ -302,6 +345,34 @@ test("integrated titlebar decorum layout", { timeout: 180_000 }, async () => {
             pseudo.borderTopWidth !== '0px' ||
             pseudo.backgroundColor !== 'rgba(0, 0, 0, 0)'
           );
+        const parseColor = (value) => {
+          const rgb = value.match(/rgba?\(([\d.]+),\s*([\d.]+),\s*([\d.]+)(?:,\s*([\d.]+))?\)/i);
+          if (rgb) {
+            return {
+              red: Number(rgb[1]),
+              green: Number(rgb[2]),
+              blue: Number(rgb[3]),
+              alpha: rgb[4] === undefined ? 1 : Number(rgb[4]),
+            };
+          }
+          const srgb = value.match(/color\\(srgb\\s+([\\d.]+)\\s+([\\d.]+)\\s+([\\d.]+)(?:\\s*\\/\\s*([\\d.]+))?\\)/i);
+          if (srgb) {
+            return {
+              red: Number(srgb[1]) * 255,
+              green: Number(srgb[2]) * 255,
+              blue: Number(srgb[3]) * 255,
+              alpha: srgb[4] === undefined ? 1 : Number(srgb[4]),
+            };
+          }
+          return null;
+        };
+        const glyphColors = [beforeStyle.color, afterStyle.color].map(parseColor).filter(Boolean);
+        const glyphColorLooksBlack = glyphColors.some((color) =>
+          color.alpha > 0.5 &&
+          color.red < 80 &&
+          color.green < 80 &&
+          color.blue < 80
+        );
         return {
           text: button.textContent,
           id: button.id,
@@ -338,11 +409,16 @@ test("integrated titlebar decorum layout", { timeout: 180_000 }, async () => {
             height: afterStyle.height,
           },
           cssGlyphVisible: cssGlyphVisible(beforeStyle) || cssGlyphVisible(afterStyle),
+          glyphColorReadable: [beforeStyle.color, afterStyle.color].some((color) =>
+            color !== 'rgba(0, 0, 0, 0)' && color !== 'transparent'
+          ),
+          glyphColorLooksBlack,
           rect,
           receivesPointerAtCenter: centerElement === button || button.contains(centerElement),
         };
       });
       return {
+        resolvedTheme,
         bodyText: document.body?.innerText?.slice(0, 1000) ?? '',
         tabbarClassName: tabbar?.className ?? '',
         isTwoRow: tabbar?.classList.contains('titlebar-two-row') ?? false,
@@ -353,6 +429,7 @@ test("integrated titlebar decorum layout", { timeout: 180_000 }, async () => {
         appMenuRootCount: appMenuRoots.length,
         appMenuRootIds: appMenuRoots.map((root) => root.getAttribute('data-app-menu-root')),
         appMenuRootsVisible: appMenuRootRects.length === 4 && appMenuRootRects.every((rect) => rect.width > 20 && rect.height >= 24),
+        appMenuRootsClickable: appMenuRootHitStates.length === 4 && appMenuRootHitStates.every((root) => root.receivesPointerAtCenter),
         appMenuSeparatedFromWorkspaceTabs: Boolean(
           appMenuRect &&
           workspaceTabRect &&
@@ -458,6 +535,7 @@ test("integrated titlebar decorum layout", { timeout: 180_000 }, async () => {
           buttons: buttonRects,
         },
         buttonStates,
+        appMenuRootHitStates,
       };
     `);
   }

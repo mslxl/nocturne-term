@@ -38,7 +38,6 @@
   import { dockSplitGridTemplate, resizeWorkspaceDockSplit } from "$lib/workspace/dock/resize";
   import WorkspaceDockGroup from "$lib/workspace/components/WorkspaceDockGroup.svelte";
   import WorkspaceTabBar from "$lib/workspace/components/WorkspaceTabBar.svelte";
-  import { mountDecorumTitlebarHost } from "$lib/window/decorum-titlebar";
   import { createWorkspaceStore } from "$lib/workspace/state.svelte";
   import { unwrapCommand } from "$lib/terminal/commands";
   import { addNonLoopbackConfirmation } from "$lib/ports/editing";
@@ -305,6 +304,8 @@
   let activeToolSlotOverrideRevision = $state(0);
   let suppressToolTabClickSlotId = "";
   let reloadSnapshotQueued = false;
+  let loadSettingsPromise: Promise<void> | null = null;
+  let loadSettingsQueued = false;
   let pageMounted = false;
   let toolTabPointerDrag = $state<{
     workspaceId: string;
@@ -436,6 +437,24 @@
   }
 
   async function loadSettings() {
+    if (loadSettingsPromise) {
+      loadSettingsQueued = true;
+      return loadSettingsPromise;
+    }
+    loadSettingsPromise = (async () => {
+      try {
+        do {
+          loadSettingsQueued = false;
+          await loadSettingsOnce();
+        } while (loadSettingsQueued);
+      } finally {
+        loadSettingsPromise = null;
+      }
+    })();
+    return loadSettingsPromise;
+  }
+
+  async function loadSettingsOnce() {
     settingsError = "";
     if (!hasTauriRuntime()) {
       const root = { values: {} };
@@ -1835,17 +1854,10 @@
       (item) => item.host_id === workspace.host_id && !closingWorkspaceIds.includes(item.id),
     );
     if (remainingSameHost) return true;
-    const ports = await unwrapCommand(commands.getPortForwardSnapshot(workspace.host_id));
-    const active = ports.rules.filter((item) =>
-      item.runtime.status === "starting" ||
-      item.runtime.status === "running" ||
-      item.runtime.status === "reconnecting",
-    );
-    if (active.length === 0) return true;
+    const requiresConfirmation = await unwrapCommand(commands.hostPortForwardCloseRequiresConfirmationCommand(workspace.host_id));
+    if (!requiresConfirmation) return true;
     const confirmed = await ask(
-      active.length === 1
-        ? "Close this workspace and stop 1 active port forward?"
-        : `Close this workspace and stop ${active.length} active port forwards?`,
+      "Close this workspace and stop active port forwards?",
       {
         title: "Close Workspace",
         kind: "warning",
@@ -1857,8 +1869,12 @@
 
   async function confirmAutoOpenPortForwardRisks(snapshot: WorkspaceLayoutSnapshot | null = workspaceSnapshot) {
     if (!snapshot || floatingWindowId || !hasTauriRuntime()) return;
-    const hostIds = Array.from(new Set(snapshot.workspaces.map((workspace) => workspace.host_id)));
+    const hostIds = Array.from(new Set(snapshot.tool_tabs
+      .filter((tool) => tool.kind === "ports")
+      .map((tool) => tool.host_id)));
     for (const hostId of hostIds) {
+      const host = lastConfigSnapshot?.hosts.find((item) => item.id === hostId);
+      if (host?.document.protocol !== "ssh") continue;
       const ports = await unwrapCommand(commands.getPortForwardSnapshot(hostId));
       for (const row of ports.rules) {
         if (row.runtime.status !== "needs_confirmation" || row.runtime.persistence !== "saved" || !row.rule.connect_on_host_open) continue;
@@ -4537,9 +4553,6 @@
             aria-hidden="true"
             data-tauri-drag-region={integratedTitlebar ? true : undefined}
           ></div>
-          {#if integratedTitlebarChrome === "decorum"}
-            <div class="workspace-decorum-slot" aria-hidden="true" use:mountDecorumTitlebarHost></div>
-          {/if}
         </div>
         <div class="workspace-tabbar-loading-tab-row" aria-hidden="true"></div>
       {:else}
@@ -4549,9 +4562,6 @@
           aria-hidden="true"
           data-tauri-drag-region={integratedTitlebar ? true : undefined}
         ></div>
-        {#if integratedTitlebarChrome === "decorum"}
-          <div class="workspace-decorum-slot" aria-hidden="true" use:mountDecorumTitlebarHost></div>
-        {/if}
       {/if}
     </div>
   {/if}
@@ -4978,9 +4988,9 @@
       }}
     />
   {:else if tool.kind === "resources"}
-    <ResourceMonitorToolTab toolTab={tool} workspaceId={effectiveWorkspace.id} viewId={slot.id} />
+    <ResourceMonitorToolTab toolTab={tool} workspaceId={effectiveWorkspace.id} viewId={slot.id} {active} />
   {:else if tool.kind === "ports"}
-    <PortsToolTab toolTab={tool} host={connectionHostForToolTab(tool)} />
+    <PortsToolTab toolTab={tool} host={connectionHostForToolTab(tool)} {active} />
   {:else}
     {@const terminalMode = terminalRenderMode(workspace, effectiveWorkspace)}
     {@const runtime = terminalRuntimeForToolTab(tool.id)}
@@ -5174,6 +5184,7 @@
     display: grid;
     align-items: stretch;
     justify-content: end;
+    pointer-events: none;
   }
 
   .workspace.integrated-titlebar-decorum :global(.workspace-decorum-controls) {
@@ -5214,6 +5225,13 @@
     -webkit-text-stroke: 0 transparent !important;
     -webkit-font-smoothing: antialiased !important;
     cursor: default !important;
+    pointer-events: auto !important;
+  }
+
+  .workspace.integrated-titlebar-decorum :global(button.decorum-tb-btn:hover),
+  .workspace.integrated-titlebar-decorum :global(button.decorum-tb-btn:focus-visible) {
+    color: transparent !important;
+    background: color-mix(in srgb, var(--app-fg) 11%, transparent) !important;
   }
 
   .workspace.integrated-titlebar-decorum :global(button.decorum-tb-btn::before),
@@ -5223,7 +5241,7 @@
     box-sizing: border-box;
     display: block;
     pointer-events: none;
-    color: color-mix(in srgb, var(--app-fg) 74%, transparent);
+    color: color-mix(in srgb, var(--app-fg) 94%, transparent);
   }
 
   .workspace.integrated-titlebar-decorum :global(#decorum-tb-minimize::before) {
